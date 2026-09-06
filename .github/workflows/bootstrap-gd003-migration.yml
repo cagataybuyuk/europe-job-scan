@@ -5,7 +5,7 @@ on:
     branches:
       - migration/github-cicd-baseline
     paths:
-      - 'migration/bundle/part141'
+      - 'migration/bundle/part142'
 
 permissions:
   contents: write
@@ -22,7 +22,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat migration/bundle/part00 migration/bundle/part01 migration/bundle/part02 migration/bundle/part03 migration/bundle/part04 migration/bundle/part05 migration/bundle/part06 migration/bundle/part07 migration/bundle/part08 migration/bundle/part09 migration/bundle/part10 migration/bundle/part11 migration/bundle/part120 migration/bundle/part121 migration/bundle/part130 migration/bundle/part131 migration/bundle/part140 migration/bundle/part141 > /tmp/ejs_stage.b64
+          cat migration/bundle/part00 migration/bundle/part01 migration/bundle/part02 migration/bundle/part03 migration/bundle/part04 migration/bundle/part05 migration/bundle/part06 migration/bundle/part07 migration/bundle/part08 migration/bundle/part09 migration/bundle/part10 migration/bundle/part11 migration/bundle/part120 migration/bundle/part121 migration/bundle/part122 migration/bundle/part123 migration/bundle/part130 migration/bundle/part131 migration/bundle/part132 migration/bundle/part133 migration/bundle/part140 migration/bundle/part141 migration/bundle/part142 > /tmp/ejs_stage.b64
           base64 --decode /tmp/ejs_stage.b64 > /tmp/ejs_stage.zip
           echo '4ac31ee4e71108d8e5e7083f74fe0ceb7745f54b43cd1e964b50d9f173b73a40  /tmp/ejs_stage.zip' | sha256sum -c -
           rm -rf /tmp/ejs_stage
