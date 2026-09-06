@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+.clasprc.json
+.clasp.json
+*.pem
+*.key
+*.p12
+*service-account*.json
+credentials*.json
+token*.json
+
+# Build / reports
+build/
+dist/
+*.egg-info/
+coverage.xml
+htmlcov/
+artifacts/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
