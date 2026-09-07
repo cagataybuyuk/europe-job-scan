@@ -24,7 +24,8 @@ jobs:
           bash -n infra/cloud-run/provision_github_wif_test.sh
       - name: Assert Cloud Run TEST workflow remains keyless and private
         run: |
-          ! grep -Eq 'credentials_json|service-account-key|allow-unauthenticated' .github/workflows/deploy-test-cloud-run.yml
+          ! grep -Eq 'credentials_json|service-account-key' .github/workflows/deploy-test-cloud-run.yml
+          ! grep -Eq -- '(^|[[:space:]])--allow-unauthenticated([[:space:]]|$)' .github/workflows/deploy-test-cloud-run.yml
           grep -q -- '--no-allow-unauthenticated' .github/workflows/deploy-test-cloud-run.yml
           grep -q 'workload_identity_provider' .github/workflows/deploy-test-cloud-run.yml
           grep -q -- '--service-account' .github/workflows/deploy-test-cloud-run.yml
