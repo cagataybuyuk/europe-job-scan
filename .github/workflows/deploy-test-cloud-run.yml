@@ -78,19 +78,20 @@ jobs:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID_TEST }}
           REGION: europe-west1
           SERVICE: ejs-browser-worker-test
-          REPO: ejs-browser-test
           SHA: ${{ inputs.expected_sha }}
+          EXPECTED_RUNTIME_SA: ejs-browser-runtime-test@${{ vars.GCP_PROJECT_ID_TEST }}.iam.gserviceaccount.com
+          EXPECTED_INVOKER_SA: ejs-appscript-invoker-test@${{ vars.GCP_PROJECT_ID_TEST }}.iam.gserviceaccount.com
+          EXPECTED_IMAGE: europe-west1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID_TEST }}/ejs-browser-test/ejs-browser-worker:${{ inputs.expected_sha }}
         run: |
           set -euo pipefail
-          EXPECTED_RUNTIME_SA="ejs-browser-runtime-test@${PROJECT_ID}.iam.gserviceaccount.com"
-          EXPECTED_INVOKER_SA="ejs-appscript-invoker-test@${PROJECT_ID}.iam.gserviceaccount.com"
-          EXPECTED_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/ejs-browser-worker:${SHA}"
           gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format=json > /tmp/ejs-service.json
           gcloud run services get-iam-policy "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format=json > /tmp/ejs-policy.json
           python - <<'PY'
           import json, os
-          service = json.load(open('/tmp/ejs-service.json', encoding='utf-8'))
-          policy = json.load(open('/tmp/ejs-policy.json', encoding='utf-8'))
+          with open('/tmp/ejs-service.json', encoding='utf-8') as handle:
+              service = json.load(handle)
+          with open('/tmp/ejs-policy.json', encoding='utf-8') as handle:
+              policy = json.load(handle)
           spec = service['spec']['template']['spec']
           containers = spec['containers']
           assert len(containers) == 1, containers
@@ -111,12 +112,3 @@ jobs:
           print('latest_ready_revision=' + service['status']['latestReadyRevisionName'])
           print('service_url=' + service['status']['url'])
           PY
-        env:
-          PROJECT_ID: ${{ vars.GCP_PROJECT_ID_TEST }}
-          REGION: europe-west1
-          SERVICE: ejs-browser-worker-test
-          REPO: ejs-browser-test
-          SHA: ${{ inputs.expected_sha }}
-          EXPECTED_RUNTIME_SA: ejs-browser-runtime-test@${{ vars.GCP_PROJECT_ID_TEST }}.iam.gserviceaccount.com
-          EXPECTED_INVOKER_SA: ejs-appscript-invoker-test@${{ vars.GCP_PROJECT_ID_TEST }}.iam.gserviceaccount.com
-          EXPECTED_IMAGE: europe-west1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID_TEST }}/ejs-browser-test/ejs-browser-worker:${{ inputs.expected_sha }}
