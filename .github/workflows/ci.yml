@@ -18,6 +18,17 @@ jobs:
           python-version: '3.12'
       - run: python scripts/ci/secret_scan.py
       - run: python scripts/ci/verify_authority_boundaries.py
+      - name: Validate TEST provisioning shell syntax
+        run: |
+          bash -n google_native/cloud_run/deploy/bootstrap_test.sh
+          bash -n infra/cloud-run/provision_github_wif_test.sh
+      - name: Assert Cloud Run TEST workflow remains keyless and private
+        run: |
+          ! grep -Eq 'credentials_json|service-account-key' .github/workflows/deploy-test-cloud-run.yml
+          ! grep -Eq -- '(^|[[:space:]])--allow-unauthenticated([[:space:]]|$)' .github/workflows/deploy-test-cloud-run.yml
+          grep -q -- '--no-allow-unauthenticated' .github/workflows/deploy-test-cloud-run.yml
+          grep -q 'workload_identity_provider' .github/workflows/deploy-test-cloud-run.yml
+          grep -q -- '--service-account' .github/workflows/deploy-test-cloud-run.yml
 
   core-regression:
     runs-on: ubuntu-latest
