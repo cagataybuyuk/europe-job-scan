@@ -1,0 +1,29 @@
+{
+  "freeze_id": "EJS-MW0-20260817-01",
+  "freeze_date": "2026-08-17",
+  "workspace_authority": "EU Job Tracker Google Sheet",
+  "spreadsheet_id": "1_HuYScTMsVmr29SBeaMRbZqOFiZ3gZLUcFm05xnaYIg",
+  "active_rule_bundle": "EJS-BUNDLE-1.4",
+  "active_contract_count": 14,
+  "core_contracts": {
+    "SERVICE-SCHEMA-1.0": "v1.0",
+    "SOURCE-ADAPTER-1.0": "v1.0",
+    "STATE-1.0": "v1.0",
+    "IDEMPOTENCY-STATE-1.0": "v1.0",
+    "REGRESSION-1.0": "v1.0",
+    "ANSWER-RESOLVER-1.0": "v1.0",
+    "READINESS-1.0": "v1.0",
+    "MIGRATION-ENV-1.0": "v1.0"
+  },
+  "in_development_contracts": [
+    "PREFILL-EXEC-0.1",
+    "SMARTRECRUITERS-INSPECTOR-0.1",
+    "GREENHOUSE-INSPECTOR-0.1",
+    "HIREHIVE-INSPECTOR-0.1"
+  ],
+  "regression_fixture_count": 60,
+  "live_invariant_count": 20,
+  "mutation_scenario_count": 12,
+  "write_authority": "NONE",
+  "browser_execution_enabled": false
+}

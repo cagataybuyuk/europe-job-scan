@@ -1,0 +1,112 @@
+{
+  "capture_id": "EJS-MW1-CAPTURE-20260817-02",
+  "spreadsheet_id": "1_HuYScTMsVmr29SBeaMRbZqOFiZ3gZLUcFm05xnaYIg",
+  "captured_at": "2026-08-17",
+  "surfaces": {
+    "candidate_profile": {
+      "Current Title": "Synthetic Test Title",
+      "Current Location": "Synthetic Test Location",
+      "Notice Period": "Synthetic Test Notice",
+      "English": "Synthetic Test English",
+      "Target Countries": "Synthetic Test Countries",
+      "Sponsorship Constraint": "Synthetic Test Constraint"
+    },
+    "rule_registry": {
+      "active_rule_bundle": "EJS-BUNDLE-1.4",
+      "active_rule_count": 14,
+      "active_rule_ids": [
+        "ROLEFIT-1.0",
+        "OPPORTUNITY-1.0",
+        "AUTOREVIEW-1.0",
+        "SALARY-1.0",
+        "QUALITY-1.0",
+        "WATCHLIST-1.0",
+        "STATE-1.0",
+        "MANUALREVIEW-1.0",
+        "INTERVIEWPREP-1.0",
+        "IDEMPOTENCY-STATE-1.0",
+        "ANSWER-RESOLVER-1.0",
+        "READINESS-1.0",
+        "REGRESSION-1.0",
+        "MIGRATION-ENV-1.0"
+      ],
+      "in_development_rule_ids": [
+        "PREFILL-EXEC-0.1",
+        "SMARTRECRUITERS-INSPECTOR-0.1",
+        "GREENHOUSE-INSPECTOR-0.1",
+        "HIREHIVE-INSPECTOR-0.1"
+      ],
+      "regression_fixture_count": 60
+    },
+    "applications": {
+      "total_tracked": 52,
+      "to_apply": 12,
+      "applied_current": 5,
+      "rejected_current": 11,
+      "applications_submitted": 16
+    },
+    "source_targeting": {
+      "configured_source_count": 11,
+      "sources": [
+        "Google / Web Search",
+        "Direct Employer Career Pages",
+        "LinkedIn Jobs",
+        "Indeed",
+        "Glassdoor",
+        "Welcome to the Jungle",
+        "EURES",
+        "StepStone",
+        "IrishJobs",
+        "Jobs.ie",
+        "JobsIreland"
+      ]
+    },
+    "cv_base_library": {
+      "base_count": 4,
+      "bases": [
+        "Master CV",
+        "Base - Transformation & BA",
+        "Base - ERP / D365",
+        "Base - Data & Analytics"
+      ],
+      "ready_pdf_count": 4
+    },
+    "application_answer_library": {
+      "question_type_count": 24,
+      "question_types": [
+        "First name",
+        "Last name",
+        "Email",
+        "Phone",
+        "Current location",
+        "Notice period",
+        "Relocation",
+        "Work authorization",
+        "Visa sponsorship",
+        "English proficiency",
+        "Education",
+        "D365 / ERP experience",
+        "Why this role?",
+        "Why this company?",
+        "Years of experience",
+        "Salary expectation",
+        "Gender / demographic self-identification",
+        "Privacy / terms consent",
+        "Criminal / health / protected sensitive questions",
+        "Employer relationship / prior employment",
+        "Full postal address",
+        "Full driving licence",
+        "Onsite availability",
+        "Reusable factual lookup"
+      ]
+    }
+  },
+  "read_fence": {
+    "total_tracked": 52,
+    "applications_submitted": 16,
+    "stage_changes_logged": 78,
+    "application_row_count": 52,
+    "last_application_date": "2026-08-17",
+    "last_application_company": "Rituals"
+  }
+}

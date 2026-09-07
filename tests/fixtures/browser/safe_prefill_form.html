@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Safe Prefill Fixture</title></head>
+<body>
+  <main>
+    <h1>Business Analyst</h1>
+    <form id="application-form" onsubmit="window.__submitted = true; return false;">
+      <label for="firstName">First name *</label>
+      <input id="firstName" name="firstName" type="text" autocomplete="given-name" required>
+
+      <label for="lastName">Last name *</label>
+      <input id="lastName" name="lastName" type="text" autocomplete="family-name" required>
+
+      <label for="email">Email *</label>
+      <input id="email" name="email" type="email" autocomplete="email" required>
+
+      <label for="phone">Phone</label>
+      <input id="phone" name="phone" type="tel" autocomplete="tel">
+
+      <label for="linkedin">LinkedIn</label>
+      <input id="linkedin" name="linkedin" type="url">
+
+      <label for="noticePeriod">Notice Period *</label>
+      <select id="noticePeriod" name="noticePeriod" required>
+        <option value="">Select</option>
+        <option>2 weeks</option>
+        <option>4 weeks</option>
+        <option>8 weeks</option>
+      </select>
+
+      <label for="motivation">Why this role?</label>
+      <textarea id="motivation" name="motivation" maxlength="200"></textarea>
+
+      <label for="salary">Salary expectation</label>
+      <input id="salary" name="salary" type="text">
+
+      <label for="cv">CV / Resume *</label>
+      <input id="cv" name="cv" type="file" required>
+
+      <label><input id="privacy" name="privacy" type="checkbox" required> I acknowledge the Privacy Notice *</label>
+      <label><input id="marketing" name="marketing" type="checkbox"> Join the talent community</label>
+
+      <label for="gender">Gender</label>
+      <select id="gender" name="gender"><option value="">Prefer not to say</option><option>Female</option><option>Male</option></select>
+
+      <button id="submitApplication" type="submit">Submit application</button>
+      <div id="submitMarker"></div>
+    </form>
+  </main>
+  <script>window.__submitted = false;</script>
+</body>
+</html>

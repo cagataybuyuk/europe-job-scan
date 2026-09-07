@@ -1,0 +1,4 @@
+{
+  "scriptId": "${EJS_APPS_SCRIPT_ID_TEST}",
+  "rootDir": "."
+}
