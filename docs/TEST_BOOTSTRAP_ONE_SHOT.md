@@ -81,6 +81,7 @@ The Google account owner must enable the Apps Script API for their account and a
 From the repository root:
 
 ```bash
+REPO_DIR="$(pwd)"
 npm install
 npx clasp login --no-localhost
 ```
@@ -92,12 +93,10 @@ Create the standalone TEST script in a temporary directory so repository source 
 ```bash
 mkdir -p /tmp/ejs-apps-script-bootstrap
 cd /tmp/ejs-apps-script-bootstrap
-npx --prefix "$HOME/europe-job-scan" clasp create --title "Europe Job Scan TEST Control Plane" --type standalone
+"$REPO_DIR/node_modules/.bin/clasp" create --title "Europe Job Scan TEST Control Plane" --type standalone
 SCRIPT_ID="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('.clasp.json','utf8')); process.stdout.write(p.scriptId)")"
 echo "TEST Script ID created: ${SCRIPT_ID}"
 ```
-
-If the repository was cloned somewhere other than `$HOME/europe-job-scan`, use that actual repository path for `--prefix` or run the repository-local `npx clasp` command from a shell where `@google/clasp` is available.
 
 ### Bind the standalone Apps Script project to the same TEST Google Cloud project
 
@@ -114,7 +113,7 @@ This browser setting is a user-owned Google trust/configuration action and is in
 Return to the repository directory and set the Script ID variable plus encrypted clasp OAuth secret directly with GitHub CLI:
 
 ```bash
-cd "$HOME/europe-job-scan"  # adjust if cloned elsewhere
+cd "$REPO_DIR"
 
 gh variable set EJS_APPS_SCRIPT_ID_TEST --body "$SCRIPT_ID"
 gh secret set EJS_CLASPRC_JSON_TEST < "$HOME/.clasprc.json"
