@@ -1,0 +1,48 @@
+name: Deploy TEST Apps Script
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact commit SHA approved for TEST deployment
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+      - name: Assert exact immutable source
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ inputs.expected_sha }}"
+          test -n "${{ vars.EJS_APPS_SCRIPT_ID_TEST }}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm install
+      - name: Materialize clasp TEST mapping and OAuth auth
+        shell: bash
+        env:
+          SCRIPT_ID: ${{ vars.EJS_APPS_SCRIPT_ID_TEST }}
+          CLASPRC_JSON: ${{ secrets.EJS_CLASPRC_JSON_TEST }}
+        run: |
+          test -n "$SCRIPT_ID"
+          test -n "$CLASPRC_JSON"
+          printf '{"scriptId":"%s","rootDir":"."}\n' "$SCRIPT_ID" > google_native/apps_script/.clasp.json
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+      - name: Push canonical TEST Apps Script source
+        working-directory: google_native/apps_script
+        run: npx clasp push --force
+      - name: Clean auth material
+        if: always()
+        shell: bash
+        run: rm -f "$HOME/.clasprc.json" google_native/apps_script/.clasp.json

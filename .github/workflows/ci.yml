@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  static-guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/ci/secret_scan.py
+      - run: python scripts/ci/verify_authority_boundaries.py
+
+  core-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - name: Run 143 core tests
+        run: >-
+          python -m pytest -q
+          tests/unit/test_connector_capture.py
+          tests/unit/test_decision_shadow.py
+          tests/unit/test_environment.py
+          tests/unit/test_freeze.py
+          tests/unit/test_google_native_gd002.py
+          tests/unit/test_mw3_append_only.py
+          tests/unit/test_mw4a_derived_state.py
+          tests/unit/test_mw4b_canary.py
+          tests/unit/test_mw4c_user_action_projection.py
+          tests/unit/test_mw5_executor.py
+          tests/unit/test_mw5_guarded_mutation.py
+          tests/unit/test_read_fence.py
+          tests/unit/test_shadow.py
+          tests/unit/test_submit1_policy.py
+          tests/unit/test_tmh1_history.py
+
+  browser-prefill-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Run 38 browser/prefill tests
+        run: python -m pytest -q tests/unit/test_be1_browser_worker.py tests/unit/test_be2_safe_field_writer.py
+
+  upload-e2e-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Run 40 upload/E2E tests
+        run: python -m pytest -q tests/unit/test_file1_upload_runtime.py tests/unit/test_smartrecruiters_e2e.py
