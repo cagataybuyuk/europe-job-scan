@@ -101,11 +101,13 @@ gcloud iam service-accounts add-iam-policy-binding "$DEPLOY_SA" \
   --member "$WIF_MEMBER" \
   --role roles/iam.workloadIdentityUser >/dev/null
 
-echo "[7/9] Grant deployment permissions to the TEST deploy SA"
+echo "[7/9] Grant deployment and manual-build submission permissions to the TEST deploy SA"
 for ROLE in \
   roles/cloudbuild.builds.editor \
   roles/run.admin \
   roles/artifactregistry.reader \
+  roles/storage.bucketViewer \
+  roles/storage.objectUser \
   roles/serviceusage.serviceUsageConsumer; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${DEPLOY_SA}" \
@@ -121,7 +123,9 @@ echo "[8/9] Grant build-time permissions to the project's actual default Cloud B
 BUILD_SA="$(gcloud builds get-default-service-account --project "$PROJECT_ID")"
 for ROLE in \
   roles/artifactregistry.writer \
-  roles/logging.logWriter; do
+  roles/logging.logWriter \
+  roles/storage.bucketViewer \
+  roles/storage.objectUser; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${BUILD_SA}" \
     --role="$ROLE" >/dev/null
@@ -151,6 +155,7 @@ GCP_DEPLOY_SERVICE_ACCOUNT_TEST=${DEPLOY_SA}
 
 Security boundary:
 - provider admits only repository_id ${GITHUB_REPOSITORY_ID}, owner_id ${GITHUB_OWNER_ID}, refs/heads/main, environment=test, and the exact Cloud Run deploy workflow_ref;
+- storage roles apply only inside this dedicated TEST project and are required for manual Cloud Build source staging/log access;
 - no service-account JSON key is created;
 - this script grants no PROD application/form/submit authority.
 EOF
