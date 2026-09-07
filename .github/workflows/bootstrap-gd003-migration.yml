@@ -6,7 +6,6 @@ on:
       - migration/github-cicd-baseline
     paths:
       - '.github/workflows/bootstrap-gd003-migration.yml'
-      - 'migration/bundle/part023'
 
 permissions:
   contents: write
@@ -29,23 +28,22 @@ jobs:
           rm -rf /tmp/ejs_stage
           mkdir -p /tmp/ejs_stage
           unzip -q /tmp/ejs_stage.zip -d /tmp/ejs_stage
-          rsync -a --delete --exclude='.git/' --exclude='migration/' /tmp/ejs_stage/ ./
-      - name: Remove one-shot bootstrap artifacts
+          rsync -a --delete --exclude='.git/' --exclude='migration/' --exclude='.github/workflows/' /tmp/ejs_stage/ ./
+      - name: Remove staged bundle markers
         shell: bash
         run: |
           rm -rf migration/bundle
-          rm -f .github/workflows/bootstrap-gd003-migration.yml
           rm -f .github/CANONICAL_SOURCE_PENDING
       - name: Validate guards before commit
         shell: bash
         run: |
           python scripts/ci/secret_scan.py
           python scripts/ci/verify_authority_boundaries.py
-      - name: Commit canonical migration tree
+      - name: Commit canonical non-workflow source
         shell: bash
         run: |
           git config user.name 'ejs-gd003-bot'
           git config user.email '74713279+cagataybuyuk@users.noreply.github.com'
           git add -A
-          git commit -m 'feat(gd-003): migrate 0.12.0a1 canonical source and CI/CD'
+          git commit -m 'feat(gd-003): migrate 0.12.0a1 canonical source'
           git push origin HEAD:migration/github-cicd-baseline
