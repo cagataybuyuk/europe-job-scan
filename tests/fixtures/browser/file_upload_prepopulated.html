@@ -1,0 +1,8 @@
+<!doctype html><html><head><title>Prepopulated File</title></head><body><form>
+<label for="cv">CV *</label><input id="cv" name="cv" type="file" accept="application/pdf" required>
+<button type="submit">Submit</button></form>
+<script>
+const bytes=new Uint8Array([37,80,68,70,45,49,46,52,10,37,32,70,73,76,69,45,49,32,102,105,120,116,117,114,101,10,49,32,48,32,111,98,106,10,60,60,62,62,10,101,110,100,111,98,106,10,116,114,97,105,108,101,114,10,60,60,62,62,10,37,37,69,79,70,10]);
+const file=new File([bytes], 'test_cv.pdf', {type:'application/pdf'});
+const dt=new DataTransfer();dt.items.add(file);document.getElementById('cv').files=dt.files;
+</script></body></html>

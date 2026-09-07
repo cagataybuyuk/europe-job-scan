@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Safe Prefill Prepopulated Fixture</title></head>
+<body>
+<form id="application-form" onsubmit="window.__submitted = true; return false;">
+  <label for="firstName">First name *</label>
+  <input id="firstName" name="firstName" type="text" value="Test" required>
+  <label for="email">Email *</label>
+  <input id="email" name="email" type="email" value="test@example.com" required>
+  <button id="submitApplication" type="submit">Submit application</button>
+</form>
+<script>window.__submitted = false;</script>
+</body>
+</html>
