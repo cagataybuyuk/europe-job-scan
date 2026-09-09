@@ -29,6 +29,17 @@ jobs:
           grep -q -- '--no-allow-unauthenticated' .github/workflows/deploy-test-cloud-run.yml
           grep -q 'workload_identity_provider' .github/workflows/deploy-test-cloud-run.yml
           grep -q -- '--service-account' .github/workflows/deploy-test-cloud-run.yml
+      - name: Assert GD-004 zero-cost safety boundary
+        run: |
+          grep -q "EJS_LIVE_READ_ONLY: 'true'" .github/workflows/gd004-test-browser.yml
+          grep -q "EJS_FORM_WRITE: 'false'" .github/workflows/gd004-test-browser.yml
+          grep -q "EJS_FILE_UPLOAD: 'false'" .github/workflows/gd004-test-browser.yml
+          grep -q "EJS_FINAL_SUBMIT: 'false'" .github/workflows/gd004-test-browser.yml
+          grep -q "EJS_KILL_SWITCH: 'true'" .github/workflows/gd004-test-browser.yml
+          ! grep -q 'cloud-platform' google_native/apps_script_zero_cost/appsscript.json
+          grep -q "GD004_FINAL_SUBMIT_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
+          grep -q "GD004_FILE_UPLOAD_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
+          grep -q "GD004_FORM_WRITE_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
 
   core-regression:
     runs-on: ubuntu-latest
@@ -86,3 +97,19 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - name: Run 40 upload/E2E tests
         run: python -m pytest -q tests/unit/test_file1_upload_runtime.py tests/unit/test_smartrecruiters_e2e.py
+
+  gd004-zero-cost-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Run GD-004 signed contract tests
+        run: python -m pytest -q tests/unit/test_gd004_contract.py
+      - name: Run GD-004 GitHub-hosted Chromium smoke
+        run: python -m pytest -q tests/unit/test_gd004_browser.py
