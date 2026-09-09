@@ -28,9 +28,10 @@ for p in ROOT.rglob('*'):
     for name, rx in PATTERNS.items():
         if rx.search(text):
             issues.append(f'{rel}:{name}')
-for forbidden in ['.clasprc.json', '.clasp.json']:
-    if (ROOT / 'google_native/apps_script' / forbidden).exists():
-        issues.append(f'google_native/apps_script/{forbidden}:forbidden_auth_or_runtime_mapping_file')
+for apps_root in ['google_native/apps_script', 'google_native/apps_script_zero_cost']:
+    for forbidden in ['.clasprc.json', '.clasp.json']:
+        if (ROOT / apps_root / forbidden).exists():
+            issues.append(f'{apps_root}/{forbidden}:forbidden_auth_or_runtime_mapping_file')
 if issues:
     print('\n'.join(issues))
     sys.exit(1)
