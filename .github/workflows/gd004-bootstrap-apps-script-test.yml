@@ -1,0 +1,207 @@
+name: GD-004 Bootstrap Apps Script TEST
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/bootstrap/gd004_apps_script_test_request.json'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  EJS_FORM_WRITE: 'false'
+  EJS_FILE_UPLOAD: 'false'
+  EJS_FINAL_SUBMIT: 'false'
+  EJS_KILL_SWITCH: 'true'
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: npm install
+      - run: python -m pip install -e '.[test]'
+
+      - name: Materialize clasp OAuth credential
+        env:
+          CLASPRC_JSON: ${{ secrets.EJS_CLASPRC_JSON_TEST }}
+          HMAC_SECRET: ${{ secrets.EJS_HMAC_SHARED_SECRET_TEST }}
+        shell: bash
+        run: |
+          test -n "$CLASPRC_JSON"
+          test -n "$HMAC_SECRET"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+
+      - name: Create standalone TEST web app project
+        id: create
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMP_PROJECT="$RUNNER_TEMP/ejs-gd004-project"
+          mkdir -p "$TMP_PROJECT"
+          npx clasp create-script --type webapp --title "Europe Job Scan Zero Cost Control Plane - TEST" --rootDir "$TMP_PROJECT"
+          SCRIPT_ID="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["scriptId"])' "$TMP_PROJECT/.clasp.json")"
+          test -n "$SCRIPT_ID"
+          echo "script_id=$SCRIPT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Build bootstrap-only source without committing secrets
+        id: temp_source
+        env:
+          SCRIPT_ID: ${{ steps.create.outputs.script_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/ejs-gd004-bootstrap-source"
+          mkdir -p "$SRC"
+          cp google_native/apps_script_zero_cost/*.gs "$SRC/"
+          cp google_native/apps_script_zero_cost/appsscript.json "$SRC/"
+          printf '{"scriptId":"%s","rootDir":"."}\n' "$SCRIPT_ID" > "$SRC/.clasp.json"
+          BOOTSTRAP_TOKEN="$(openssl rand -hex 32)"
+          echo "bootstrap_token=$BOOTSTRAP_TOKEN" >> "$GITHUB_OUTPUT"
+          python - "$SRC/EjsGitHubGatewayV1.gs" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1])
+          text=p.read_text()
+          needle='function doPost(e) {'
+          if text.count(needle) != 1:
+              raise SystemExit('expected exactly one canonical doPost')
+          p.write_text(text.replace(needle, 'function ejsGhCanonicalDoPostV1_(e) {', 1))
+          PY
+          cat > "$SRC/EjsBootstrapTemp.gs" <<EOF
+          const EJS_GH_BOOTSTRAP_TOKEN_TEMP_ = '$BOOTSTRAP_TOKEN';
+          function doPost(e) {
+            const raw = (e && e.postData && e.postData.contents) || '{}';
+            const req = JSON.parse(raw);
+            if (req && req.operation === 'bootstrap_configure') {
+              if (String(req.bootstrap_token || '') !== EJS_GH_BOOTSTRAP_TOKEN_TEMP_) {
+                return ContentService.createTextOutput(JSON.stringify({ok:false,error_code:'GD004_BOOTSTRAP_TOKEN_INVALID'})).setMimeType(ContentService.MimeType.JSON);
+              }
+              const value = String(req.hmac_secret || '');
+              if (value.length < 32) {
+                return ContentService.createTextOutput(JSON.stringify({ok:false,error_code:'GD004_HMAC_SECRET_TOO_SHORT'})).setMimeType(ContentService.MimeType.JSON);
+              }
+              PropertiesService.getScriptProperties().setProperty('EJS_HMAC_SHARED_SECRET_TEST', value);
+              return ContentService.createTextOutput(JSON.stringify({ok:true,bootstrap_state:'configured'})).setMimeType(ContentService.MimeType.JSON);
+            }
+            return ejsGhCanonicalDoPostV1_(e);
+          }
+          EOF
+          echo "source_dir=$SRC" >> "$GITHUB_OUTPUT"
+
+      - name: Push temporary bootstrap source and deploy web app
+        id: deploy
+        env:
+          SRC: ${{ steps.temp_source.outputs.source_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+          npx clasp push --force
+          DEPLOY_OUTPUT="$(npx clasp create-deployment --description 'GD-004 zero-cost TEST bootstrap')"
+          DEPLOYMENT_ID="$(printf '%s\n' "$DEPLOY_OUTPUT" | grep -oE 'AKf[a-zA-Z0-9_-]{20,}' | head -1 || true)"
+          if [ -z "$DEPLOYMENT_ID" ]; then
+            echo "Could not parse web app deployment ID" >&2
+            exit 1
+          fi
+          WEBAPP_URL="https://script.google.com/macros/s/${DEPLOYMENT_ID}/exec"
+          echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "webapp_url=$WEBAPP_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Configure HMAC Script Property through ephemeral bootstrap endpoint
+        env:
+          WEBAPP_URL: ${{ steps.deploy.outputs.webapp_url }}
+          BOOTSTRAP_TOKEN: ${{ steps.temp_source.outputs.bootstrap_token }}
+          HMAC_SECRET: ${{ secrets.EJS_HMAC_SHARED_SECRET_TEST }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          payload=json.dumps({
+            'operation':'bootstrap_configure',
+            'bootstrap_token':os.environ['BOOTSTRAP_TOKEN'],
+            'hmac_secret':os.environ['HMAC_SECRET'],
+          }).encode()
+          req=urllib.request.Request(os.environ['WEBAPP_URL'], data=payload, headers={'Content-Type':'application/json'}, method='POST')
+          with urllib.request.urlopen(req, timeout=30) as r:
+            body=json.loads(r.read().decode())
+          if body.get('ok') is not True or body.get('bootstrap_state') != 'configured':
+            raise SystemExit('Apps Script bootstrap property configuration failed')
+          print('bootstrap-property: PASS')
+          PY
+
+      - name: Replace temporary source with canonical source and redeploy same ID
+        env:
+          SCRIPT_ID: ${{ steps.create.outputs.script_id }}
+          DEPLOYMENT_ID: ${{ steps.deploy.outputs.deployment_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '{"scriptId":"%s","rootDir":"."}\n' "$SCRIPT_ID" > google_native/apps_script_zero_cost/.clasp.json
+          cd google_native/apps_script_zero_cost
+          npx clasp push --force
+          npx clasp create-deployment --deploymentId "$DEPLOYMENT_ID" --description "GD-004 canonical ${GITHUB_SHA}"
+
+      - name: TEST-004B/C live HMAC, replay, claim and reconcile smoke
+        env:
+          EJS_HMAC_SHARED_SECRET_TEST: ${{ secrets.EJS_HMAC_SHARED_SECRET_TEST }}
+          WEBAPP_URL: ${{ steps.deploy.outputs.webapp_url }}
+        shell: bash
+        run: |
+          python -m ejs.apps.github_runner.control_plane_smoke --url "$WEBAPP_URL" --source-sha "$GITHUB_SHA"
+
+      - name: Persist non-secret TEST deployment metadata
+        env:
+          SCRIPT_ID: ${{ steps.create.outputs.script_id }}
+          DEPLOYMENT_ID: ${{ steps.deploy.outputs.deployment_id }}
+          WEBAPP_URL: ${{ steps.deploy.outputs.webapp_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p infra/runtime
+          python - <<'PY'
+          import json, os
+          value={
+            'environment':'TEST',
+            'contract_version':'EJS-GH-EXEC-0.1',
+            'script_id':os.environ['SCRIPT_ID'],
+            'deployment_id':os.environ['DEPLOYMENT_ID'],
+            'webapp_url':os.environ['WEBAPP_URL'],
+            'source_sha':os.environ['GITHUB_SHA'],
+            'provider':'apps_script_zero_cost',
+          }
+          open('infra/runtime/test_apps_script_zero_cost.json','w').write(json.dumps(value, indent=2, sort_keys=True)+'\n')
+          PY
+          rm -f infra/bootstrap/gd004_apps_script_test_request.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add infra/runtime/test_apps_script_zero_cost.json infra/bootstrap/gd004_apps_script_test_request.json || true
+          if git diff --cached --quiet; then
+            echo 'metadata already current'
+          else
+            git commit -m 'chore(gd004): record TEST Apps Script deployment metadata'
+            git push origin HEAD:main
+          fi
+
+      - name: Clean temporary auth/runtime files
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$HOME/.clasprc.json" google_native/apps_script_zero_cost/.clasp.json
+          rm -rf "$RUNNER_TEMP/ejs-gd004-project" "$RUNNER_TEMP/ejs-gd004-bootstrap-source"
