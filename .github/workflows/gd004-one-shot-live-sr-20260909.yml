@@ -1,0 +1,90 @@
+name: GD-004 One-Shot Live SmartRecruiters Canary 20260909
+
+on:
+  push:
+    branches:
+      - canary/gd004-live-sr-20260909
+
+permissions:
+  contents: read
+
+env:
+  EJS_BROWSER_PROVIDER_TEST: github_hosted
+  EJS_LIVE_READ_ONLY: 'true'
+  EJS_FORM_WRITE: 'false'
+  EJS_FILE_UPLOAD: 'false'
+  EJS_FINAL_SUBMIT: 'false'
+  EJS_KILL_SWITCH: 'true'
+  APPROVED_SOURCE_SHA: 4dc5ebde3df567b6d7cea3a1032785aacf29ae3c
+  TARGET_URL: https://jobs.smartrecruiters.com/Rituals1/744000112936917-business-analyst-workforce-management
+
+jobs:
+  live-read-only-canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.APPROVED_SOURCE_SHA }}
+
+      - name: Assert exact approved source and zero-mutation fence
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$APPROVED_SOURCE_SHA"
+          test "$EJS_LIVE_READ_ONLY" = "true"
+          test "$EJS_FORM_WRITE" = "false"
+          test "$EJS_FILE_UPLOAD" = "false"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+          case "$TARGET_URL" in
+            https://jobs.smartrecruiters.com/*) ;;
+            *) echo 'Target is not the approved SmartRecruiters public host' >&2; exit 2 ;;
+          esac
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+
+      - name: TEST-004E live SmartRecruiters read-only inspection
+        shell: bash
+        run: |
+          python -m ejs.apps.github_runner.main \
+            --url "$TARGET_URL" \
+            --source-sha "$APPROVED_SOURCE_SHA" \
+            --provider github_hosted \
+            --request-id "request:gd004:${GITHUB_RUN_ID}:live" \
+            --execution-id "execution:gd004:${GITHUB_RUN_ID}:live" \
+            --opportunity-key "opportunity:rituals:wfm:gd004-canary" \
+            --requisition-id "744000112936917" \
+            --adapter-key ats:smartrecruiters \
+            > gd004-live-canary.json
+          cat gd004-live-canary.json
+
+      - name: Validate typed egress and zero side effects
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          value = json.loads(Path('gd004-live-canary.json').read_text())
+          result = value['result']
+          ev = value['evidence']
+          assert result['source_sha'] == '4dc5ebde3df567b6d7cea3a1032785aacf29ae3c'
+          assert result['provider'] == 'github_hosted'
+          assert ev['ats_family'] == 'smartrecruiters'
+          assert ev['runtime_state'] == 'rendered', ev
+          assert ev['error_code'] == '', ev
+          assert ev['read_only_invariant_ok'] is True
+          assert result['mutation_count'] == 0
+          assert result['upload_count'] == 0
+          assert result['submit_count'] == 0
+          assert ev['mutation_attempts'] == 0
+          assert ev['file_upload_attempts'] == 0
+          assert ev['submit_attempts'] == 0
+          print('TEST-004E: PASS — GitHub-hosted SmartRecruiters egress rendered, zero side effects')
+          PY
