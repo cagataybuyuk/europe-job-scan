@@ -113,3 +113,57 @@ jobs:
         run: python -m pytest -q tests/unit/test_gd004_contract.py
       - name: Run GD-004 GitHub-hosted Chromium smoke
         run: python -m pytest -q tests/unit/test_gd004_browser.py
+
+  gd004-live-smartrecruiters-canary:
+    if: github.event_name == 'pull_request' && github.head_ref == 'test/gd004-live-smartrecruiters-canary'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      EJS_BROWSER_PROVIDER_TEST: github_hosted
+      EJS_LIVE_READ_ONLY: 'true'
+      EJS_FORM_WRITE: 'false'
+      EJS_FILE_UPLOAD: 'false'
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_KILL_SWITCH: 'true'
+      CANONICAL_MAIN_SHA: 4dc5ebde3df567b6d7cea3a1032785aacf29ae3c
+      TARGET_URL: https://jobs.smartrecruiters.com/ImplementConsultingGroup/744000147477555-senior-consultants-for-erp-transformation
+    steps:
+      - name: Checkout exact canonical main source
+        uses: actions/checkout@v4
+        with:
+          ref: 4dc5ebde3df567b6d7cea3a1032785aacf29ae3c
+      - name: Assert exact source and read-only authority
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANONICAL_MAIN_SHA"
+          test "$EJS_LIVE_READ_ONLY" = "true"
+          test "$EJS_FORM_WRITE" = "false"
+          test "$EJS_FILE_UPLOAD" = "false"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: TEST-004E live SmartRecruiters read-only canary
+        shell: bash
+        run: |
+          python -m ejs.apps.github_runner.main \
+            --url "$TARGET_URL" \
+            --source-sha "$CANONICAL_MAIN_SHA" \
+            --provider github_hosted \
+            --request-id "request:gd004:${GITHUB_RUN_ID}:live" \
+            --execution-id "execution:gd004:${GITHUB_RUN_ID}:live" \
+            --opportunity-key opportunity:gd004-live-egress \
+            --requisition-id 744000147477555 \
+            --adapter-key ats:smartrecruiters
+      - name: Confirm zero mutation authority
+        if: always()
+        shell: bash
+        run: |
+          test "$EJS_FORM_WRITE" = "false"
+          test "$EJS_FILE_UPLOAD" = "false"
+          test "$EJS_FINAL_SUBMIT" = "false"
