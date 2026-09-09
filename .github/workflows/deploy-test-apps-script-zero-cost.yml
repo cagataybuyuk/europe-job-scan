@@ -1,0 +1,58 @@
+name: Deploy TEST Apps Script Zero Cost
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact commit SHA approved for TEST deployment
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: test
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+
+      - name: Assert immutable source and zero-cost boundary
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ inputs.expected_sha }}"
+          test -n "${{ vars.EJS_APPS_SCRIPT_ZERO_COST_ID_TEST }}"
+          ! grep -R "cloud-platform" google_native/apps_script_zero_cost/appsscript.json
+          ! grep -R "EJS_FINAL_SUBMIT.*true" google_native/apps_script_zero_cost || true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm install
+
+      - name: Materialize clasp TEST mapping and OAuth auth
+        shell: bash
+        env:
+          SCRIPT_ID: ${{ vars.EJS_APPS_SCRIPT_ZERO_COST_ID_TEST }}
+          CLASPRC_JSON: ${{ secrets.EJS_CLASPRC_JSON_TEST }}
+        run: |
+          test -n "$SCRIPT_ID"
+          test -n "$CLASPRC_JSON"
+          printf '{"scriptId":"%s","rootDir":"."}\n' "$SCRIPT_ID" > google_native/apps_script_zero_cost/.clasp.json
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+
+      - name: Push zero-cost TEST Apps Script source
+        working-directory: google_native/apps_script_zero_cost
+        run: npx clasp push --force
+
+      - name: Clean auth material
+        if: always()
+        shell: bash
+        run: rm -f "$HOME/.clasprc.json" google_native/apps_script_zero_cost/.clasp.json
