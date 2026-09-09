@@ -1,108 +1,103 @@
 # GD-004 Zero-Cost Apps Script Bootstrap
 
-Purpose: one-time TEST trust bootstrap for the zero-cost GitHub browser execution path. This path does **not** require Google Cloud billing or Cloud Run.
+One-time owner authorization for the TEST GitHub browser path. No Google Cloud
+billing, Cloud Run, paid proxy, or manual source-code paste is required.
 
-## Fixed safety boundary
+## Ready engineering / pending live acceptance
 
-- Environment: TEST only.
-- TEST Sheet: `17dBVTbUQrjpWN5eyQkIfvwyzmMDFyYhOm1Ivxcge8nM`.
-- PROD Sheet is explicitly denied by source guards.
-- `browser_read=true`.
-- `form_value_write=false`.
-- `approved_file_upload=false`.
-- `final_submit=false`.
-- CAPTCHA/MFA bypass is not implemented.
-- HMAC secret must never be committed, pasted into Drive/Sheets, or sent in chat.
+Main contains the signed gateway, TEST queue, synthetic PDF resolver, Python runner
+and deployment/integration workflows. CI executes the actual `.gs` code in V8 with
+Google service doubles, crosses the Python/JavaScript HMAC boundary and runs a real
+synthetic Chromium roundtrip. This does not replace TEST-004B/C on the owner's Web App.
 
-## Why the Web App can be anonymous
+The new table is `GD004 TEST Execution Queue`, only in TEST spreadsheet
+`17dBVTbUQrjpWN5eyQkIfvwyzmMDFyYhOm1Ivxcge8nM`. The initializer stages one synthetic
+job per deployed SHA. It never resets existing rows or changes Applications, Form
+Fill Queue, personal facts, application history or PROD. Real opportunities require
+explicit staging and their own release gates; this is not automatic job selection.
 
-`appsscript.json` declares `webapp.access=ANYONE_ANONYMOUS` and `executeAs=USER_DEPLOYING` so a GitHub-hosted runner can reach the endpoint without Google account cookies. The endpoint is not trusted by network location: every accepted request must pass the `EJS-GH-EXEC-0.1` HMAC-SHA256 signature, TTL, nonce/replay, operation allowlist, TEST target, immutable source SHA, and capability guards. Invalid requests fail closed.
+## Canonical settings
 
-## User-owned one-time bootstrap (Windows PowerShell)
+| Setting | Location | Purpose |
+| --- | --- | --- |
+| `EJS_CLASPRC_JSON_TEST` | GitHub encrypted secret | One-time owner clasp OAuth credential |
+| `EJS_APPS_SCRIPT_ZERO_COST_ID_TEST` | GitHub variable | Standalone TEST Script ID |
+| `EJS_HMAC_SHARED_SECRET_TEST` | GitHub secret AND Apps Script Script Property | Same name and same locally generated value |
+| `EJS_APPS_SCRIPT_ZERO_COST_URL_TEST` | GitHub variable | Published Web App `/exec` URL |
 
-### 1. Create the standalone TEST script
+The deployment workflow generates `EjsDeploymentV1.gs` from the exact approved main
+SHA. Other SHAs fail closed. `clasp push` updates source, not a published Web App
+version: after a later source deployment, update that Web App version and stage the
+new SHA's synthetic job before integration.
 
-Open `https://script.google.com/create` with the Google account that owns the TEST tracker.
+## One-time setup (Windows PowerShell)
 
-Rename the project to:
+Prerequisites: Git, Node.js and authenticated GitHub CLI (`gh auth status`). Use the
+Google account that can edit the TEST spreadsheet and read the synthetic test PDF.
 
-`Europe Job Scan Zero Cost Control Plane - TEST`
+1. Open <https://script.google.com/create>. Name the standalone project **Europe Job
+   Scan Zero Cost Control Plane - TEST**. Copy the Script ID from Project Settings.
+   Enable Apps Script API in user settings if disabled.
+2. In an up-to-date local clone of `cagataybuyuk/europe-job-scan` on `main`, run:
 
-In **Project Settings**, copy the **Script ID**. The Script ID is not a secret.
+   ```powershell
+   .\scripts\bootstrap_zero_cost.ps1 -ScriptId "<SCRIPT_ID>"
+   ```
 
-If Apps Script API access is disabled for the account, enable it from Apps Script user settings; no billing project is required for this workflow.
+   It checks main, runs `npm install` and `clasp login`, stores OAuth directly in
+   GitHub, generates HMAC, copies it to your local clipboard and dispatches TEST
+   source deployment. Complete Google's OAuth screen yourself. No secret is printed.
+3. In Apps Script **Project Settings > Script properties**, create
+   `EJS_HMAC_SHARED_SECRET_TEST`, paste the clipboard value and save. Clear the
+   clipboard. Re-running the helper rotates GitHub's secret: update this copy too.
+4. After **Deploy TEST Apps Script Zero Cost** succeeds, refresh the editor and run
+   **`ejsGhInitializeSyntheticTestV1`** once. Authorize Sheets and read-only Drive
+   access. Record its printed `queue_row` and `execution_id`.
+5. Choose **Deploy > New deployment > Web app**, execute as yourself, with access
+   for anyone (including anonymous). Every accepted request still passes HMAC,
+   expiry, replay, deployed-SHA, TEST-target and capability checks. Store its URL:
 
-### 2. Authenticate clasp locally once
+   ```powershell
+   gh variable set EJS_APPS_SCRIPT_ZERO_COST_URL_TEST --body "<WEB_APP_EXEC_URL>"
+   ```
 
-From a local clone of `cagataybuyuk/europe-job-scan` on `main`:
+Only Script ID, `/exec` URL, queue row and execution ID may be shared with the project
+workflow. Never share `.clasprc.json`, OAuth tokens or the HMAC value in chat/Drive.
 
-```powershell
-npm install
-npx clasp login
-```
+## Real TEST-004B/C
 
-Complete the Google OAuth screen in the browser. Do not send `.clasprc.json` to ChatGPT.
-
-Store the credential directly as a GitHub encrypted secret (requires GitHub CLI already authenticated):
-
-```powershell
-Get-Content "$HOME\.clasprc.json" -Raw | gh secret set EJS_CLASPRC_JSON_TEST
-```
-
-Store the non-secret Script ID as a repository variable:
-
-```powershell
-gh variable set EJS_APPS_SCRIPT_ZERO_COST_ID_TEST --body "<SCRIPT_ID>"
-```
-
-### 3. Generate the HMAC secret locally
-
-```powershell
-$bytes = New-Object byte[] 32
-[System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-$secret = [Convert]::ToHexString($bytes).ToLowerInvariant()
-$secret | gh secret set EJS_GH_HMAC_SECRET_TEST
-```
-
-Do **not** paste `$secret` into chat.
-
-In Apps Script **Project Settings → Script properties**, add:
-
-- Property: `EJS_GH_HMAC_SECRET`
-- Value: the local `$secret` value
-
-The same secret therefore exists only in GitHub encrypted secrets and Apps Script Script Properties.
-
-### 4. Deploy canonical source from GitHub
-
-After this bootstrap hardening is merged, use the current approved `main` SHA:
+After owner setup, engineering dispatches:
 
 ```powershell
-gh workflow run deploy-test-apps-script-zero-cost.yml -f expected_sha=<APPROVED_MAIN_SHA>
+gh workflow run gd004-test-control-plane.yml -f expected_sha=<APPROVED_MAIN_SHA> -f queue_row=<ROW> -f execution_id=<EXECUTION_ID>
 ```
 
-Wait for the workflow to pass. It pushes only `google_native/apps_script_zero_cost` to the TEST Script ID.
+The workflow checks signed health, replay, invalid signature, expiry, PROD denial
+and request collision. It then reads the exact row, claims it, verifies its approved
+synthetic PDF in memory, inspects the packaged Chromium fixture, reconciles the result
+and independently reads the durable queue state back. No employer receives a PDF.
+No candidate documents, filenames, tokens or request payloads are printed or uploaded
+as Actions artifacts; this phase uses only the synthetic regression PDF.
 
-### 5. Create the Web App deployment once
+Acceptance: queue state `COMPLETED`, matching result hashes and zero employer
+mutation/upload/submit counters. Repeating a completed execution performs no browser
+action or second write. A blocked browser yields `REVIEW_REQUIRED`, never Applied.
+Do not mark live TEST-004B/C passed from local mocks or CI results alone.
 
-In Apps Script choose **Deploy → New deployment → Web app**. The manifest is already pinned to:
+## Recovery and boundaries
 
-- Execute as: deploying user.
-- Access: anyone, including anonymous.
+- An interrupted `CLAIMED` row is quarantined. Inspect evidence and reconcile the
+  original result, or explicitly stage a new execution after review. Retries never
+  clear a claim or acquire it again automatically.
+- Changed payload/PDF, duplicate execution IDs, wrong SHA/folder/TEST identity and
+  invalid result hashes fail closed.
+- Limits: 200 staged rows, two approved synthetic PDFs per row, 2 MiB per PDF,
+  5-minute request TTL, bounded replay storage and one queue workflow at a time.
+- Scopes are Sheets plus `drive.readonly`; no Cloud Platform scope.
+- The Web App exposes no initializer or administrative operation.
+- Stop by disabling the TEST workflow and removing the Web App deployment. Rotate
+  both secret copies together when needed.
+- Live field writes, CV uploads, final submit, Applied transitions and production
+  queue selection remain separate release work.
 
-Create the deployment and copy the `/exec` Web App URL. The URL is not a secret; send only this URL and the Script ID back to the project workflow if needed. Never send the HMAC secret or `.clasprc.json`.
-
-## After bootstrap
-
-The engineering workflow resumes automatically:
-
-1. TEST-004B signed health request / invalid signature / expiry / replay tests.
-2. TEST-004C claim + reconcile idempotency and TEST/PROD fence readback.
-3. GitHub-hosted browser execution binds to the signed Apps Script control plane.
-4. Live form write/upload/submit remain OFF until separate approved gates.
-
-## Rotation / rollback
-
-If a secret may have been exposed, rotate both copies: GitHub `EJS_GH_HMAC_SECRET_TEST` and Apps Script `EJS_GH_HMAC_SECRET`.
-
-To stop the endpoint, delete the Apps Script Web App deployment or remove/rotate the HMAC property. Cloud Run is not required and remains an inactive fallback.
+Google reference: <https://developers.google.com/apps-script/guides/web>.

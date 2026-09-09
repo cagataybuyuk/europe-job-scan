@@ -71,6 +71,8 @@ function ejsGhUnsignedRequestV1_(request) {
 
 function ejsGhAssertCapabilitiesV1_(flags) {
   flags = flags || {};
+  const expected = {browser_read: true, form_value_write: false, approved_file_upload: false, final_submit: false};
+  if (ejsGhCanonicalJsonV1_(flags) !== ejsGhCanonicalJsonV1_(expected)) throw new Error('GD004_CAPABILITY_SCHEMA');
   if (flags.browser_read !== true) throw new Error('GD004_BROWSER_READ_REQUIRED');
   if (flags.form_value_write === true) throw new Error('GD004_FORM_WRITE_FORBIDDEN');
   if (flags.approved_file_upload === true) throw new Error('GD004_FILE_UPLOAD_FORBIDDEN');
@@ -95,11 +97,9 @@ function ejsGhCleanupReplayLedgerV1_(props, nowMs) {
       props.deleteProperty(key);
     }
   });
-  if (entries.length <= EJS_GH_CONFIG_V1.MAX_REPLAY_ENTRIES) return;
-  entries.sort(function(a, b) { return a.created_at_ms - b.created_at_ms; });
-  entries.slice(0, entries.length - EJS_GH_CONFIG_V1.MAX_REPLAY_ENTRIES).forEach(function(item) {
-    props.deleteProperty(item.key);
-  });
+  if (entries.length >= EJS_GH_CONFIG_V1.MAX_REPLAY_ENTRIES) {
+    throw new Error('GD004_REPLAY_LEDGER_FULL');
+  }
 }
 
 function ejsGhCheckReplayV1_(request, nowMs) {
@@ -114,7 +114,7 @@ function ejsGhCheckReplayV1_(request, nowMs) {
       request_id: request.request_id,
       nonce: request.nonce,
       payload_hash: request.payload_hash,
-      signature: request.signature,
+      identity_hash: ejsGhSha256HexV1_(ejsGhCanonicalJsonV1_({execution_id: request.execution_id, operation: request.operation, source_sha: request.source_sha, environment: request.environment, capability_flags: request.capability_flags, payload_hash: request.payload_hash})),
       created_at_ms: nowMs,
       expires_at_ms: Date.parse(request.expires_at)
     };
@@ -122,7 +122,7 @@ function ejsGhCheckReplayV1_(request, nowMs) {
     const requestExistingRaw = props.getProperty(requestKey);
     if (requestExistingRaw) {
       const existing = JSON.parse(requestExistingRaw);
-      if (existing.payload_hash !== marker.payload_hash) {
+      if (existing.payload_hash !== marker.payload_hash || existing.identity_hash !== marker.identity_hash) {
         throw new Error('GD004_REQUEST_ID_PAYLOAD_COLLISION');
       }
       // A retry may legitimately use a fresh nonce/timestamp/signature. The immutable
@@ -161,6 +161,7 @@ function ejsGhVerifyRequestV1_(request, nowMs) {
   if (!/^[0-9a-f]{40}$/.test(String(request.source_sha || ''))) {
     throw new Error('GD004_SOURCE_SHA_INVALID');
   }
+  if (request.source_sha !== ejsGhDeployedShaV1_()) throw new Error('GD004_SOURCE_SHA_NOT_DEPLOYED');
   ejsGhAssertCapabilitiesV1_(request.capability_flags);
   if (!request.payload || typeof request.payload !== 'object' || Array.isArray(request.payload)) {
     throw new Error('GD004_PAYLOAD_OBJECT_REQUIRED');
@@ -201,71 +202,6 @@ function ejsGhVerifyRequestV1_(request, nowMs) {
   };
 }
 
-function ejsGhClaimExecutionV1_(request) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    const props = PropertiesService.getScriptProperties();
-    const key = 'EJS_GH_EXEC_CLAIM_' + ejsGhSha256HexV1_(request.execution_id);
-    const marker = {
-      execution_id: request.execution_id,
-      source_sha: request.source_sha,
-      payload_hash: request.payload_hash,
-      status: 'claimed'
-    };
-    const existingRaw = props.getProperty(key);
-    if (!existingRaw) {
-      props.setProperty(key, JSON.stringify(marker));
-      return {claim_state: 'claimed', execution_id: request.execution_id};
-    }
-    const existing = JSON.parse(existingRaw);
-    if (existing.source_sha !== marker.source_sha || existing.payload_hash !== marker.payload_hash) {
-      throw new Error('GD004_EXECUTION_CLAIM_COLLISION');
-    }
-    return {claim_state: 'replay', execution_id: request.execution_id};
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function ejsGhReconcileResultV1_(request) {
-  const result = request.payload && request.payload.result;
-  if (!result || typeof result !== 'object' || Array.isArray(result)) {
-    throw new Error('GD004_RESULT_OBJECT_REQUIRED');
-  }
-  ['mutation_count', 'upload_count', 'submit_count'].forEach(function(field) {
-    if (Number(result[field] || 0) !== 0) throw new Error('GD004_FORBIDDEN_SIDE_EFFECT_REPORTED');
-  });
-  if (String(result.source_sha || '') !== request.source_sha) {
-    throw new Error('GD004_RESULT_SOURCE_SHA_MISMATCH');
-  }
-
-  const resultUnsigned = Object.assign({}, result);
-  delete resultUnsigned.result_hash;
-  const expectedResultHash = ejsGhSha256HexV1_(ejsGhCanonicalJsonV1_(resultUnsigned));
-  if (!ejsGhConstantTimeEqualV1_(expectedResultHash, result.result_hash || '')) {
-    throw new Error('GD004_RESULT_HASH_MISMATCH');
-  }
-
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    const props = PropertiesService.getScriptProperties();
-    const claimKey = 'EJS_GH_EXEC_CLAIM_' + ejsGhSha256HexV1_(request.execution_id);
-    if (!props.getProperty(claimKey)) throw new Error('GD004_EXECUTION_NOT_CLAIMED');
-    const resultKey = 'EJS_GH_EXEC_RESULT_' + ejsGhSha256HexV1_(request.execution_id);
-    const existing = props.getProperty(resultKey);
-    if (!existing) {
-      props.setProperty(resultKey, result.result_hash);
-      return {reconcile_state: 'recorded', result_hash: result.result_hash};
-    }
-    if (existing !== result.result_hash) throw new Error('GD004_RESULT_COLLISION');
-    return {reconcile_state: 'replay', result_hash: result.result_hash};
-  } finally {
-    lock.releaseLock();
-  }
-}
-
 function ejsGhHandleOperationV1_(request, verification) {
   if (request.operation === 'health') {
     return {
@@ -282,13 +218,13 @@ function ejsGhHandleOperationV1_(request, verification) {
       exact_replay: verification.exact_replay
     };
   }
-  if (request.operation === 'claim') return ejsGhClaimExecutionV1_(request);
-  if (request.operation === 'reconcile_result') return ejsGhReconcileResultV1_(request);
+  if (request.operation === 'claim') return ejsGhQueueClaimV1_(request);
+  if (request.operation === 'reconcile_result') return ejsGhQueueReconcileV1_(request);
   if (request.operation === 'get_execution_payload') {
-    throw new Error('GD004_EXECUTION_PAYLOAD_NOT_IMPLEMENTED_WAVE1');
+    return ejsGhGetExecutionPayloadV1_(request);
   }
   if (request.operation === 'get_approved_asset') {
-    throw new Error('GD004_APPROVED_ASSET_NOT_IMPLEMENTED_WAVE1');
+    return ejsGhReadApprovedAssetV1_(request);
   }
   throw new Error('GD004_OPERATION_NOT_ALLOWED');
 }
@@ -318,7 +254,9 @@ function ejsGhJsonV1_(value) {
 function doPost(e) {
   let request = null;
   try {
-    request = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    const body = (e && e.postData && e.postData.contents) || '{}';
+    if (body.length > EJS_GH_CONFIG_V1.MAX_REQUEST_BYTES) throw new Error('GD004_REQUEST_TOO_LARGE');
+    request = JSON.parse(body);
     const verification = ejsGhVerifyRequestV1_(request, Date.now());
     const responsePayload = ejsGhHandleOperationV1_(request, verification);
     return ejsGhJsonV1_(ejsGhSignResponseV1_(request, {ok: true, data: responsePayload}));

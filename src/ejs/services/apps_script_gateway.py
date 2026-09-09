@@ -5,7 +5,8 @@ import hmac
 import json
 import secrets
 from typing import Any, Callable, Mapping
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 from ejs.contracts.github_executor import (
     EJS_GH_EXEC_VERSION,
@@ -17,6 +18,21 @@ from ejs.contracts.github_executor import (
 )
 
 Transport = Callable[[str, bytes, float], bytes]
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+class GatewayError(RuntimeError):
+    """A verified failure returned by the TEST control plane (safe code only)."""
+
+
+class _GoogleRedirectsOnly(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urlsplit(newurl)
+        if target.scheme != 'https' or target.hostname not in {
+            'script.google.com', 'script.googleusercontent.com'
+        } or target.username or target.password or target.port not in (None, 443):
+            raise PermissionError('control-plane redirect outside Google Apps Script')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _default_transport(endpoint: str, body: bytes, timeout: float) -> bytes:
@@ -26,8 +42,11 @@ def _default_transport(endpoint: str, body: bytes, timeout: float) -> bytes:
         method="POST",
         headers={"Content-Type": "application/json; charset=utf-8"},
     )
-    with urlopen(request, timeout=timeout) as response:  # noqa: S310 - endpoint is explicit config
-        return response.read()
+    with build_opener(_GoogleRedirectsOnly()).open(request, timeout=timeout) as response:
+        raw = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise ValueError('control-plane response exceeds size bound')
+        return raw
 
 
 def verify_signed_response(
@@ -72,8 +91,12 @@ class SignedAppsScriptGatewayClient:
         transport: Transport | None = None,
         timeout_seconds: float = 20.0,
     ) -> None:
-        if not endpoint.startswith("https://"):
-            raise ValueError("Apps Script endpoint must be HTTPS")
+        target = urlsplit(endpoint)
+        if (target.scheme != 'https' or target.hostname != 'script.google.com'
+                or not target.path.startswith('/macros/s/') or not target.path.endswith('/exec')
+                or target.username or target.password or target.query or target.fragment
+                or target.port not in (None, 443)):
+            raise ValueError('endpoint must be a canonical Apps Script /exec URL')
         if not secret:
             raise ValueError("HMAC secret required")
         self.endpoint = endpoint
@@ -101,9 +124,22 @@ class SignedAppsScriptGatewayClient:
             payload=payload or {},
             created_at=created_at or datetime.now(timezone.utc),
         )
+        return self.send(signed)
+
+    def send(self, signed: SignedExecutionRequest) -> Mapping[str, Any]:
         body = canonical_json(signed.to_dict()).encode("utf-8")
         raw = self.transport(self.endpoint, body, self.timeout_seconds)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise ValueError('control-plane response exceeds size bound')
         parsed = json.loads(raw.decode("utf-8"))
         if not isinstance(parsed, Mapping):
             raise ValueError("Apps Script response must be an object")
-        return verify_signed_response(parsed, secret=self.secret, request=signed)
+        response = verify_signed_response(parsed, secret=self.secret, request=signed)
+        if response.get('ok') is not True:
+            code = str(response.get('error_code', 'GD004_GATEWAY_FAILURE'))
+            if not all(c.isupper() or c.isdigit() or c in '_:-' for c in code) or len(code) > 120:
+                code = 'GD004_GATEWAY_FAILURE'
+            raise GatewayError(code)
+        if not isinstance(response.get('data'), Mapping):
+            raise ValueError('control-plane success data must be an object')
+        return response['data']

@@ -104,6 +104,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -113,5 +116,9 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - name: Run GD-004 signed contract tests
         run: python -m pytest -q tests/unit/test_gd004_contract.py
+      - name: Run actual Apps Script source in V8
+        run: node --test tests/node/gd004_gateway.test.cjs
+      - name: Run Python to Apps Script queue and asset integration
+        run: python -m pytest -q tests/unit/test_gd004_queue.py tests/unit/test_gd004_queue_browser.py
       - name: Run GD-004 GitHub-hosted Chromium smoke
         run: python -m pytest -q tests/unit/test_gd004_browser.py
