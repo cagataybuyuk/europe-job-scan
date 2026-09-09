@@ -1,0 +1,107 @@
+name: GD-004 TEST Browser Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact immutable main SHA approved for this TEST run
+        required: true
+      mode:
+        description: Synthetic fixture or explicit live read-only ATS canary
+        required: true
+        default: synthetic
+        type: choice
+        options:
+          - synthetic
+          - live
+      target_url:
+        description: HTTPS ATS URL; required only for live mode
+        required: false
+  schedule:
+    - cron: '17 5 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gd004-test-browser-${{ github.event_name }}-${{ inputs.expected_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  read-only-browser:
+    if: github.event_name == 'workflow_dispatch' || vars.EJS_GD004_SCHEDULE_ENABLED == 'true'
+    runs-on: ${{ vars.EJS_BROWSER_RUNNER_LABEL_TEST || 'ubuntu-latest' }}
+    timeout-minutes: 12
+    env:
+      EJS_BROWSER_PROVIDER_TEST: ${{ vars.EJS_BROWSER_PROVIDER_TEST || 'github_hosted' }}
+      EJS_LIVE_READ_ONLY: 'true'
+      EJS_FORM_WRITE: 'false'
+      EJS_FILE_UPLOAD: 'false'
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_KILL_SWITCH: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha || github.sha }}
+
+      - name: Assert immutable source and GD-004 safety fence
+        shell: bash
+        run: |
+          EXPECTED_SHA="${{ inputs.expected_sha || github.sha }}"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$EJS_LIVE_READ_ONLY" = "true"
+          test "$EJS_FORM_WRITE" = "false"
+          test "$EJS_FILE_UPLOAD" = "false"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+
+      - name: TEST-004A/B contract and runtime preflight
+        run: python -m pytest -q tests/unit/test_gd004_contract.py
+
+      - name: TEST-004D synthetic Chromium smoke
+        if: github.event_name == 'schedule' || inputs.mode == 'synthetic'
+        shell: bash
+        run: |
+          python -m ejs.apps.github_runner.main \
+            --fixture src/ejs/apps/cloud_run/fixtures/smartrecruiters_smoke.html \
+            --source-sha "$(git rev-parse HEAD)" \
+            --provider "$EJS_BROWSER_PROVIDER_TEST" \
+            --request-id "request:gd004:${GITHUB_RUN_ID}:synthetic" \
+            --execution-id "execution:gd004:${GITHUB_RUN_ID}:synthetic" \
+            --adapter-key ats:smartrecruiters
+
+      - name: TEST-004E live SmartRecruiters read-only canary
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'live'
+        shell: bash
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+        run: |
+          test -n "$TARGET_URL"
+          case "$TARGET_URL" in
+            https://*) ;;
+            *) echo 'Live target must use HTTPS' >&2; exit 2 ;;
+          esac
+          python -m ejs.apps.github_runner.main \
+            --url "$TARGET_URL" \
+            --source-sha "$(git rev-parse HEAD)" \
+            --provider "$EJS_BROWSER_PROVIDER_TEST" \
+            --request-id "request:gd004:${GITHUB_RUN_ID}:live" \
+            --execution-id "execution:gd004:${GITHUB_RUN_ID}:live" \
+            --adapter-key ats:smartrecruiters
+
+      - name: Confirm zero mutation authority
+        if: always()
+        shell: bash
+        run: |
+          test "$EJS_FORM_WRITE" = "false"
+          test "$EJS_FILE_UPLOAD" = "false"
+          test "$EJS_FINAL_SUBMIT" = "false"
