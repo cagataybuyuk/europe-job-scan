@@ -125,9 +125,8 @@ function ejsGhCheckReplayV1_(request, nowMs) {
       if (existing.payload_hash !== marker.payload_hash) {
         throw new Error('GD004_REQUEST_ID_PAYLOAD_COLLISION');
       }
-      if (existing.signature !== marker.signature) {
-        throw new Error('GD004_REQUEST_ID_SIGNATURE_COLLISION');
-      }
+      // A retry may legitimately use a fresh nonce/timestamp/signature. The immutable
+      // request identity is request_id + canonical payload hash; same payload is replay/no-op.
     }
     const nonceExistingRaw = props.getProperty(nonceKey);
     if (nonceExistingRaw) {
