@@ -15,7 +15,10 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: test
-    timeout-minutes: 8
+    timeout-minutes: 10
+    outputs:
+      deployment_id: ${{ steps.deployment.outputs.deployment_id }}
+      web_app_url: ${{ steps.deployment.outputs.web_app_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,6 +30,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "${{ inputs.expected_sha }}"
           test -n "${{ vars.EJS_APPS_SCRIPT_ZERO_COST_ID_TEST }}"
           ! grep -q "cloud-platform" google_native/apps_script_zero_cost/appsscript.json
+          grep -q '"access": "ANYONE_ANONYMOUS"' google_native/apps_script_zero_cost/appsscript.json
+          grep -q '"executeAs": "USER_DEPLOYING"' google_native/apps_script_zero_cost/appsscript.json
           grep -q "GD004_FINAL_SUBMIT_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
           grep -q "GD004_FILE_UPLOAD_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
           grep -q "GD004_FORM_WRITE_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
@@ -35,6 +40,10 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - run: npm install
 
@@ -50,11 +59,47 @@ jobs:
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
           chmod 600 "$HOME/.clasprc.json"
 
-      - name: Push zero-cost TEST Apps Script source
+      - name: Push canonical zero-cost TEST Apps Script source
         working-directory: google_native/apps_script_zero_cost
         run: npx clasp push --force
+
+      - name: Create immutable Web App deployment for exact SHA
+        id: deployment
+        working-directory: google_native/apps_script_zero_cost
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          DESCRIPTION="EJS-GD004-ZERO-COST-TEST:${EXPECTED_SHA}"
+          npx clasp create-deployment --description "$DESCRIPTION"
+          npx clasp list-deployments --json > deployments.json
+          python ../../scripts/gd004/deployment_descriptor.py \
+            --input deployments.json \
+            --description-prefix "$DESCRIPTION" \
+            --github-output >> "$GITHUB_OUTPUT"
+          rm -f deployments.json
+
+      - name: Sanity-check deployment descriptor
+        shell: bash
+        env:
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+          WEB_APP_URL: ${{ steps.deployment.outputs.web_app_url }}
+        run: |
+          test -n "$DEPLOYMENT_ID"
+          case "$WEB_APP_URL" in
+            https://script.google.com/macros/s/*/exec) ;;
+            *) echo "Unexpected Apps Script web app URL" >&2; exit 2 ;;
+          esac
+          {
+            echo "### GD-004 zero-cost TEST Apps Script deployment"
+            echo "- exact source SHA: ${{ inputs.expected_sha }}"
+            echo "- deployment ID: $DEPLOYMENT_ID"
+            echo "- web app URL: $WEB_APP_URL"
+            echo "- runtime HMAC/claim/reconcile remains gated until owner authorization + Script Property setup"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean auth material
         if: always()
         shell: bash
-        run: rm -f "$HOME/.clasprc.json" google_native/apps_script_zero_cost/.clasp.json
+        run: rm -f "$HOME/.clasprc.json" google_native/apps_script_zero_cost/.clasp.json google_native/apps_script_zero_cost/deployments.json
