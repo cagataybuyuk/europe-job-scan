@@ -37,3 +37,27 @@ function ejsGhAssertTestEnvironmentV1_() {
     spreadsheet_title: ss.getName()
   };
 }
+
+/**
+ * One-time owner authorization/readiness probe.
+ *
+ * Run manually once in the TEST Apps Script editor after GitHub has pushed the canonical
+ * source. This function performs no Sheet write and never returns the HMAC secret value.
+ * Its purpose is to trigger the Google consent flow for the explicit spreadsheet scope and
+ * to confirm that the required Script Property has been configured.
+ */
+function ejsGhAuthorizationProbeV1() {
+  const environment = ejsGhAssertTestEnvironmentV1_();
+  const secretConfigured = Boolean(
+    PropertiesService.getScriptProperties().getProperty(EJS_GH_CONFIG_V1.HMAC_SECRET_PROPERTY)
+  );
+  return {
+    contract_version: EJS_GH_CONFIG_V1.CONTRACT_VERSION,
+    environment: environment.environment,
+    spreadsheet_title: environment.spreadsheet_title,
+    hmac_secret_configured: secretConfigured,
+    mutation_count: 0,
+    upload_count: 0,
+    submit_count: 0
+  };
+}
