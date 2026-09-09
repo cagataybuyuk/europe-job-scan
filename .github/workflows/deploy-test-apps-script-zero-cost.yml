@@ -26,8 +26,10 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "${{ inputs.expected_sha }}"
           test -n "${{ vars.EJS_APPS_SCRIPT_ZERO_COST_ID_TEST }}"
-          ! grep -R "cloud-platform" google_native/apps_script_zero_cost/appsscript.json
-          ! grep -R "EJS_FINAL_SUBMIT.*true" google_native/apps_script_zero_cost || true
+          ! grep -q "cloud-platform" google_native/apps_script_zero_cost/appsscript.json
+          grep -q "GD004_FINAL_SUBMIT_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
+          grep -q "GD004_FILE_UPLOAD_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
+          grep -q "GD004_FORM_WRITE_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
 
       - uses: actions/setup-node@v4
         with:
