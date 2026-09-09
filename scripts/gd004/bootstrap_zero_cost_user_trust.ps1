@@ -64,7 +64,7 @@ if (-not $ScriptId) {
     Pop-Location
     Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
   }
-  $ScriptId | gh variable set EJS_APPS_SCRIPT_ZERO_COST_ID_TEST --body $ScriptId
+  gh variable set EJS_APPS_SCRIPT_ZERO_COST_ID_TEST --body $ScriptId
 }
 
 Write-Host ''
