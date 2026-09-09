@@ -55,7 +55,9 @@ jobs:
           set -euo pipefail
           TMP_PROJECT="$RUNNER_TEMP/ejs-gd004-project"
           mkdir -p "$TMP_PROJECT"
-          npx clasp create-script --type webapp --title "Europe Job Scan Zero Cost Control Plane - TEST" --rootDir "$TMP_PROJECT"
+          pushd "$TMP_PROJECT" >/dev/null
+          "$GITHUB_WORKSPACE/node_modules/.bin/clasp" create-script --type webapp --title "Europe Job Scan Zero Cost Control Plane - TEST" --rootDir .
+          popd >/dev/null
           SCRIPT_ID="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["scriptId"])' "$TMP_PROJECT/.clasp.json")"
           test -n "$SCRIPT_ID"
           echo "script_id=$SCRIPT_ID" >> "$GITHUB_OUTPUT"
@@ -113,8 +115,8 @@ jobs:
         run: |
           set -euo pipefail
           cd "$SRC"
-          npx clasp push --force
-          DEPLOY_OUTPUT="$(npx clasp create-deployment --description 'GD-004 zero-cost TEST bootstrap')"
+          "$GITHUB_WORKSPACE/node_modules/.bin/clasp" push --force
+          DEPLOY_OUTPUT="$("$GITHUB_WORKSPACE/node_modules/.bin/clasp" create-deployment --description 'GD-004 zero-cost TEST bootstrap')"
           DEPLOYMENT_ID="$(printf '%s\n' "$DEPLOY_OUTPUT" | grep -oE 'AKf[a-zA-Z0-9_-]{20,}' | head -1 || true)"
           if [ -z "$DEPLOYMENT_ID" ]; then
             echo "Could not parse web app deployment ID" >&2
@@ -155,16 +157,15 @@ jobs:
           set -euo pipefail
           printf '{"scriptId":"%s","rootDir":"."}\n' "$SCRIPT_ID" > google_native/apps_script_zero_cost/.clasp.json
           cd google_native/apps_script_zero_cost
-          npx clasp push --force
-          npx clasp create-deployment --deploymentId "$DEPLOYMENT_ID" --description "GD-004 canonical ${GITHUB_SHA}"
+          "$GITHUB_WORKSPACE/node_modules/.bin/clasp" push --force
+          "$GITHUB_WORKSPACE/node_modules/.bin/clasp" create-deployment --deploymentId "$DEPLOYMENT_ID" --description "GD-004 canonical ${GITHUB_SHA}"
 
       - name: TEST-004B/C live HMAC, replay, claim and reconcile smoke
         env:
           EJS_HMAC_SHARED_SECRET_TEST: ${{ secrets.EJS_HMAC_SHARED_SECRET_TEST }}
           WEBAPP_URL: ${{ steps.deploy.outputs.webapp_url }}
         shell: bash
-        run: |
-          python -m ejs.apps.github_runner.control_plane_smoke --url "$WEBAPP_URL" --source-sha "$GITHUB_SHA"
+        run: python -m ejs.apps.github_runner.control_plane_smoke --url "$WEBAPP_URL" --source-sha "$GITHUB_SHA"
 
       - name: Persist non-secret TEST deployment metadata
         env:
@@ -191,7 +192,7 @@ jobs:
           rm -f infra/bootstrap/gd004_apps_script_test_request.json
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add infra/runtime/test_apps_script_zero_cost.json infra/bootstrap/gd004_apps_script_test_request.json || true
+          git add -A infra/runtime infra/bootstrap
           if git diff --cached --quiet; then
             echo 'metadata already current'
           else
