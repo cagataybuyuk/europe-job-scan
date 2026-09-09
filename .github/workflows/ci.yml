@@ -37,6 +37,8 @@ jobs:
           grep -q "EJS_FINAL_SUBMIT: 'false'" .github/workflows/gd004-test-browser.yml
           grep -q "EJS_KILL_SWITCH: 'true'" .github/workflows/gd004-test-browser.yml
           ! grep -q 'cloud-platform' google_native/apps_script_zero_cost/appsscript.json
+          grep -q '"access": "ANYONE_ANONYMOUS"' google_native/apps_script_zero_cost/appsscript.json
+          grep -q '"executeAs": "USER_DEPLOYING"' google_native/apps_script_zero_cost/appsscript.json
           grep -q "GD004_FINAL_SUBMIT_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
           grep -q "GD004_FILE_UPLOAD_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
           grep -q "GD004_FORM_WRITE_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
