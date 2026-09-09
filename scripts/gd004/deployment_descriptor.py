@@ -23,7 +23,9 @@ def _walk(value: Any) -> Iterable[dict[str, Any]]:
 def _description(item: dict[str, Any]) -> str:
     config = item.get("deploymentConfig") or item.get("deployment_config") or {}
     if isinstance(config, dict):
-        return str(config.get("description") or "")
+        nested = str(config.get("description") or "")
+        if nested:
+            return nested
     return str(item.get("description") or "")
 
 
@@ -53,8 +55,6 @@ def select_deployment(payload: Any, *, description_prefix: str) -> tuple[str, st
             candidates.append(item)
     if not candidates:
         raise ValueError(f"no deployment found with description prefix {description_prefix!r}")
-    # Apps Script deployment listings are chronological in practice; choosing the last matching
-    # item is deterministic for a single TEST project and remains bounded by the description prefix.
     selected = candidates[-1]
     deployment_id = _deployment_id(selected)
     return deployment_id, _web_url(selected, deployment_id)
