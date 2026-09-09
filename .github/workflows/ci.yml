@@ -22,6 +22,20 @@ jobs:
         run: |
           bash -n google_native/cloud_run/deploy/bootstrap_test.sh
           bash -n infra/cloud-run/provision_github_wif_test.sh
+      - name: Validate GD-004 user bootstrap PowerShell syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            'scripts/gd004/bootstrap_zero_cost_user_trust.ps1',
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
       - name: Assert Cloud Run TEST workflow remains keyless and private
         run: |
           ! grep -Eq 'credentials_json|service-account-key' .github/workflows/deploy-test-cloud-run.yml
