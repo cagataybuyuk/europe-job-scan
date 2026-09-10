@@ -26,15 +26,21 @@ jobs:
 
       - name: Assert immutable source and zero-cost boundary
         shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          MAIN_SHA: ${{ github.sha }}
+          SCRIPT_ID: ${{ vars.EJS_APPS_SCRIPT_ZERO_COST_ID_TEST }}
         run: |
-          test "$(git rev-parse HEAD)" = "${{ inputs.expected_sha }}"
-          test -n "${{ vars.EJS_APPS_SCRIPT_ZERO_COST_ID_TEST }}"
+          test "$EXPECTED_SHA" = "$MAIN_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -n "$SCRIPT_ID"
           ! grep -q "cloud-platform" google_native/apps_script_zero_cost/appsscript.json
           grep -q '"access": "ANYONE_ANONYMOUS"' google_native/apps_script_zero_cost/appsscript.json
           grep -q '"executeAs": "USER_DEPLOYING"' google_native/apps_script_zero_cost/appsscript.json
           grep -q "GD004_FINAL_SUBMIT_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
           grep -q "GD004_FILE_UPLOAD_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
           grep -q "GD004_FORM_WRITE_FORBIDDEN" google_native/apps_script_zero_cost/EjsGitHubGatewayV1.gs
+          printf "const EJS_GH_DEPLOYED_SOURCE_SHA_V1 = '%s';\n" "$EXPECTED_SHA" > google_native/apps_script_zero_cost/EjsDeploymentV1.gs
 
       - uses: actions/setup-node@v4
         with:
@@ -102,4 +108,4 @@ jobs:
       - name: Clean auth material
         if: always()
         shell: bash
-        run: rm -f "$HOME/.clasprc.json" google_native/apps_script_zero_cost/.clasp.json google_native/apps_script_zero_cost/deployments.json
+        run: rm -f "$HOME/.clasprc.json" google_native/apps_script_zero_cost/.clasp.json google_native/apps_script_zero_cost/deployments.json google_native/apps_script_zero_cost/EjsDeploymentV1.gs

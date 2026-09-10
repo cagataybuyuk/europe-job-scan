@@ -5,6 +5,11 @@ const EJS_GH_CONFIG_V1 = Object.freeze({
   PROD_SPREADSHEET_ID: '1_HuYScTMsVmr29SBeaMRbZqOFiZ3gZLUcFm05xnaYIg',
   TEST_SPREADSHEET_TITLE: 'TEST_EU_Job_Tracker',
   HMAC_SECRET_PROPERTY: 'EJS_HMAC_SHARED_SECRET_TEST',
+  QUEUE_SHEET: 'GD004 TEST Execution Queue',
+  TEST_ASSET_FOLDER_ID: '1SWD9fGmmTkhpg-dezvBGzn5h3QxRAn6U',
+  MAX_ASSET_BYTES: 2097152,
+  MAX_QUEUE_ROWS: 200,
+  MAX_REQUEST_BYTES: 32768,
   MAX_TTL_MS: 300000,
   MAX_CLOCK_SKEW_MS: 30000,
   MAX_REPLAY_ENTRIES: 200,
@@ -16,6 +21,14 @@ const EJS_GH_CONFIG_V1 = Object.freeze({
     'reconcile_result'
   ])
 });
+
+function ejsGhDeployedShaV1_() {
+  if (typeof EJS_GH_DEPLOYED_SOURCE_SHA_V1 !== 'string' ||
+      !/^[0-9a-f]{40}$/.test(EJS_GH_DEPLOYED_SOURCE_SHA_V1)) {
+    throw new Error('GD004_DEPLOYED_SOURCE_SHA_MISSING');
+  }
+  return EJS_GH_DEPLOYED_SOURCE_SHA_V1;
+}
 
 function ejsGhAssertTestEnvironmentV1_() {
   if (EJS_GH_CONFIG_V1.ENVIRONMENT !== 'TEST') {
@@ -43,8 +56,8 @@ function ejsGhAssertTestEnvironmentV1_() {
  *
  * Run manually once in the TEST Apps Script editor after GitHub has pushed the canonical
  * source. This function performs no Sheet write and never returns the HMAC secret value.
- * Its purpose is to trigger the Google consent flow for the explicit spreadsheet scope and
- * to confirm that the required Script Property has been configured.
+ * Its purpose is to trigger the Google consent flow for the explicit spreadsheet/Drive-read
+ * scopes and to confirm that the required Script Property has been configured.
  */
 function ejsGhAuthorizationProbeV1() {
   const environment = ejsGhAssertTestEnvironmentV1_();
