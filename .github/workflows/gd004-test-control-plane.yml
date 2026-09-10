@@ -1,43 +1,55 @@
-name: GD-004 TEST Control Plane Runtime
+name: GD-004 TEST Signed Queue
 
 on:
   workflow_dispatch:
     inputs:
       expected_sha:
-        description: Exact immutable main SHA deployed to TEST Apps Script
+        description: Exact approved main SHA deployed to TEST Apps Script
+        required: true
+      queue_row:
+        description: Explicit row in GD004 TEST Execution Queue
+        required: true
+      execution_id:
+        description: Exact execution ID returned by the TEST-only initializer
         required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: gd004-test-control-plane-${{ inputs.expected_sha }}
+  group: gd004-test-signed-queue
   cancel-in-progress: false
 
 jobs:
-  runtime-smoke:
+  signed-queue:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
     environment: test
-    timeout-minutes: 8
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
     env:
+      EJS_LIVE_READ_ONLY: 'true'
       EJS_FORM_WRITE: 'false'
       EJS_FILE_UPLOAD: 'false'
       EJS_FINAL_SUBMIT: 'false'
-      EJS_GH_HMAC_SECRET_TEST: ${{ secrets.EJS_GH_HMAC_SECRET_TEST }}
+      EJS_HMAC_SHARED_SECRET_TEST: ${{ secrets.EJS_HMAC_SHARED_SECRET_TEST }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.expected_sha }}
 
-      - name: Assert immutable source and TEST-only authority
+      - name: Verify exact approved main and TEST-only authority
         shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          MAIN_SHA: ${{ github.sha }}
         run: |
-          test "$(git rev-parse HEAD)" = "${{ inputs.expected_sha }}"
+          test "$EXPECTED_SHA" = "$MAIN_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$EJS_LIVE_READ_ONLY" = "true"
           test "$EJS_FORM_WRITE" = "false"
           test "$EJS_FILE_UPLOAD" = "false"
           test "$EJS_FINAL_SUBMIT" = "false"
-          test -n "$EJS_GH_HMAC_SECRET_TEST"
+          test -n "$EJS_HMAC_SHARED_SECRET_TEST"
           test -n "${{ vars.EJS_APPS_SCRIPT_ZERO_COST_ID_TEST }}"
 
       - uses: actions/setup-node@v4
@@ -53,8 +65,9 @@ jobs:
       - run: npm install
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
 
-      - name: Materialize clasp mapping and OAuth auth for deployment discovery
+      - name: Materialize clasp mapping and OAuth auth for exact deployment discovery
         shell: bash
         env:
           SCRIPT_ID: ${{ vars.EJS_APPS_SCRIPT_ZERO_COST_ID_TEST }}
@@ -82,15 +95,19 @@ jobs:
             --github-output >> "$GITHUB_OUTPUT"
           rm -f deployments.json
 
-      - name: TEST-004B/C live Apps Script HMAC/replay/claim/reconcile smoke
+      - name: TEST-004B/C signed protocol plus one TEST queue execution
         env:
-          ENDPOINT: ${{ steps.deployment.outputs.web_app_url }}
+          EJS_APPS_SCRIPT_ZERO_COST_URL_TEST: ${{ steps.deployment.outputs.web_app_url }}
+          SOURCE_SHA: ${{ inputs.expected_sha }}
+          QUEUE_ROW: ${{ inputs.queue_row }}
+          EXECUTION_ID: ${{ inputs.execution_id }}
         run: |
-          python -m ejs.apps.control_plane_smoke.main \
-            --endpoint "$ENDPOINT" \
-            --source-sha "${{ inputs.expected_sha }}"
+          python -m ejs.apps.github_runner.queue_main \
+            --source-sha "$SOURCE_SHA" \
+            --queue-row "$QUEUE_ROW" \
+            --execution-id "$EXECUTION_ID"
 
-      - name: Confirm zero side-effect authority
+      - name: Confirm zero mutation authority
         if: always()
         shell: bash
         run: |

@@ -30,3 +30,4 @@ artifacts/
 .DS_Store
 .vscode/
 .idea/
+google_native/apps_script_zero_cost/EjsDeploymentV1.gs
