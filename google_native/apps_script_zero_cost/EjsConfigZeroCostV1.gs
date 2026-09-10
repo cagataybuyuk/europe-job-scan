@@ -64,7 +64,7 @@ function ejsGhAuthorizationProbeV1() {
   const secretConfigured = Boolean(
     PropertiesService.getScriptProperties().getProperty(EJS_GH_CONFIG_V1.HMAC_SECRET_PROPERTY)
   );
-  return {
+  const result = {
     contract_version: EJS_GH_CONFIG_V1.CONTRACT_VERSION,
     environment: environment.environment,
     spreadsheet_title: environment.spreadsheet_title,
@@ -73,4 +73,6 @@ function ejsGhAuthorizationProbeV1() {
     upload_count: 0,
     submit_count: 0
   };
+  console.log(JSON.stringify(result));
+  return result;
 }

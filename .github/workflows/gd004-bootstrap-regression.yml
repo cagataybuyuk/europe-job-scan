@@ -1,0 +1,16 @@
+name: GD-004 Windows bootstrap regression
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  windows-powershell:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify helpers on Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/scripts/test_gd004_bootstrap.ps1
