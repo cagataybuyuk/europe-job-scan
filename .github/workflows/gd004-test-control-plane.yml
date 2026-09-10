@@ -1,0 +1,104 @@
+name: GD-004 TEST Control Plane Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact immutable main SHA deployed to TEST Apps Script
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gd004-test-control-plane-${{ inputs.expected_sha }}
+  cancel-in-progress: false
+
+jobs:
+  runtime-smoke:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: test
+    timeout-minutes: 8
+    env:
+      EJS_FORM_WRITE: 'false'
+      EJS_FILE_UPLOAD: 'false'
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_GH_HMAC_SECRET_TEST: ${{ secrets.EJS_GH_HMAC_SECRET_TEST }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+
+      - name: Assert immutable source and TEST-only authority
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ inputs.expected_sha }}"
+          test "$EJS_FORM_WRITE" = "false"
+          test "$EJS_FILE_UPLOAD" = "false"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test -n "$EJS_GH_HMAC_SECRET_TEST"
+          test -n "${{ vars.EJS_APPS_SCRIPT_ZERO_COST_ID_TEST }}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: npm install
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+
+      - name: Materialize clasp mapping and OAuth auth for deployment discovery
+        shell: bash
+        env:
+          SCRIPT_ID: ${{ vars.EJS_APPS_SCRIPT_ZERO_COST_ID_TEST }}
+          CLASPRC_JSON: ${{ secrets.EJS_CLASPRC_JSON_TEST }}
+        run: |
+          test -n "$SCRIPT_ID"
+          test -n "$CLASPRC_JSON"
+          printf '{"scriptId":"%s","rootDir":"."}\n' "$SCRIPT_ID" > google_native/apps_script_zero_cost/.clasp.json
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+
+      - name: Resolve exact-SHA Web App deployment
+        id: deployment
+        working-directory: google_native/apps_script_zero_cost
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          DESCRIPTION="EJS-GD004-ZERO-COST-TEST:${EXPECTED_SHA}"
+          npx clasp list-deployments --json > deployments.json
+          python ../../scripts/gd004/deployment_descriptor.py \
+            --input deployments.json \
+            --description-prefix "$DESCRIPTION" \
+            --github-output >> "$GITHUB_OUTPUT"
+          rm -f deployments.json
+
+      - name: TEST-004B/C live Apps Script HMAC/replay/claim/reconcile smoke
+        env:
+          ENDPOINT: ${{ steps.deployment.outputs.web_app_url }}
+        run: |
+          python -m ejs.apps.control_plane_smoke.main \
+            --endpoint "$ENDPOINT" \
+            --source-sha "${{ inputs.expected_sha }}"
+
+      - name: Confirm zero side-effect authority
+        if: always()
+        shell: bash
+        run: |
+          test "$EJS_FORM_WRITE" = "false"
+          test "$EJS_FILE_UPLOAD" = "false"
+          test "$EJS_FINAL_SUBMIT" = "false"
+
+      - name: Clean auth material
+        if: always()
+        shell: bash
+        run: rm -f "$HOME/.clasprc.json" google_native/apps_script_zero_cost/.clasp.json google_native/apps_script_zero_cost/deployments.json
