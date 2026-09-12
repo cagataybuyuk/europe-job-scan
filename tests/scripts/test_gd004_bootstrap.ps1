@@ -6,7 +6,7 @@ $Errors = $null
 $Ast = [System.Management.Automation.Language.Parser]::ParseFile($SourcePath, [ref]$Tokens, [ref]$Errors)
 if ($Errors.Count) { throw 'Bootstrap syntax errors' }
 # Load the actual pure helpers without running OAuth or changing accounts.
-foreach ($Name in @('Assert-NativeSuccess', 'New-HmacSecret')) {
+foreach ($Name in @('Assert-NativeSuccess', 'New-HmacSecret', 'Clear-BootstrapClipboard')) {
   $Function = $Ast.Find({ param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq $Name }, $true)
   if (-not $Function) { throw "Missing helper $Name" }
   . ([scriptblock]::Create($Function.Extent.Text))
@@ -27,3 +27,37 @@ try { Assert-NativeSuccess 'failed command' } catch { $Rejected = $_.Exception.M
 if (-not $Rejected) { throw 'Native failure was accepted' }
 & cmd.exe /c 'exit 0'
 Write-Host 'PASS: Windows PowerShell HMAC generation and native failure handling'
+
+# Exercise the real Windows clipboard API with harmless data, including cleanup.
+Set-Clipboard -Value 'bootstrap-test-placeholder'
+Clear-BootstrapClipboard
+if ((Get-Clipboard -Raw) -ne ' ') { throw 'Clipboard was not overwritten' }
+
+# Resume must bypass project creation, OAuth, HMAC rotation and the saved-property prompt.
+# Stop at the deployment dispatch boundary using a failed native command double.
+function git {
+  $global:LASTEXITCODE = 0
+  if ($args[0] -eq 'rev-parse' -and $args[1] -eq '--show-toplevel') { return (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path }
+  if ($args[0] -eq 'branch') { return 'main' }
+  if ($args[0] -eq 'ls-remote') { return (('a' * 40) + "`trefs/heads/main") }
+  return ('a' * 40)
+}
+function npm { $global:LASTEXITCODE = 0 }
+function npx { throw 'Resume must not invoke clasp' }
+function gh {
+  $global:LASTEXITCODE = 0
+  if ($args[0] -eq 'repo') { return 'cagataybuyuk/europe-job-scan' }
+  if ($args[0] -eq 'auth') { return }
+  if ($args[0] -eq 'variable' -and $args[1] -eq 'get') { return 'existing-test-script' }
+  if ($args[0] -eq 'workflow' -and $args[1] -eq 'run') { $global:LASTEXITCODE = 23; return }
+  throw 'Unexpected GitHub operation during resume'
+}
+function Read-Host { throw 'Resume must not ask for trust setup again' }
+function Start-Process { throw 'Resume must not open OAuth or project settings' }
+$StoppedAtDispatch = $false
+try { & $SourcePath -ResumeAfterTrust } catch {
+  $StoppedAtDispatch = $_.Exception.Message -match 'deployment dispatch failed \(exit code 23\)'
+}
+if (-not $StoppedAtDispatch) { throw 'Resume did not reach and stop at the checked deployment boundary' }
+$global:LASTEXITCODE = 0
+Write-Host 'PASS: real Windows clipboard cleanup and resume without changing trust'

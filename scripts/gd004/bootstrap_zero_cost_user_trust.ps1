@@ -1,3 +1,5 @@
+param([switch]$ResumeAfterTrust)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -23,6 +25,17 @@ function New-HmacSecret {
   } finally {
     $RandomGenerator.Dispose()
     [Array]::Clear($RandomBytes, 0, $RandomBytes.Length)
+  }
+}
+
+function Clear-BootstrapClipboard {
+  if (Get-Command Set-Clipboard -ErrorAction SilentlyContinue) {
+    try {
+      # Windows PowerShell 5.1 rejects an empty string. Overwrite with a space.
+      Set-Clipboard -Value ' ' -ErrorAction Stop
+    } catch {
+      Write-Warning 'Clipboard cleanup failed. Copy a harmless value to replace its contents.'
+    }
   }
 }
 
@@ -56,82 +69,93 @@ if ($RemoteSha -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve immutable 
 npm install
 Assert-NativeSuccess 'dependency installation'
 
-Write-Host ''
-Write-Host 'STEP 1/7 — Enable the Apps Script API for your Google account.' -ForegroundColor Cyan
-Write-Host 'This is a free Apps Script user setting; it is not Google Cloud billing.'
-Start-Process 'https://script.google.com/home/usersettings'
-Read-Host 'Enable Google Apps Script API on that page, then press Enter here'
-
-$ClaspRc = Join-Path $HOME '.clasprc.json'
-if (-not (Test-Path $ClaspRc)) {
+if (-not $ResumeAfterTrust) {
   Write-Host ''
-  Write-Host 'STEP 2/7 — One-time Google OAuth for clasp.' -ForegroundColor Cyan
-  Write-Host 'Complete the browser authorization yourself. Never paste the credential into chat.'
-  npx clasp login --no-localhost
-  Assert-NativeSuccess 'clasp authorization'
-}
-if (-not (Test-Path $ClaspRc)) { throw '.clasprc.json was not created by clasp login.' }
+  Write-Host 'STEP 1/7 - Enable the Apps Script API for your Google account.' -ForegroundColor Cyan
+  Write-Host 'This is a free Apps Script user setting; it is not Google Cloud billing.'
+  Start-Process 'https://script.google.com/home/usersettings'
+  Read-Host 'Enable Google Apps Script API on that page, then press Enter here'
 
-$ScriptId = ''
-$VariablesJson = gh variable list --json name,value
-Assert-NativeSuccess 'GitHub variable lookup'
-$Variables = $VariablesJson | ConvertFrom-Json
-$ExistingScript = @($Variables | Where-Object { $_.name -eq 'EJS_APPS_SCRIPT_ZERO_COST_ID_TEST' })
-if ($ExistingScript.Count -eq 1) { $ScriptId = [string]$ExistingScript[0].value }
-if (-not $ScriptId) {
-  Write-Host ''
-  Write-Host 'STEP 3/7 — Creating standalone TEST Apps Script project automatically.' -ForegroundColor Cyan
-  $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ejs-gd004-" + [guid]::NewGuid().ToString('N'))
-  New-Item -ItemType Directory -Path $TempDir | Out-Null
-  try {
-    Push-Location $TempDir
-    npx clasp create-script --title 'Europe Job Scan Control Plane - TEST' --type standalone
-    Assert-NativeSuccess 'Apps Script creation'
-    $MappingPath = Join-Path $TempDir '.clasp.json'
-    if (-not (Test-Path $MappingPath)) { throw 'clasp did not create .clasp.json.' }
-    $Mapping = Get-Content $MappingPath -Raw | ConvertFrom-Json
-    $ScriptId = [string]$Mapping.scriptId
-    if (-not $ScriptId) { throw 'Script ID could not be read from .clasp.json.' }
-  } finally {
-    Pop-Location
-    Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+  $ClaspRc = Join-Path $HOME '.clasprc.json'
+  if (-not (Test-Path $ClaspRc)) {
+    Write-Host ''
+    Write-Host 'STEP 2/7 - One-time Google OAuth for clasp.' -ForegroundColor Cyan
+    Write-Host 'Complete the browser authorization yourself. Never paste the credential into chat.'
+    npx clasp login --no-localhost
+    Assert-NativeSuccess 'clasp authorization'
   }
-  gh variable set EJS_APPS_SCRIPT_ZERO_COST_ID_TEST --body $ScriptId
-  Assert-NativeSuccess 'Script ID configuration'
-}
+  if (-not (Test-Path $ClaspRc)) { throw '.clasprc.json was not created by clasp login.' }
 
-Write-Host ''
-Write-Host 'STEP 4/7 — Store CI credentials directly in GitHub encrypted secrets.' -ForegroundColor Cyan
-Get-Content $ClaspRc -Raw | gh secret set EJS_CLASPRC_JSON_TEST
-Assert-NativeSuccess 'OAuth secret configuration'
+  $ScriptId = ''
+  $VariablesJson = gh variable list --json name,value
+  Assert-NativeSuccess 'GitHub variable lookup'
+  $Variables = $VariablesJson | ConvertFrom-Json
+  $ExistingScript = @($Variables | Where-Object { $_.name -eq 'EJS_APPS_SCRIPT_ZERO_COST_ID_TEST' })
+  if ($ExistingScript.Count -eq 1) { $ScriptId = [string]$ExistingScript[0].value }
+  if (-not $ScriptId) {
+    Write-Host ''
+    Write-Host 'STEP 3/7 - Creating standalone TEST Apps Script project automatically.' -ForegroundColor Cyan
+    $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ejs-gd004-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $TempDir | Out-Null
+    try {
+      Push-Location $TempDir
+      npx clasp create-script --title 'Europe Job Scan Control Plane - TEST' --type standalone
+      Assert-NativeSuccess 'Apps Script creation'
+      $MappingPath = Join-Path $TempDir '.clasp.json'
+      if (-not (Test-Path $MappingPath)) { throw 'clasp did not create .clasp.json.' }
+      $Mapping = Get-Content $MappingPath -Raw | ConvertFrom-Json
+      $ScriptId = [string]$Mapping.scriptId
+      if (-not $ScriptId) { throw 'Script ID could not be read from .clasp.json.' }
+    } finally {
+      Pop-Location
+      Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    gh variable set EJS_APPS_SCRIPT_ZERO_COST_ID_TEST --body $ScriptId
+    Assert-NativeSuccess 'Script ID configuration'
+  }
 
-$HmacSecret = New-HmacSecret
-$HmacSecret | gh secret set EJS_HMAC_SHARED_SECRET_TEST
-Assert-NativeSuccess 'HMAC secret configuration'
+  Write-Host ''
+  Write-Host 'STEP 4/7 - Store CI credentials directly in GitHub encrypted secrets.' -ForegroundColor Cyan
+  Get-Content $ClaspRc -Raw | gh secret set EJS_CLASPRC_JSON_TEST
+  Assert-NativeSuccess 'OAuth secret configuration'
 
-$SecretFile = $null
-if (Get-Command Set-Clipboard -ErrorAction SilentlyContinue) {
-  Set-Clipboard -Value $HmacSecret
-  $ClipboardNote = 'The HMAC value is on your clipboard.'
+  $HmacSecret = New-HmacSecret
+  $HmacSecret | gh secret set EJS_HMAC_SHARED_SECRET_TEST
+  Assert-NativeSuccess 'HMAC secret configuration'
+
+  $SecretFile = $null
+  if (Get-Command Set-Clipboard -ErrorAction SilentlyContinue) {
+    Set-Clipboard -Value $HmacSecret
+    $ClipboardNote = 'The HMAC value is on your clipboard.'
+  } else {
+    $SecretFile = Join-Path ([System.IO.Path]::GetTempPath()) ("ejs-gd004-hmac-" + [guid]::NewGuid().ToString('N') + '.txt')
+    Set-Content -Path $SecretFile -Value $HmacSecret -NoNewline
+    $ClipboardNote = "Temporary local HMAC file: $SecretFile"
+  }
+
+  Write-Host ''
+  Write-Host 'STEP 5/7 - Set the same value as one TEST Script Property.' -ForegroundColor Cyan
+  Write-Host "Script ID: $ScriptId"
+  Write-Host 'Property key: EJS_HMAC_SHARED_SECRET_TEST'
+  Write-Host $ClipboardNote
+  Start-Process ("https://script.google.com/d/{0}/edit" -f $ScriptId)
+  Read-Host 'Project Settings -> Script Properties: paste/save the value, then press Enter here'
+  if ($SecretFile) { Remove-Item $SecretFile -Force -ErrorAction SilentlyContinue }
+  $HmacSecret = $null
+  Clear-BootstrapClipboard
+
+
 } else {
-  $SecretFile = Join-Path ([System.IO.Path]::GetTempPath()) ("ejs-gd004-hmac-" + [guid]::NewGuid().ToString('N') + '.txt')
-  Set-Content -Path $SecretFile -Value $HmacSecret -NoNewline
-  $ClipboardNote = "Temporary local HMAC file: $SecretFile"
+  # Trust was already saved in both GitHub and Apps Script; never rotate it here.
+  $ScriptId = (gh variable get EJS_APPS_SCRIPT_ZERO_COST_ID_TEST).Trim()
+  Assert-NativeSuccess 'existing Script ID lookup'
+  if (-not $ScriptId) { throw 'Complete the initial trust setup before resuming.' }
+  Clear-BootstrapClipboard
+  Write-Host 'Resuming at deployment with the existing TEST trust configuration.'
 }
 
 Write-Host ''
-Write-Host 'STEP 5/7 — Set the same value as one TEST Script Property.' -ForegroundColor Cyan
-Write-Host "Script ID: $ScriptId"
-Write-Host 'Property key: EJS_HMAC_SHARED_SECRET_TEST'
-Write-Host $ClipboardNote
-Start-Process ("https://script.google.com/d/{0}/edit" -f $ScriptId)
-Read-Host 'Project Settings -> Script Properties: paste/save the value, then press Enter here'
-if ($SecretFile) { Remove-Item $SecretFile -Force -ErrorAction SilentlyContinue }
-$HmacSecret = $null
-if (Get-Command Set-Clipboard -ErrorAction SilentlyContinue) { Set-Clipboard -Value '' }
-
-Write-Host ''
-Write-Host 'STEP 6/7 — Deploy exact canonical main SHA through GitHub Actions.' -ForegroundColor Cyan
+Write-Host 'STEP 6/7 - Deploy exact canonical main SHA through GitHub Actions.' -ForegroundColor Cyan
 gh workflow run deploy-test-apps-script-zero-cost.yml -f expected_sha=$RemoteSha
 Assert-NativeSuccess 'deployment dispatch'
 Start-Sleep -Seconds 3
@@ -142,7 +166,7 @@ gh run watch $DeployRun --exit-status
 Assert-NativeSuccess 'deployment workflow'
 
 Write-Host ''
-Write-Host 'STEP 7/7 — One-time Google runtime consent + synthetic TEST queue staging.' -ForegroundColor Cyan
+Write-Host 'STEP 7/7 - One-time Google runtime consent + synthetic TEST queue staging.' -ForegroundColor Cyan
 Write-Host 'In the Apps Script editor run ejsGhAuthorizationProbeV1 once and approve the requested Google permissions.'
 Write-Host 'It must report hmac_secret_configured=true and zero side effects.'
 Write-Host 'Then run ejsGhInitializeSyntheticTestV1 once. It stages only a synthetic TEST row.'
