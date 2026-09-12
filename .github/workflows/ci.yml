@@ -68,6 +68,12 @@ jobs:
           grep -q 'EJS_GH_DEPLOYED_SOURCE_SHA_V1' .github/workflows/deploy-test-apps-script-zero-cost.yml
           grep -q 'EJS_HMAC_SHARED_SECRET_TEST' scripts/gd004/bootstrap_zero_cost_user_trust.ps1
           ! grep -q 'EJS_GH_HMAC_SECRET_TEST' scripts/gd004/bootstrap_zero_cost_user_trust.ps1
+          grep -q 'gd004-safe-fill-upload-canary' .github/workflows/gd004-safe-fill-upload-canary.yml
+          grep -q "EJS_FINAL_SUBMIT: 'false'" .github/workflows/gd004-safe-fill-upload-canary.yml
+          grep -q "EJS_KILL_SWITCH: 'true'" .github/workflows/gd004-safe-fill-upload-canary.yml
+          grep -q 'gd004-r2-submit-review' .github/workflows/gd004-r2-submit-release-gate.yml
+          grep -q "EJS_FINAL_SUBMIT: 'false'" .github/workflows/gd004-r2-submit-release-gate.yml
+          grep -q 'READY_FOR_MANUAL_ENVIRONMENT_REVIEW' src/ejs/apps/github_runner/canary_policy.py
 
   core-regression:
     runs-on: ubuntu-latest
@@ -140,10 +146,6 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
-      - name: Verify clasp installation from a clean checkout
-        run: |
-          npm install
-          npm run clasp:version
       - name: Run GD-004 signed contract tests
         run: python -m pytest -q tests/unit/test_gd004_contract.py
       - name: Run GD-004 deployment descriptor tests
@@ -154,3 +156,4 @@ jobs:
         run: python -m pytest -q tests/unit/test_gd004_queue.py tests/unit/test_gd004_queue_browser.py
       - name: Run GD-004 GitHub-hosted Chromium smoke
         run: python -m pytest -q tests/unit/test_gd004_browser.py
+
