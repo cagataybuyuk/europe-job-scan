@@ -140,6 +140,10 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
+      - name: Verify clasp installation from a clean checkout
+        run: |
+          npm install
+          npm run clasp:version
       - name: Run GD-004 signed contract tests
         run: python -m pytest -q tests/unit/test_gd004_contract.py
       - name: Run GD-004 deployment descriptor tests
