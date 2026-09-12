@@ -68,17 +68,22 @@ jobs:
       - name: Run canary policy tests
         run: python -m pytest -q tests/unit/test_gd004_canary_policy.py
 
-      - name: Materialize reviewer-approved live manifest and CV
+      - name: Materialize reviewer-approved live manifest and split CV
         if: inputs.target_mode == 'live'
         env:
           CANARY_MANIFEST: ${{ secrets.EJS_LIVE_CANARY_MANIFEST_JSON }}
-          CANARY_CV_B64: ${{ secrets.EJS_LIVE_CANARY_CV_B64 }}
+          CANARY_CV_B64_PART1: ${{ secrets.EJS_LIVE_CANARY_CV_B64_PART1 }}
+          CANARY_CV_B64_PART2: ${{ secrets.EJS_LIVE_CANARY_CV_B64_PART2 }}
         shell: bash
         run: |
           test -n "$CANARY_MANIFEST"
-          test -n "$CANARY_CV_B64"
+          test -n "$CANARY_CV_B64_PART1"
+          test -n "$CANARY_CV_B64_PART2"
           printf '%s\n' "$CANARY_MANIFEST" > canary-manifest.json
-          printf '%s' "$CANARY_CV_B64" | base64 --decode > approved-canary-cv.pdf
+          printf '%s%s' "$CANARY_CV_B64_PART1" "$CANARY_CV_B64_PART2" |
+            base64 --decode > approved-canary-cv.pdf
+          test -s approved-canary-cv.pdf
+          test "$(head -c 4 approved-canary-cv.pdf)" = "%PDF"
 
       - name: Execute bounded safe-fill + one approved CV upload
         env:
