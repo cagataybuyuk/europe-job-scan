@@ -1,0 +1,76 @@
+name: GD-004 R2 Submit Release Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact immutable main SHA to review
+        required: true
+        type: string
+      canary_evidence_json:
+        description: JSON evidence emitted by the approved live safe-fill/upload canary
+        required: true
+        type: string
+      approval_phrase:
+        description: Type APPROVE-R2-SINGLE-SUBMIT-CANARY
+        required: true
+        type: string
+      second_approver:
+        description: Independent reviewer identity (email or GitHub login)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: gd004-r2-submit-review
+    env:
+      EJS_LIVE_READ_ONLY: 'false'
+      EJS_FORM_WRITE: 'true'
+      EJS_FILE_UPLOAD: 'true'
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_KILL_SWITCH: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+
+      - name: Assert release review is immutable and submit remains off
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+
+      - name: Validate R2 evidence and produce a blocked-by-default manifest
+        env:
+          EVIDENCE_JSON: ${{ inputs.canary_evidence_json }}
+          APPROVAL_PHRASE: ${{ inputs.approval_phrase }}
+          SECOND_APPROVER: ${{ inputs.second_approver }}
+        shell: bash
+        run: |
+          printf '%s\n' "$EVIDENCE_JSON" > r2-canary-evidence.json
+          python -m ejs.apps.github_runner.submit_release_gate \
+            --evidence r2-canary-evidence.json \
+            --expected-sha "${{ inputs.expected_sha }}" \
+            --approval-phrase "$APPROVAL_PHRASE" \
+            --second-approver "$SECOND_APPROVER" \
+            --output r2-release-manifest.json
+
+      - name: Publish review manifest (no runtime authority change)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gd004-r2-release-manifest-${{ github.run_id }}
+          path: r2-release-manifest.json
+          retention-days: 30
