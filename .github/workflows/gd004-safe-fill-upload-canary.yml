@@ -1,0 +1,106 @@
+name: GD-004 TEST Safe-Fill + CV Upload Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact immutable main SHA approved for this canary
+        required: true
+        type: string
+      target_mode:
+        description: Fixture now; live requires the canary environment reviewer and target manifest
+        required: true
+        default: fixture
+        type: choice
+        options: [fixture, live]
+      target_url:
+        description: HTTPS target URL for the approved live canary
+        required: false
+        type: string
+      approval_phrase:
+        description: Type APPROVE-TEST-SAFE-FILL-UPLOAD-CANARY
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gd004-safe-fill-upload-canary-${{ inputs.expected_sha }}
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: gd004-safe-fill-upload-canary
+    env:
+      EJS_LIVE_READ_ONLY: 'false'
+      EJS_FORM_WRITE: 'true'
+      EJS_FILE_UPLOAD: 'true'
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_KILL_SWITCH: 'true'
+      EJS_CANARY_APPROVAL: ${{ inputs.approval_phrase }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+
+      - name: Assert immutable source and canary fence
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$EJS_FORM_WRITE" = "true"
+          test "$EJS_FILE_UPLOAD" = "true"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Run canary policy tests
+        run: python -m pytest -q tests/unit/test_gd004_canary_policy.py
+
+      - name: Materialize reviewer-approved live manifest and CV
+        if: inputs.target_mode == 'live'
+        env:
+          CANARY_MANIFEST: ${{ secrets.EJS_LIVE_CANARY_MANIFEST_JSON }}
+          CANARY_CV_B64: ${{ secrets.EJS_LIVE_CANARY_CV_B64 }}
+        shell: bash
+        run: |
+          test -n "$CANARY_MANIFEST"
+          test -n "$CANARY_CV_B64"
+          printf '%s\n' "$CANARY_MANIFEST" > canary-manifest.json
+          printf '%s' "$CANARY_CV_B64" | base64 --decode > approved-canary-cv.pdf
+
+      - name: Execute bounded safe-fill + one approved CV upload
+        env:
+          TARGET_MODE: ${{ inputs.target_mode }}
+          TARGET_URL: ${{ inputs.target_url }}
+        shell: bash
+        run: |
+          args=(--source-sha "${{ inputs.expected_sha }}" --approval-phrase "$EJS_CANARY_APPROVAL" --target-mode "$TARGET_MODE" --run-id "$GITHUB_RUN_ID")
+          if [ -n "$TARGET_URL" ]; then args+=(--target-url "$TARGET_URL"); fi
+          if [ "$TARGET_MODE" = live ]; then args+=(--manifest canary-manifest.json --cv-path approved-canary-cv.pdf); fi
+          python -m ejs.apps.github_runner.safe_fill_upload_canary "${args[@]}" | tee canary-evidence.json
+
+      - name: Confirm final submit remains disabled
+        if: always()
+        run: |
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+
+      - name: Upload non-secret canary evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gd004-safe-fill-upload-canary-${{ github.run_id }}
+          path: canary-evidence.json
+          retention-days: 14

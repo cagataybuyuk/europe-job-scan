@@ -63,3 +63,12 @@ and independent TEST Sheet readback are the required live acceptance evidence.
 Disable the signed queue workflow and remove the TEST Web App deployment. Preserve
 queue rows and results as evidence; do not reset claimed jobs. Revert this source
 change through a reviewed PR if needed. No PROD rollback is required by this package.
+
+## Safe-fill + CV upload canary and R2 submit gate
+
+TEST-004B/C'nin canlı geçişinden sonraki geliştirme iki ayrı kapıyla uygulanır:
+
+1. `gd004-safe-fill-upload-canary.yml`, `gd004-safe-fill-upload-canary` GitHub Environment incelemesinden sonra çalışır. Canary, bir TEST fixture üzerinde BE-2 güvenli alan yazımı ve FILE-1 tarafından onaylanmış tek PDF CV eklemesini aynı oturumda doğrular. `EJS_FINAL_SUBMIT=false` ve `EJS_KILL_SWITCH=true` zorunludur; kanıt kaydı `submit_attempts=0` içermelidir. `live` modu, hedef manifesti ve Environment incelemesi olmadan fail-closed durumdadır.
+2. `gd004-r2-submit-release-gate.yml`, canlı canary kanıtını, exact main SHA'yı ve bağımsız ikinci onayı doğrular. Başarılı çıktı yalnızca `READY_FOR_MANUAL_ENVIRONMENT_REVIEW` manifestidir; runtime submit bayrağını açmaz. Final Submit için ayrıca `gd004-r2-submit-review` Environment reviewer onayı ve ayrı bir yayın değişikliği gerekir.
+
+Bu ayrım, safe-fill/upload kanıtının yanlışlıkla final submit yetkisine dönüşmesini engeller. R2 kapısı; fingerprint kararlılığı, en az bir safe-fill yazımı, tam bir CV upload, insan inceleme kapısına ulaşılması, onaylı asset ve sıfır submit denemesi olmadan açılamaz.
