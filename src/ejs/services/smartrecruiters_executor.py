@@ -17,6 +17,7 @@ from ejs.persistence.tmh_memory import InMemoryTmhRepository
 from ejs.services.browser_worker import BrowserRuntimeConfig, _CONTROL_EXTRACTOR
 from ejs.services.file_assets import accept_allows, verify_asset
 from ejs.services.file_uploader import PlaywrightFileUploader
+from ejs.services.form_compatibility import FORM_COMPATIBILITY_PROBE, compatibility_blockers
 from ejs.services.prefill_writer import validate_prefill_plan
 from ejs.services.safe_field_writer import PlaywrightSafeFieldWriter, _attr_escape
 from ejs.services.submit_policy import validate_pre_submit
@@ -108,6 +109,11 @@ class PlaywrightSmartRecruitersExecutor:
                 if not controls and any(auth.values()):
                     context.close(); browser.close()
                     return self._failure(request, SmartRecruitersExecutionState.BOUNDARY, "AUTH_BOUNDARY", "authentication boundary observed", final_url=final_url)
+
+                compatibility = compatibility_blockers(page.evaluate(FORM_COMPATIBILITY_PROBE))
+                if compatibility:
+                    context.close(); browser.close()
+                    return self._failure(request, SmartRecruitersExecutionState.BOUNDARY, compatibility[0], "; ".join(compatibility), final_url=final_url)
 
                 ats_family = "smartrecruiters"
                 observed_fp = runtime_form_fingerprint(

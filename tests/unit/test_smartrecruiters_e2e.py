@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 import hashlib
 import shutil
+import tempfile
 import unittest
 
 from ejs.contracts.browser import BrowserInspectionRequest
@@ -160,6 +161,25 @@ class SmartRecruitersE2ETests(unittest.TestCase):
         self.assertFalse(r.validation.execution_allowed)
         self.assertEqual(r.required_controls_observed, 7)
         self.assertEqual(r.resolved_required_controls, 7)
+
+    def test_unsupported_form_structures_stop_before_any_write_or_upload(self):
+        cases = (
+            ('<div id="host"></div><script>document.getElementById("host").attachShadow({mode:"open"}).innerHTML = \'<input id="firstName">\';</script>', "SHADOW_DOM_ADAPTER_REQUIRED"),
+            ('<input id="cv" type="file"><input id="cv" type="file">', "AMBIGUOUS_CONTROL_LOCATOR"),
+            ('<input id="firstName"><button>Next</button>', "MULTISTEP_ADAPTER_REQUIRED"),
+            ('<h1>Loading application</h1>', "FORM_CONTROLS_NOT_READY"),
+        )
+        for html, expected_error in cases:
+            with self.subTest(expected_error=expected_error), tempfile.TemporaryDirectory() as folder:
+                target = Path(folder) / "unsupported.html"
+                target.write_text(html, encoding="utf-8")
+                r = self.executor.execute(self.request(application_url=target.as_uri()))
+                self.assertEqual(r.runtime_state, SmartRecruitersExecutionState.BOUNDARY)
+                self.assertEqual(r.error_code, expected_error)
+                self.assertEqual(r.form_value_write_attempts, 0)
+                self.assertEqual(r.file_upload_attempts, 0)
+                self.assertEqual(r.submit_attempts, 0)
+                self.assertFalse(r.review_gate_reached)
 
     def test_all_field_readbacks_are_verified(self):
         r = self.executor.execute(self.request())
