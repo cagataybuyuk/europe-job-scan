@@ -1,0 +1,71 @@
+name: GD-004 Read-only Live Inspection
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact immutable main SHA to inspect
+        required: true
+        type: string
+      target_url:
+        description: Approved HTTPS SmartRecruiters application URL
+        required: true
+        type: string
+      approval_phrase:
+        description: Type APPROVE-TEST-LIVE-INSPECTION
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_KILL_SWITCH: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+      - name: Assert immutable read-only boundary
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          APPROVAL: ${{ inputs.approval_phrase }}
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$APPROVAL" = "APPROVE-TEST-LIVE-INSPECTION"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Inspect approved target without mutation authority
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+        run: |
+          python -m ejs.services.smartrecruiters_live_inspector \
+            --url "$TARGET_URL" \
+            --output live-inspection.json
+      - name: Reassert zero side effects
+        run: |
+          python - <<'PY'
+          import json
+          report = json.load(open('live-inspection.json', encoding='utf-8'))
+          assert report['inspection_only'] is True
+          assert report.get('form_value_write_attempts', 0) == 0
+          assert report.get('file_upload_attempts', 0) == 0
+          assert report.get('submit_attempts', 0) == 0
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gd004-live-inspection-${{ github.run_id }}
+          path: live-inspection.json
+          retention-days: 14
