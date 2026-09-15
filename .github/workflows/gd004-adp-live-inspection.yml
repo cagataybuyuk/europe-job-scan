@@ -1,0 +1,121 @@
+name: GD-004 ADP Read-only Live Inspection
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact immutable main SHA to inspect
+        required: true
+        type: string
+      target_url:
+        description: Approved HTTPS ADP Workforce Now application URL
+        required: true
+        type: string
+      approval_phrase:
+        description: Type APPROVE-TEST-ADP-LIVE-INSPECTION
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_KILL_SWITCH: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+      - name: Assert immutable read-only boundary
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          APPROVAL: ${{ inputs.approval_phrase }}
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$APPROVAL" = "APPROVE-TEST-ADP-LIVE-INSPECTION"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Inspect approved ADP target without mutation authority
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+        run: |
+          python -m ejs.services.adp_live_inspector \
+            --url "$TARGET_URL" \
+            --output adp-live-inspection.json
+      - name: Reassert zero side effects and fail-closed inspection state
+        run: |
+          python - <<'PY'
+          import json
+          report = json.load(open('adp-live-inspection.json', encoding='utf-8'))
+          assert report['inspection_only'] is True
+          assert report.get('live_execution_ready') is False
+          for key in (
+              'navigation_click_attempts',
+              'credential_entry_attempts',
+              'form_value_write_attempts',
+              'file_upload_attempts',
+              'submit_attempts',
+          ):
+              assert report.get(key, 0) == 0, (key, report.get(key))
+          assert report.get('runtime_state') in {
+              'inspected',
+              'application_entry_observed',
+              'auth_boundary',
+              'captcha_boundary',
+              'form_structure_not_discovered',
+          }
+          if report.get('runtime_state') == 'application_entry_observed':
+              assert report.get('error_code') == 'APPLICATION_ENTRY_REQUIRES_NAVIGATION'
+              assert report.get('application_entry_actions')
+          if report.get('runtime_state') == 'auth_boundary':
+              assert report.get('error_code') == 'ADP_AUTH_BOUNDARY'
+          if report.get('runtime_state') == 'captcha_boundary':
+              assert report.get('error_code') == 'CAPTCHA_BOUNDARY'
+              assert report.get('captcha_observed') is True
+          PY
+      - name: Route ADP inspection evidence without execution authority
+        run: |
+          python -m ejs.services.adp_live_route \
+            --input adp-live-inspection.json \
+            --output adp-live-route.json
+      - name: Reassert routing cannot authorize execution
+        run: |
+          python - <<'PY'
+          import json
+          inspection = json.load(open('adp-live-inspection.json', encoding='utf-8'))
+          route = json.load(open('adp-live-route.json', encoding='utf-8'))
+          assert route['route'] in {
+              'human_handoff',
+              'navigation_review_candidate',
+              'manifest_review_candidate',
+              'diagnostic_review',
+          }
+          assert route.get('automation_resume_allowed') is False
+          assert route.get('navigation_click_allowed') is False
+          assert route.get('safe_fill_allowed') is False
+          assert route.get('final_submit_allowed') is False
+          if inspection.get('runtime_state') == 'application_entry_observed':
+              assert route.get('route') == 'navigation_review_candidate'
+              assert route.get('navigation_review_allowed') is True
+          if inspection.get('runtime_state') in {'captcha_boundary', 'auth_boundary'}:
+              assert route.get('route') == 'human_handoff'
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gd004-adp-live-inspection-${{ github.run_id }}
+          path: |
+            adp-live-inspection.json
+            adp-live-route.json
+          retention-days: 14
