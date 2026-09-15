@@ -65,6 +65,9 @@ PAGE_STRUCTURE_DIAGNOSTICS = r"""
 """
 
 
+CAPTCHA_FRAME_HOST_SUFFIXES = ("captcha-delivery.com",)
+
+
 @dataclass(frozen=True)
 class LiveInspectionRequest:
     application_url: str
@@ -96,6 +99,12 @@ def same_origin_url(parent_url: str, child_url: str) -> bool:
     if child_url in {"", "about:blank"}:
         return True
     return bool(_origin(parent_url)) and _origin(parent_url) == _origin(child_url)
+
+
+def is_known_captcha_origin(origin: str) -> bool:
+    parsed = urlparse(origin)
+    host = (parsed.hostname or "").lower()
+    return any(host == suffix or host.endswith(f".{suffix}") for suffix in CAPTCHA_FRAME_HOST_SUFFIXES)
 
 
 def _rebase_scope(value: str, scope: str) -> str:
@@ -235,16 +244,18 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
             frame_diagnostics = []
             same_origin_frames = 0
             cross_origin_frames = 0
+            challenge_frame_origins: list[str] = []
 
             for index, frame in enumerate(page.frames):
                 if frame == page.main_frame:
                     continue
                 frame_url = frame.url or "about:blank"
                 same_origin = same_origin_url(final_url, frame_url)
+                origin = _origin(frame_url)
                 meta = {
                     "frame_index": index,
                     "same_origin": same_origin,
-                    "origin": _origin(frame_url),
+                    "origin": origin,
                     "name_present": bool(frame.name),
                 }
                 if same_origin:
@@ -259,14 +270,24 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
                 else:
                     cross_origin_frames += 1
                     meta["inspection_state"] = "cross_origin_not_inspected"
+                    if is_known_captcha_origin(origin):
+                        meta["challenge_hint"] = "captcha_delivery"
+                        challenge_frame_origins.append(origin)
                 frame_diagnostics.append(meta)
 
             form = combine_shadow_reports(reports)
             body = (page.locator("body").inner_text(timeout=request.timeout_ms) or "").lower()
-            captcha = any(x in body for x in ("captcha", "verify you are human", "checking your browser"))
+            body_captcha = any(x in body for x in ("captcha", "verify you are human", "checking your browser"))
+            captcha = body_captcha or bool(challenge_frame_origins)
             state, error_code = discovery_state(form)
             if captcha:
                 state, error_code = "captcha_boundary", "CAPTCHA_BOUNDARY"
+
+            captcha_evidence = []
+            if body_captcha:
+                captcha_evidence.append("body_text")
+            if challenge_frame_origins:
+                captcha_evidence.append("known_challenge_frame_origin")
 
             diagnostics = {
                 "network_idle_observed": network_idle_observed,
@@ -275,6 +296,8 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
                 "frame_count": max(0, len(page.frames) - 1),
                 "same_origin_frame_count": same_origin_frames,
                 "cross_origin_frame_count": cross_origin_frames,
+                "challenge_frame_origins": sorted(set(challenge_frame_origins)),
+                "captcha_evidence": captcha_evidence,
                 "frames": frame_diagnostics,
             }
             return {

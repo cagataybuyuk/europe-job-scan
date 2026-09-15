@@ -1,16 +1,16 @@
 # GD-004 Live Inspector v2
 
-Status: implementation candidate; no live mutation authority added.
+Status: implementation active; no live mutation authority added.
 
 ## Purpose
 
-The first live inspection proved GitHub-hosted Chromium can reach the approved SmartRecruiters OneClick URL while preserving zero field writes, zero uploads and zero submits. That run returned no native controls or actions, so a safe-fill manifest cannot yet be trusted.
+The first live inspection proved GitHub-hosted Chromium can reach the approved SmartRecruiters OneClick URL while preserving zero field writes, zero uploads and zero submits. That run returned no native controls or actions, so a safe-fill manifest could not be trusted.
 
 Live Inspector v2 expands read-only structural evidence without changing the authority boundary.
 
 ## Read-only diagnostics
 
-The inspector now records only allowlisted structural metadata:
+The inspector records only allowlisted structural metadata:
 
 - document readiness and render-wait exit reason,
 - element/form/native-control/action-candidate counts,
@@ -19,7 +19,8 @@ The inspector now records only allowlisted structural metadata:
 - custom-element tag inventory (capped),
 - custom-control hints based on structural ARIA attributes,
 - same-origin iframe structure inspection,
-- cross-origin iframe presence without inspecting its DOM.
+- cross-origin iframe origin only, without inspecting its DOM,
+- known CAPTCHA-delivery frame evidence when the origin matches `captcha-delivery.com`.
 
 It does not retain HTML, form values, cookies, storage, candidate data or file contents.
 
@@ -31,7 +32,7 @@ This replaces dependence on a single fixed two-second sleep while keeping the in
 
 ## Fail-closed discovery state
 
-A successful browser/navigation run with no inspectable native controls is reported as:
+A successful browser/navigation run with no inspectable native controls and no known challenge evidence is reported as:
 
 - `runtime_state = form_structure_not_discovered`
 - `error_code = FORM_STRUCTURE_NOT_DISCOVERED`
@@ -41,9 +42,20 @@ This state is diagnostic success, not execution readiness. No safe-fill manifest
 
 If native controls are observed, the run may report `runtime_state = inspected`, but `live_execution_ready` remains false until a reviewed manifest and later canary gate explicitly authorize execution.
 
+## CAPTCHA frame boundary
+
+The 2026-09-15 Version1 live run observed a cross-origin `https://geo.captcha-delivery.com` iframe while the main SmartRecruiters document contained zero controls and zero actions. The inspector must classify this as:
+
+- `runtime_state = captcha_boundary`
+- `error_code = CAPTCHA_BOUNDARY`
+- `captcha_observed = true`
+- `live_execution_ready = false`
+
+The classification uses only the cross-origin frame origin. The challenge iframe DOM is never inspected and no CAPTCHA bypass is attempted.
+
 ## Frame policy
 
-Only same-origin child frames are inspected. Cross-origin frames are counted and reported as `cross_origin_not_inspected`; their DOM is not traversed. Frame observations are rebased into unique scope identities before aggregation so controls from separate documents cannot collide.
+Only same-origin child frames are inspected. Other cross-origin frames are reported as `cross_origin_not_inspected`; their DOM is not traversed. Known CAPTCHA-delivery origins may be classified as challenge evidence using the origin string alone. Frame observations are rebased into unique scope identities before aggregation so controls from separate documents cannot collide.
 
 ## Authority boundary
 
@@ -61,8 +73,9 @@ The manual workflow continues to require an immutable source SHA and explicit `A
 
 ## Promotion criterion
 
-After this change is merged, rerun the same approved Version1 SmartRecruiters URL. Review the uploaded `live-inspection.json` artifact.
+Review each uploaded `live-inspection.json` artifact before any manifest is prepared.
 
 - If native controls are discovered, prepare a reviewed scoped manifest from the observed identities and proceed toward the safe-fill + single-CV-upload canary.
-- If only custom elements, closed Shadow DOM indicators, landing-page actions or cross-origin frames are observed, build the smallest read-only adapter needed for that structure before any live writes.
-- If the page remains structurally empty, investigate render/network/bot boundary evidence before changing execution authority.
+- If a CAPTCHA boundary is observed, do not attempt bypass. Route the opportunity to a human/trusted-browser handoff or choose another approved canary target that does not present a challenge to the execution environment.
+- If only custom elements, closed Shadow DOM indicators, landing-page actions or other cross-origin frames are observed, build the smallest read-only adapter needed for that structure before any live writes.
+- If the page remains structurally empty without challenge evidence, investigate render/network evidence before changing execution authority.
