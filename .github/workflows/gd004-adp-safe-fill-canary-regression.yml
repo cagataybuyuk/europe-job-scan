@@ -50,5 +50,7 @@ jobs:
           assert "EJS_FINAL_SUBMIT: 'false'" in wf
           assert "EJS_KILL_SWITCH: 'true'" in wf
           assert 'APPROVE-TEST-ADP-IDENTITY-SAFE-FILL' in wf
-          assert 'EJS_LIVE_CANARY_MANIFEST_JSON' in wf
+          assert 'EJS_ADP_CANARY_PROFILE_JSON' in wf
+          assert 'EJS_LIVE_CANARY_MANIFEST_JSON' not in wf
+          assert "rm -f adp-profile.json" in wf
           PY
