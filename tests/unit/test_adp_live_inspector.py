@@ -5,6 +5,7 @@ from ejs.services.adp_live_inspector import (
     classify_adp_state,
     is_challenge_frame_url,
     validate_adp_live_url,
+    visible_application_controls,
 )
 from ejs.services.adp_live_route import route_adp_live_inspection
 
@@ -76,8 +77,39 @@ class AdpLiveInspectorTests(unittest.TestCase):
         self.assertEqual(code, "APPLICATION_ENTRY_REQUIRES_NAVIGATION")
         self.assertEqual(found, entries)
 
-    def test_controls_win_over_auth_text(self):
-        controls = [{"observation_key": "document/input@1"}]
+    def test_hidden_cookie_controls_do_not_count_as_application_controls(self):
+        controls = [{
+            "observation_key": "document/input@257",
+            "label": "Functional",
+            "visible": False,
+            "type": "checkbox",
+        }]
+        self.assertEqual(visible_application_controls(form(controls=controls)), [])
+
+    def test_hidden_cookie_controls_do_not_override_apply_entry(self):
+        controls = [{
+            "observation_key": "document/input@257",
+            "label": "Functional",
+            "visible": False,
+            "type": "checkbox",
+        }]
+        actions = [{
+            "scope": "document",
+            "observation_key": "document/button@121",
+            "label": "Apply",
+            "visible": True,
+        }]
+        state, code, found = classify_adp_state(
+            form=form(controls=controls, actions=actions),
+            body_text="Job details",
+            captcha_observed=False,
+        )
+        self.assertEqual(state, "application_entry_observed")
+        self.assertEqual(code, "APPLICATION_ENTRY_REQUIRES_NAVIGATION")
+        self.assertEqual(len(found), 1)
+
+    def test_visible_controls_win_over_auth_text(self):
+        controls = [{"observation_key": "document/input@1", "visible": True}]
         state, code, _ = classify_adp_state(
             form=form(controls=controls),
             body_text="Already have an account?",
@@ -97,7 +129,7 @@ class AdpLiveInspectorTests(unittest.TestCase):
 
     def test_captcha_overrides_everything(self):
         state, code, _ = classify_adp_state(
-            form=form(controls=[{"observation_key": "document/input@1"}]),
+            form=form(controls=[{"observation_key": "document/input@1", "visible": True}]),
             body_text="",
             captcha_observed=True,
         )
@@ -121,16 +153,34 @@ class AdpLiveRouteTests(unittest.TestCase):
         self.assertEqual(decision["route"], "navigation_review_candidate")
         self.assertTrue(decision["navigation_review_allowed"])
         self.assertFalse(decision["manifest_review_allowed"])
+        self.assertEqual(decision["visible_application_control_count"], 0)
         self.assert_fully_blocked(decision)
 
-    def test_controls_route_to_manifest_review_only(self):
+    def test_visible_controls_route_to_manifest_review_only(self):
         decision = route_adp_live_inspection(report(
             "inspected",
-            controls=[{"observation_key": "document/input@1"}],
+            controls=[{"observation_key": "document/input@1", "visible": True}],
         ))
         self.assertEqual(decision["route"], "manifest_review_candidate")
         self.assertTrue(decision["manifest_review_allowed"])
         self.assertFalse(decision["navigation_review_allowed"])
+        self.assertEqual(decision["visible_application_control_count"], 1)
+        self.assert_fully_blocked(decision)
+
+    def test_hidden_controls_with_entry_route_to_navigation_review(self):
+        decision = route_adp_live_inspection(report(
+            "inspected",
+            controls=[{
+                "observation_key": "document/input@257",
+                "label": "Functional",
+                "visible": False,
+            }],
+            entries=[{"observation_key": "document/button@121", "label": "Apply"}],
+        ))
+        self.assertEqual(decision["route"], "navigation_review_candidate")
+        self.assertTrue(decision["navigation_review_allowed"])
+        self.assertFalse(decision["manifest_review_allowed"])
+        self.assertEqual(decision["visible_application_control_count"], 0)
         self.assert_fully_blocked(decision)
 
     def test_auth_routes_to_human_handoff(self):

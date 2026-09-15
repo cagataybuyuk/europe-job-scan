@@ -81,11 +81,25 @@ def application_entry_actions(form: dict) -> list[dict]:
     return result
 
 
+def visible_application_controls(form: dict) -> list[dict]:
+    """Return controls that are actually visible to the applicant.
+
+    ADP injects OneTrust/cookie preference inputs into the DOM. Those controls
+    are structurally inspectable but must never be mistaken for application
+    fields when they are hidden.
+    """
+    controls = form.get("controls", [])
+    if not isinstance(controls, list):
+        return []
+    return [control for control in controls if control.get("visible") is True]
+
+
 def classify_adp_state(*, form: dict, body_text: str, captcha_observed: bool) -> tuple[str, str, list[dict]]:
     entries = application_entry_actions(form)
+    visible_controls = visible_application_controls(form)
     if captcha_observed:
         return "captcha_boundary", "CAPTCHA_BOUNDARY", entries
-    if form.get("controls"):
+    if visible_controls:
         return "inspected", "", entries
     if entries:
         return "application_entry_observed", "APPLICATION_ENTRY_REQUIRES_NAVIGATION", entries
@@ -247,6 +261,10 @@ def inspect_adp_live_page(
                 "final_url": final_url,
                 "page_title": page.title(),
                 "form": form,
+                "visible_application_control_keys": [
+                    control.get("observation_key", "")
+                    for control in visible_application_controls(form)
+                ],
                 "application_entry_actions": entry_actions,
                 "diagnostics": {
                     "network_idle_observed": network_idle_observed,
