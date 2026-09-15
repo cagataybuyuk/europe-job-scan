@@ -1,0 +1,212 @@
+name: GD-004 ADP Continue Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact immutable main SHA to execute
+        required: true
+        type: string
+      target_url:
+        description: Approved HTTPS ADP Workforce Now application URL
+        required: true
+        type: string
+      expected_navigation_surface_fingerprint:
+        description: Exact approved pre-navigation surface fingerprint
+        required: true
+        type: string
+      expected_preference_surface_fingerprint:
+        description: Exact approved OneTrust preference-center surface fingerprint
+        required: true
+        type: string
+      entry_ordinal:
+        description: Approved visible Apply ordinal
+        required: true
+        type: number
+      expected_safe_fill_surface_fingerprint:
+        description: Exact approved post-Apply identity surface fingerprint
+        required: true
+        type: string
+      expected_post_fill_action_surface_fingerprint:
+        description: Exact approved post-fill visible-button surface fingerprint
+        required: true
+        type: string
+      approval_phrase:
+        description: Type APPROVE-TEST-ADP-CONTINUE-AFTER-IDENTITY-SAFE-FILL
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gd004-adp-continue-${{ inputs.expected_sha }}
+  cancel-in-progress: false
+
+jobs:
+  continue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: gd004-safe-fill-upload-canary
+    env:
+      EJS_FORM_WRITE: 'true'
+      EJS_FILE_UPLOAD: 'false'
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_KILL_SWITCH: 'true'
+      EJS_OPTIONAL_COOKIE_ACCEPT: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+
+      - name: Assert immutable reviewed Continue boundary
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          APPROVAL: ${{ inputs.approval_phrase }}
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$APPROVAL" = "APPROVE-TEST-ADP-CONTINUE-AFTER-IDENTITY-SAFE-FILL"
+          test "$EJS_FORM_WRITE" = "true"
+          test "$EJS_FILE_UPLOAD" = "false"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+          test "$EJS_OPTIONAL_COOKIE_ACCEPT" = "false"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Materialize dedicated ADP identity profile without logging values
+        env:
+          PROFILE_JSON: ${{ secrets.EJS_ADP_CANARY_PROFILE_JSON }}
+        shell: bash
+        run: |
+          test -n "$PROFILE_JSON"
+          printf '%s\n' "$PROFILE_JSON" > adp-profile.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          raw = json.load(open('adp-profile.json', encoding='utf-8'))
+          required = ('first_name', 'last_name', 'email')
+          for key in required:
+              assert isinstance(raw.get(key), str) and raw[key].strip()
+          assert '@' in raw['email'] and '.' in raw['email'].split('@')[-1]
+
+          manifest = {
+              'candidate_profile_version': str(raw.get('profile_version') or 'adp-canary-profile-v1'),
+              'field_plan': [
+                  {'canonical_field': 'candidate.first_name', 'value': raw['first_name']},
+                  {'canonical_field': 'candidate.last_name', 'value': raw['last_name']},
+                  {'canonical_field': 'candidate.email', 'value': raw['email']},
+              ],
+          }
+          Path('candidate-profile.json').write_text(
+              json.dumps(manifest, ensure_ascii=False, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          PY
+          rm -f adp-profile.json
+
+      - name: Execute reviewed preference flow, identity fill, and one Continue click
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+          EXPECTED_NAV_FP: ${{ inputs.expected_navigation_surface_fingerprint }}
+          EXPECTED_PREF_FP: ${{ inputs.expected_preference_surface_fingerprint }}
+          ENTRY_ORDINAL: ${{ inputs.entry_ordinal }}
+          EXPECTED_FILL_FP: ${{ inputs.expected_safe_fill_surface_fingerprint }}
+          EXPECTED_ACTION_FP: ${{ inputs.expected_post_fill_action_surface_fingerprint }}
+        shell: bash
+        run: |
+          set +e
+          python -m ejs.services.adp_continue_canary \
+            --url "$TARGET_URL" \
+            --expected-navigation-surface-fingerprint "$EXPECTED_NAV_FP" \
+            --expected-preference-surface-fingerprint "$EXPECTED_PREF_FP" \
+            --entry-ordinal "$ENTRY_ORDINAL" \
+            --expected-safe-fill-surface-fingerprint "$EXPECTED_FILL_FP" \
+            --expected-post-fill-action-surface-fingerprint "$EXPECTED_ACTION_FP" \
+            --profile-manifest candidate-profile.json \
+            --output adp-continue-canary.json
+          status=$?
+          echo "CANARY_EXIT_CODE=$status" >> "$GITHUB_ENV"
+          exit 0
+
+      - name: Reassert bounded Continue authority and zero upload/submit
+        env:
+          EXPECTED_NAV_FP: ${{ inputs.expected_navigation_surface_fingerprint }}
+          EXPECTED_PREF_FP: ${{ inputs.expected_preference_surface_fingerprint }}
+          EXPECTED_FILL_FP: ${{ inputs.expected_safe_fill_surface_fingerprint }}
+          EXPECTED_ACTION_FP: ${{ inputs.expected_post_fill_action_surface_fingerprint }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          report = json.load(open('adp-continue-canary.json', encoding='utf-8'))
+          assert report.get('continuation_canary_only') is True
+          assert report.get('expected_navigation_surface_fingerprint') == os.environ['EXPECTED_NAV_FP']
+          assert report.get('expected_preference_surface_fingerprint') == os.environ['EXPECTED_PREF_FP']
+          assert report.get('expected_safe_fill_surface_fingerprint') == os.environ['EXPECTED_FILL_FP']
+          assert report.get('expected_post_fill_action_surface_fingerprint') == os.environ['EXPECTED_ACTION_FP']
+          assert report.get('preference_navigation_click_attempts', 0) <= 1
+          assert report.get('cookie_unselect_all_click_attempts', 0) <= 1
+          assert report.get('cookie_save_click_attempts', 0) <= 1
+          assert report.get('cookie_toggle_write_attempts', 0) <= 1
+          assert report.get('optional_cookie_accept_attempts', 0) == 0
+          assert report.get('navigation_click_attempts', 0) <= 1
+          assert 0 <= report.get('form_value_write_attempts', 0) <= 3
+          assert report.get('second_action_click_attempts', 0) <= 1
+          assert report.get('credential_entry_attempts', 0) == 0
+          assert report.get('file_upload_attempts', 0) == 0
+          assert report.get('submit_attempts', 0) == 0
+          assert report.get('further_navigation_allowed') is False
+          assert report.get('safe_fill_allowed') is False
+          assert report.get('file_upload_allowed') is False
+          assert report.get('final_submit_allowed') is False
+          if report.get('canary_status') == 'continued_inspected':
+              assert report.get('preference_navigation_click_successes') == 1
+              assert report.get('cookie_unselect_all_click_successes') == 1
+              assert report.get('cookie_save_click_successes') == 1
+              assert report.get('navigation_click_successes') == 1
+              assert report.get('second_action_click_attempts') == 1
+              assert report.get('second_action_click_successes') == 1
+              fields = report.get('field_results', [])
+              assert len(fields) == 3
+              assert all(item.get('readback_match') is True for item in fields)
+              assert all(item.get('valid') is True for item in fields)
+              route = report.get('next_route') or {}
+              assert route.get('route') in {'human_handoff', 'manifest_review_candidate', 'diagnostic_review'}
+              assert route.get('automation_resume_allowed') is False
+              assert route.get('safe_fill_allowed') is False
+              assert route.get('file_upload_allowed') is False
+              assert route.get('final_submit_allowed') is False
+          PY
+
+      - name: Upload non-secret Continue evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gd004-adp-continue-${{ github.run_id }}
+          path: adp-continue-canary.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Fail closed when Continue canary did not inspect next page
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          report = json.load(open('adp-continue-canary.json', encoding='utf-8'))
+          assert os.environ.get('CANARY_EXIT_CODE') == '0'
+          assert report.get('canary_status') == 'continued_inspected'
+          assert report.get('second_action_click_attempts') == 1
+          assert report.get('second_action_click_successes') == 1
+          assert report.get('file_upload_attempts', 0) == 0
+          assert report.get('submit_attempts', 0) == 0
+          PY

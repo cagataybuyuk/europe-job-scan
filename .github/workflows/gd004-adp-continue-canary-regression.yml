@@ -1,0 +1,66 @@
+name: GD-004 ADP Continue Canary Regression
+
+on:
+  pull_request:
+    paths:
+      - 'src/ejs/services/adp_continue_canary.py'
+      - 'tests/unit/test_adp_continue_canary.py'
+      - '.github/workflows/gd004-adp-continue-canary.yml'
+      - '.github/workflows/gd004-adp-continue-canary-regression.yml'
+      - 'docs/GD004_ADP_CONTINUE_CANARY.md'
+  push:
+    branches: [main]
+    paths:
+      - 'src/ejs/services/adp_continue_canary.py'
+      - 'tests/unit/test_adp_continue_canary.py'
+      - '.github/workflows/gd004-adp-continue-canary.yml'
+      - '.github/workflows/gd004-adp-continue-canary-regression.yml'
+      - 'docs/GD004_ADP_CONTINUE_CANARY.md'
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m unittest discover -s tests/unit -p 'test_adp_continue_canary.py' -v
+      - name: Assert reviewed five-click and three-field authority
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          src = Path('src/ejs/services/adp_continue_canary.py').read_text(encoding='utf-8')
+          workflow = Path('.github/workflows/gd004-adp-continue-canary.yml').read_text(encoding='utf-8')
+
+          assert src.count('.click(') == 5
+          assert src.count('.fill(') == 1
+          for forbidden in (
+              'set_input_files',
+              '.select_option(',
+              'force=True',
+              '.press(',
+              '.check(',
+              '.uncheck(',
+          ):
+              assert forbidden not in src, forbidden
+
+          assert 'CONTINUE_LABEL = "Continue"' in src
+          assert 'Sign in with LinkedIn' not in src
+          assert 'Sign in with Google' not in src
+          assert 'Sign in with Facebook' not in src
+
+          assert "EJS_FILE_UPLOAD: 'false'" in workflow
+          assert "EJS_FINAL_SUBMIT: 'false'" in workflow
+          assert "EJS_KILL_SWITCH: 'true'" in workflow
+          assert "EJS_OPTIONAL_COOKIE_ACCEPT: 'false'" in workflow
+          assert 'APPROVE-TEST-ADP-CONTINUE-AFTER-IDENTITY-SAFE-FILL' in workflow
+          assert 'EJS_ADP_CANARY_PROFILE_JSON' in workflow
+          PY
