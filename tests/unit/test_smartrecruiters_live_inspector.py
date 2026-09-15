@@ -4,6 +4,7 @@ from ejs.services.smartrecruiters_live_inspector import (
     LiveInspectionRequest,
     combine_shadow_reports,
     discovery_state,
+    is_known_captcha_origin,
     same_origin_url,
     scope_shadow_report,
     validate_live_url,
@@ -40,6 +41,14 @@ class LiveInspectionPolicyTests(unittest.TestCase):
         self.assertTrue(same_origin_url(parent, "about:blank"))
         self.assertFalse(same_origin_url(parent, "https://example.smartrecruiters.com/frame"))
         self.assertFalse(same_origin_url(parent, "https://example.com/frame"))
+
+    def test_known_captcha_delivery_origins_are_classified_without_dom_access(self):
+        self.assertTrue(is_known_captcha_origin("https://geo.captcha-delivery.com"))
+        self.assertTrue(is_known_captcha_origin("https://edge.captcha-delivery.com"))
+        self.assertTrue(is_known_captcha_origin("https://captcha-delivery.com"))
+        self.assertFalse(is_known_captcha_origin("https://jobs.smartrecruiters.com"))
+        self.assertFalse(is_known_captcha_origin("https://notcaptcha-delivery.example.com"))
+        self.assertFalse(is_known_captcha_origin(""))
 
     def test_scoped_frame_reports_get_unique_observation_identities(self):
         base = {
