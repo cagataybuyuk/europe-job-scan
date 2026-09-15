@@ -1,0 +1,102 @@
+name: GD-004 ADP One-click Navigation Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact immutable main SHA to execute
+        required: true
+        type: string
+      target_url:
+        description: Approved HTTPS ADP Workforce Now application URL
+        required: true
+        type: string
+      expected_schema_fingerprint:
+        description: Exact pre-navigation structural fingerprint from approved read-only inspection
+        required: true
+        type: string
+      entry_observation_key:
+        description: Exact approved visible Apply observation key
+        required: true
+        type: string
+      approval_phrase:
+        description: Type APPROVE-TEST-ADP-ONE-CLICK-NAVIGATION
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  navigate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_KILL_SWITCH: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+      - name: Assert immutable one-click boundary
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          APPROVAL: ${{ inputs.approval_phrase }}
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$APPROVAL" = "APPROVE-TEST-ADP-ONE-CLICK-NAVIGATION"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Execute exactly one approved Apply navigation click
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+          EXPECTED_FP: ${{ inputs.expected_schema_fingerprint }}
+          ENTRY_KEY: ${{ inputs.entry_observation_key }}
+        run: |
+          python -m ejs.services.adp_navigation_canary \
+            --url "$TARGET_URL" \
+            --expected-schema-fingerprint "$EXPECTED_FP" \
+            --entry-observation-key "$ENTRY_KEY" \
+            --expected-label "Apply" \
+            --output adp-navigation-canary.json
+      - name: Reassert one-click-only authority and zero application mutation
+        env:
+          EXPECTED_FP: ${{ inputs.expected_schema_fingerprint }}
+          ENTRY_KEY: ${{ inputs.entry_observation_key }}
+        run: |
+          python - <<'PY'
+          import json, os
+          report = json.load(open('adp-navigation-canary.json', encoding='utf-8'))
+          assert report.get('navigation_canary_only') is True
+          assert report.get('expected_schema_fingerprint') == os.environ['EXPECTED_FP']
+          assert report.get('approved_entry_observation_key') == os.environ['ENTRY_KEY']
+          assert report.get('navigation_click_attempts') == 1
+          assert report.get('navigation_click_successes') == 1
+          assert report.get('credential_entry_attempts', 0) == 0
+          assert report.get('form_value_write_attempts', 0) == 0
+          assert report.get('file_upload_attempts', 0) == 0
+          assert report.get('submit_attempts', 0) == 0
+          assert report.get('safe_fill_allowed') is False
+          assert report.get('final_submit_allowed') is False
+          pre = report['pre_navigation']
+          assert pre.get('runtime_state') == 'application_entry_observed'
+          assert pre.get('form', {}).get('schema_fingerprint') == os.environ['EXPECTED_FP']
+          route = report['next_route']
+          assert route.get('route') in {'human_handoff', 'manifest_review_candidate', 'diagnostic_review'}
+          assert route.get('automation_resume_allowed') is False
+          assert route.get('safe_fill_allowed') is False
+          assert route.get('final_submit_allowed') is False
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gd004-adp-navigation-canary-${{ github.run_id }}
+          path: adp-navigation-canary.json
+          retention-days: 14
