@@ -11,12 +11,12 @@ on:
         description: Approved HTTPS ADP Workforce Now application URL
         required: true
         type: string
-      expected_schema_fingerprint:
-        description: Exact pre-navigation structural fingerprint from approved read-only inspection
+      expected_navigation_surface_fingerprint:
+        description: Stable visible Apply-surface fingerprint from reviewed read-only evidence
         required: true
         type: string
-      entry_observation_key:
-        description: Exact approved visible Apply observation key
+      entry_ordinal:
+        description: Zero-based approved visible Apply ordinal within the reviewed surface
         required: true
         type: string
       approval_phrase:
@@ -58,28 +58,26 @@ jobs:
       - name: Execute exactly one approved Apply navigation click
         env:
           TARGET_URL: ${{ inputs.target_url }}
-          EXPECTED_FP: ${{ inputs.expected_schema_fingerprint }}
-          ENTRY_KEY: ${{ inputs.entry_observation_key }}
+          EXPECTED_SURFACE_FP: ${{ inputs.expected_navigation_surface_fingerprint }}
+          ENTRY_ORDINAL: ${{ inputs.entry_ordinal }}
         run: |
           python -m ejs.services.adp_navigation_canary \
             --url "$TARGET_URL" \
-            --expected-schema-fingerprint "$EXPECTED_FP" \
-            --entry-observation-key "$ENTRY_KEY" \
+            --expected-navigation-surface-fingerprint "$EXPECTED_SURFACE_FP" \
+            --entry-ordinal "$ENTRY_ORDINAL" \
             --expected-label "Apply" \
             --output adp-navigation-canary.json
       - name: Reassert one-click-only authority and zero application mutation
         env:
-          EXPECTED_FP: ${{ inputs.expected_schema_fingerprint }}
-          ENTRY_KEY: ${{ inputs.entry_observation_key }}
+          EXPECTED_SURFACE_FP: ${{ inputs.expected_navigation_surface_fingerprint }}
+          ENTRY_ORDINAL: ${{ inputs.entry_ordinal }}
         run: |
           python - <<'PY'
           import json, os
           report = json.load(open('adp-navigation-canary.json', encoding='utf-8'))
           assert report.get('navigation_canary_only') is True
-          assert report.get('expected_schema_fingerprint') == os.environ['EXPECTED_FP']
-          assert report.get('approved_entry_observation_key') == os.environ['ENTRY_KEY']
-          assert report.get('navigation_click_attempts') == 1
-          assert report.get('navigation_click_successes') == 1
+          assert report.get('expected_navigation_surface_fingerprint') == os.environ['EXPECTED_SURFACE_FP']
+          assert report.get('approved_entry_ordinal') == int(os.environ['ENTRY_ORDINAL'])
           assert report.get('credential_entry_attempts', 0) == 0
           assert report.get('form_value_write_attempts', 0) == 0
           assert report.get('file_upload_attempts', 0) == 0
@@ -87,16 +85,23 @@ jobs:
           assert report.get('safe_fill_allowed') is False
           assert report.get('final_submit_allowed') is False
           pre = report['pre_navigation']
-          assert pre.get('runtime_state') == 'application_entry_observed'
-          assert pre.get('form', {}).get('schema_fingerprint') == os.environ['EXPECTED_FP']
+          assert pre.get('navigation_surface_fingerprint')
           route = report['next_route']
-          assert route.get('route') in {'human_handoff', 'manifest_review_candidate', 'diagnostic_review'}
           assert route.get('automation_resume_allowed') is False
           assert route.get('safe_fill_allowed') is False
           assert route.get('final_submit_allowed') is False
+          if report.get('canary_status') != 'clicked':
+              raise SystemExit(f"ADP navigation canary blocked: {report.get('error_code')}")
+          assert report.get('navigation_click_attempts') == 1
+          assert report.get('navigation_click_successes') == 1
+          assert pre.get('runtime_state') == 'application_entry_observed'
+          assert pre.get('navigation_surface_fingerprint') == os.environ['EXPECTED_SURFACE_FP']
+          assert route.get('route') in {'human_handoff', 'manifest_review_candidate', 'diagnostic_review'}
           PY
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: gd004-adp-navigation-canary-${{ github.run_id }}
           path: adp-navigation-canary.json
+          if-no-files-found: ignore
           retention-days: 14
