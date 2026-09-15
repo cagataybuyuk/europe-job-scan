@@ -23,8 +23,14 @@ on:
         description: Exact approved post-Apply visible-control surface fingerprint
         required: true
         type: string
+      cookie_policy:
+        description: Block on cookie banner, or explicitly deny optional cookies when exact OneTrust boundary is present
+        required: true
+        default: block
+        type: choice
+        options: [block, deny_optional]
       approval_phrase:
-        description: Type APPROVE-TEST-ADP-IDENTITY-SAFE-FILL
+        description: Use the exact phrase required by the selected cookie policy
         required: true
         type: string
 
@@ -45,6 +51,7 @@ jobs:
       EJS_FILE_UPLOAD: 'false'
       EJS_FINAL_SUBMIT: 'false'
       EJS_KILL_SWITCH: 'true'
+      EJS_OPTIONAL_COOKIE_ACCEPT: 'false'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,14 +61,24 @@ jobs:
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           APPROVAL: ${{ inputs.approval_phrase }}
+          COOKIE_POLICY: ${{ inputs.cookie_policy }}
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          test "$APPROVAL" = "APPROVE-TEST-ADP-IDENTITY-SAFE-FILL"
+          case "$COOKIE_POLICY" in
+            block)
+              test "$APPROVAL" = "APPROVE-TEST-ADP-IDENTITY-SAFE-FILL"
+              ;;
+            deny_optional)
+              test "$APPROVAL" = "APPROVE-TEST-ADP-DENY-OPTIONAL-COOKIES-AND-IDENTITY-SAFE-FILL"
+              ;;
+            *) exit 1 ;;
+          esac
           test "$EJS_FORM_WRITE" = "true"
           test "$EJS_FILE_UPLOAD" = "false"
           test "$EJS_FINAL_SUBMIT" = "false"
           test "$EJS_KILL_SWITCH" = "true"
+          test "$EJS_OPTIONAL_COOKIE_ACCEPT" = "false"
 
       - uses: actions/setup-python@v5
         with:
@@ -103,12 +120,13 @@ jobs:
           PY
           rm -f adp-profile.json
 
-      - name: Execute one Apply click plus three reviewed identity writes
+      - name: Execute reviewed cookie policy, one Apply click, and three identity writes
         env:
           TARGET_URL: ${{ inputs.target_url }}
           EXPECTED_NAV_FP: ${{ inputs.expected_navigation_surface_fingerprint }}
           ENTRY_ORDINAL: ${{ inputs.entry_ordinal }}
           EXPECTED_FILL_FP: ${{ inputs.expected_safe_fill_surface_fingerprint }}
+          COOKIE_POLICY: ${{ inputs.cookie_policy }}
         shell: bash
         run: |
           set +e
@@ -118,6 +136,7 @@ jobs:
             --entry-ordinal "$ENTRY_ORDINAL" \
             --expected-safe-fill-surface-fingerprint "$EXPECTED_FILL_FP" \
             --profile-manifest candidate-profile.json \
+            --cookie-policy "$COOKIE_POLICY" \
             --output adp-safe-fill-canary.json
           status=$?
           echo "CANARY_EXIT_CODE=$status" >> "$GITHUB_ENV"
@@ -127,6 +146,7 @@ jobs:
         env:
           EXPECTED_NAV_FP: ${{ inputs.expected_navigation_surface_fingerprint }}
           EXPECTED_FILL_FP: ${{ inputs.expected_safe_fill_surface_fingerprint }}
+          COOKIE_POLICY: ${{ inputs.cookie_policy }}
         shell: bash
         run: |
           python - <<'PY'
@@ -135,6 +155,10 @@ jobs:
           assert report.get('safe_fill_canary_only') is True
           assert report.get('expected_navigation_surface_fingerprint') == os.environ['EXPECTED_NAV_FP']
           assert report.get('expected_safe_fill_surface_fingerprint') == os.environ['EXPECTED_FILL_FP']
+          assert report.get('cookie_policy') == os.environ['COOKIE_POLICY']
+          assert 0 <= report.get('cookie_preference_click_attempts', 0) <= 1
+          assert 0 <= report.get('cookie_preference_click_successes', 0) <= 1
+          assert report.get('optional_cookie_accept_attempts', 0) == 0
           assert report.get('navigation_click_attempts') <= 1
           assert report.get('navigation_click_successes') <= 1
           assert report.get('credential_entry_attempts', 0) == 0
@@ -172,6 +196,7 @@ jobs:
           report = json.load(open('adp-safe-fill-canary.json', encoding='utf-8'))
           assert os.environ.get('CANARY_EXIT_CODE') == '0'
           assert report.get('canary_status') == 'filled_verified'
+          assert report.get('optional_cookie_accept_attempts', 0) == 0
           assert report.get('file_upload_attempts', 0) == 0
           assert report.get('submit_attempts', 0) == 0
           PY
