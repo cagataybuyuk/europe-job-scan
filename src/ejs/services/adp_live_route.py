@@ -39,6 +39,14 @@ def _assert_read_only_report(report: Mapping[str, Any]) -> None:
         raise PermissionError(f"ADP_ROUTE_REJECTS_SIDE_EFFECT_EVIDENCE: {', '.join(enabled)}")
 
 
+def _visible_controls(report: Mapping[str, Any]) -> list[dict[str, Any]]:
+    form = report.get("form")
+    controls = form.get("controls", []) if isinstance(form, Mapping) else []
+    if not isinstance(controls, list):
+        raise ValueError("INVALID_FORM_CONTROLS")
+    return [control for control in controls if isinstance(control, Mapping) and control.get("visible") is True]
+
+
 def route_adp_live_inspection(report: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(report, Mapping):
         raise TypeError("inspection report must be a mapping")
@@ -47,11 +55,8 @@ def route_adp_live_inspection(report: Mapping[str, Any]) -> dict[str, Any]:
     runtime_state = str(report.get("runtime_state", "")).strip()
     error_code = str(report.get("error_code", "")).strip()
     captcha_observed = report.get("captcha_observed") is True
-    form = report.get("form")
-    controls = form.get("controls", []) if isinstance(form, Mapping) else []
+    visible_controls = _visible_controls(report)
     entries = report.get("application_entry_actions", [])
-    if not isinstance(controls, list):
-        raise ValueError("INVALID_FORM_CONTROLS")
     if not isinstance(entries, list):
         raise ValueError("INVALID_APPLICATION_ENTRY_ACTIONS")
 
@@ -60,6 +65,7 @@ def route_adp_live_inspection(report: Mapping[str, Any]) -> dict[str, Any]:
         "inspection_runtime_state": runtime_state,
         "inspection_error_code": error_code,
         "captcha_observed": captcha_observed,
+        "visible_application_control_count": len(visible_controls),
         "automation_resume_allowed": False,
         "navigation_click_allowed": False,
         "safe_fill_allowed": False,
@@ -95,21 +101,21 @@ def route_adp_live_inspection(report: Mapping[str, Any]) -> dict[str, Any]:
             ),
         }
 
-    if runtime_state == "inspected" and controls:
+    if visible_controls:
         return {
             **common,
             "route": "manifest_review_candidate",
-            "reason_code": "INSPECTABLE_CONTROLS_OBSERVED",
+            "reason_code": "VISIBLE_APPLICATION_CONTROLS_OBSERVED",
             "human_action_required": True,
             "manifest_review_allowed": True,
             "navigation_review_allowed": False,
             "required_user_action": (
-                "Review the observed ADP control identities and prepare an approved scoped manifest. "
+                "Review the observed visible ADP application controls and prepare an approved scoped manifest. "
                 "Safe-fill remains disabled until explicit promotion."
             ),
         }
 
-    if runtime_state == "application_entry_observed" and entries:
+    if entries:
         return {
             **common,
             "route": "navigation_review_candidate",
@@ -132,7 +138,7 @@ def route_adp_live_inspection(report: Mapping[str, Any]) -> dict[str, Any]:
         "navigation_review_allowed": False,
         "required_user_action": (
             "Review the read-only structural diagnostics. Do not authorize navigation or safe-fill until "
-            "the application entry or form controls are explicitly observed."
+            "the application entry or visible application controls are explicitly observed."
         ),
     }
 
