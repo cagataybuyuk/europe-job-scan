@@ -1,22 +1,21 @@
 """Exactly-one-click ADP navigation canary.
 
 The canary is intentionally narrower than safe-fill. It may click one approved
-visible application-entry action after immutable preflight evidence matches.
-It never enters credentials, writes form values, uploads files, solves a
-challenge, or submits an application.
+visible application-entry action after stable preflight evidence matches. It
+never enters credentials, writes form values, uploads files, solves a
+challenge, performs a second click, or submits an application.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
 import sys
 
 from ejs.services.adp_live_inspector import (
-    AdpLiveInspectionRequest,
-    application_entry_actions,
     classify_adp_state,
     is_challenge_frame_url,
     validate_adp_live_url,
@@ -33,7 +32,7 @@ from ejs.services.smartrecruiters_live_inspector import (
 )
 from ejs.services.smartrecruiters_shadow import inspect_shadow_form
 
-CANARY_VERSION = "adp-navigation-canary-v1"
+CANARY_VERSION = "adp-navigation-canary-v2"
 OBSERVATION_KEY_RE = re.compile(r"^document/([a-z][a-z0-9-]*)@(\d+)$")
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -41,8 +40,8 @@ FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 @dataclass(frozen=True)
 class AdpNavigationCanaryRequest:
     application_url: str
-    expected_schema_fingerprint: str
-    entry_observation_key: str
+    expected_navigation_surface_fingerprint: str
+    entry_ordinal: int
     expected_label: str = "Apply"
     timeout_ms: int = 20_000
     render_wait_ms: int = 10_000
@@ -50,10 +49,10 @@ class AdpNavigationCanaryRequest:
 
 def validate_canary_request(request: AdpNavigationCanaryRequest) -> None:
     validate_adp_live_url(request.application_url)
-    if not FINGERPRINT_RE.fullmatch(request.expected_schema_fingerprint):
-        raise ValueError("INVALID_EXPECTED_SCHEMA_FINGERPRINT")
-    if not OBSERVATION_KEY_RE.fullmatch(request.entry_observation_key):
-        raise ValueError("ADP_NAVIGATION_CANARY_REQUIRES_DOCUMENT_OBSERVATION_KEY")
+    if not FINGERPRINT_RE.fullmatch(request.expected_navigation_surface_fingerprint):
+        raise ValueError("INVALID_EXPECTED_NAVIGATION_SURFACE_FINGERPRINT")
+    if type(request.entry_ordinal) is not int or request.entry_ordinal < 0 or request.entry_ordinal > 9:
+        raise ValueError("INVALID_ADP_ENTRY_ORDINAL")
     if " ".join(request.expected_label.lower().split()) not in {"apply", "apply now"}:
         raise ValueError("ADP_NAVIGATION_CANARY_REQUIRES_APPLY_LABEL")
     if request.timeout_ms < 1_000 or request.timeout_ms > 60_000:
@@ -81,6 +80,42 @@ def _auth_observed(body_text: str, form: dict) -> bool:
         if str(control.get("type", "")).lower() == "password":
             return True
     return False
+
+
+def navigation_surface_descriptor(snapshot: dict) -> dict:
+    entries = snapshot.get("application_entry_actions", [])
+    if not isinstance(entries, list):
+        entries = []
+    signatures = sorted(
+        (
+            {
+                "scope": str(item.get("scope", "")),
+                "label": _normalize(str(item.get("label", ""))),
+            }
+            for item in entries
+            if isinstance(item, dict)
+        ),
+        key=lambda item: (item["scope"], item["label"]),
+    )
+    controls = snapshot.get("visible_application_control_keys", [])
+    if not isinstance(controls, list):
+        controls = []
+    return {
+        "runtime_state": str(snapshot.get("runtime_state", "")),
+        "error_code": str(snapshot.get("error_code", "")),
+        "captcha_observed": snapshot.get("captcha_observed") is True,
+        "visible_application_control_count": len(controls),
+        "entry_actions": signatures,
+    }
+
+
+def navigation_surface_fingerprint(snapshot: dict) -> str:
+    payload = json.dumps(
+        navigation_surface_descriptor(snapshot),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _snapshot(page, *, requested_url: str, timeout_ms: int, render_wait_ms: int) -> dict:
@@ -149,7 +184,7 @@ def _snapshot(page, *, requested_url: str, timeout_ms: int, render_wait_ms: int)
         body_text=body_text,
         captcha_observed=captcha,
     )
-    return {
+    snapshot = {
         "runtime_state": state,
         "error_code": error_code,
         "requested_url": requested_url,
@@ -176,18 +211,23 @@ def _snapshot(page, *, requested_url: str, timeout_ms: int, render_wait_ms: int)
             "frames": frame_diagnostics,
         },
     }
+    snapshot["navigation_surface_descriptor"] = navigation_surface_descriptor(snapshot)
+    snapshot["navigation_surface_fingerprint"] = navigation_surface_fingerprint(snapshot)
+    return snapshot
 
 
-def _approved_entry(snapshot: dict, observation_key: str, expected_label: str) -> dict:
+def _approved_entry(snapshot: dict, entry_ordinal: int, expected_label: str) -> dict:
     candidates = [
         item for item in snapshot.get("application_entry_actions", [])
-        if item.get("observation_key") == observation_key
+        if isinstance(item, dict)
+        and item.get("scope") == "document"
+        and _normalize(str(item.get("label", ""))) == _normalize(expected_label)
     ]
-    if len(candidates) != 1:
-        raise PermissionError("APPROVED_ADP_ENTRY_ACTION_NOT_UNIQUE")
-    candidate = candidates[0]
-    if _normalize(str(candidate.get("label", ""))) != _normalize(expected_label):
-        raise PermissionError("APPROVED_ADP_ENTRY_LABEL_MISMATCH")
+    if entry_ordinal >= len(candidates):
+        raise PermissionError("APPROVED_ADP_ENTRY_ORDINAL_NOT_AVAILABLE")
+    candidate = candidates[entry_ordinal]
+    if not OBSERVATION_KEY_RE.fullmatch(str(candidate.get("observation_key", ""))):
+        raise PermissionError("APPROVED_ADP_ENTRY_OBSERVATION_KEY_UNSUPPORTED")
     return candidate
 
 
@@ -226,6 +266,50 @@ def next_route(snapshot: dict) -> dict:
     }
 
 
+def _base_report(request: AdpNavigationCanaryRequest) -> dict:
+    return {
+        "canary_version": CANARY_VERSION,
+        "navigation_canary_only": True,
+        "requested_url": request.application_url,
+        "expected_navigation_surface_fingerprint": request.expected_navigation_surface_fingerprint,
+        "approved_entry_ordinal": request.entry_ordinal,
+        "approved_entry_label": request.expected_label,
+        "navigation_click_attempts": 0,
+        "navigation_click_successes": 0,
+        "credential_entry_attempts": 0,
+        "form_value_write_attempts": 0,
+        "file_upload_attempts": 0,
+        "submit_attempts": 0,
+        "safe_fill_allowed": False,
+        "final_submit_allowed": False,
+    }
+
+
+def _blocked_report(
+    request: AdpNavigationCanaryRequest,
+    *,
+    error_code: str,
+    pre_navigation: dict,
+    click_attempts: int = 0,
+    resolved_observation_key: str = "",
+) -> dict:
+    return {
+        **_base_report(request),
+        "canary_status": "blocked",
+        "error_code": error_code,
+        "pre_navigation": pre_navigation,
+        "resolved_entry_observation_key": resolved_observation_key,
+        "navigation_click_attempts": click_attempts,
+        "next_route": {
+            "route": "diagnostic_review",
+            "reason_code": error_code,
+            "automation_resume_allowed": False,
+            "safe_fill_allowed": False,
+            "final_submit_allowed": False,
+        },
+    }
+
+
 def run_adp_navigation_canary(
     request: AdpNavigationCanaryRequest,
     *,
@@ -254,7 +338,6 @@ def run_adp_navigation_canary(
             launch["executable_path"] = executable
         browser = p.chromium.launch(**launch)
         context = None
-        click_attempts = 0
         try:
             context = browser.new_context(
                 ignore_https_errors=cfg.ignore_https_errors,
@@ -276,27 +359,69 @@ def run_adp_navigation_canary(
                 render_wait_ms=request.render_wait_ms,
             )
             if pre.get("runtime_state") != "application_entry_observed":
-                raise PermissionError("ADP_CANARY_PREFLIGHT_REQUIRES_APPLICATION_ENTRY")
+                return _blocked_report(
+                    request,
+                    error_code="ADP_CANARY_PREFLIGHT_REQUIRES_APPLICATION_ENTRY",
+                    pre_navigation=pre,
+                )
             if pre.get("captcha_observed") is True or pre.get("auth_observed") is True:
-                raise PermissionError("ADP_CANARY_PREFLIGHT_BOUNDARY_OBSERVED")
+                return _blocked_report(
+                    request,
+                    error_code="ADP_CANARY_PREFLIGHT_BOUNDARY_OBSERVED",
+                    pre_navigation=pre,
+                )
             if pre.get("visible_application_control_keys"):
-                raise PermissionError("ADP_CANARY_PREFLIGHT_FORM_ALREADY_VISIBLE")
-            actual_fingerprint = pre.get("form", {}).get("schema_fingerprint", "")
-            if actual_fingerprint != request.expected_schema_fingerprint:
-                raise PermissionError("ADP_CANARY_PREFLIGHT_FINGERPRINT_MISMATCH")
-            _approved_entry(pre, request.entry_observation_key, request.expected_label)
-
-            locator = _resolve_document_locator(page, request.entry_observation_key)
+                return _blocked_report(
+                    request,
+                    error_code="ADP_CANARY_PREFLIGHT_FORM_ALREADY_VISIBLE",
+                    pre_navigation=pre,
+                )
+            actual_surface = pre.get("navigation_surface_fingerprint", "")
+            if actual_surface != request.expected_navigation_surface_fingerprint:
+                return _blocked_report(
+                    request,
+                    error_code="ADP_CANARY_PREFLIGHT_SURFACE_FINGERPRINT_MISMATCH",
+                    pre_navigation=pre,
+                )
+            try:
+                approved = _approved_entry(pre, request.entry_ordinal, request.expected_label)
+                observation_key = str(approved.get("observation_key", ""))
+                locator = _resolve_document_locator(page, observation_key)
+            except PermissionError as exc:
+                return _blocked_report(
+                    request,
+                    error_code=str(exc),
+                    pre_navigation=pre,
+                )
             if not locator.is_visible() or not locator.is_enabled():
-                raise PermissionError("APPROVED_ADP_ENTRY_NOT_ACTIONABLE")
+                return _blocked_report(
+                    request,
+                    error_code="APPROVED_ADP_ENTRY_NOT_ACTIONABLE",
+                    pre_navigation=pre,
+                    resolved_observation_key=observation_key,
+                )
             actual_label = locator.evaluate(
                 "el => ((el.textContent || el.getAttribute('aria-label') || '')).replace(/\\s+/g, ' ').trim()"
             )
             if _normalize(actual_label) != _normalize(request.expected_label):
-                raise PermissionError("APPROVED_ADP_ENTRY_LABEL_DRIFT")
+                return _blocked_report(
+                    request,
+                    error_code="APPROVED_ADP_ENTRY_LABEL_DRIFT",
+                    pre_navigation=pre,
+                    resolved_observation_key=observation_key,
+                )
 
-            click_attempts = 1
-            locator.click(timeout=request.timeout_ms)
+            try:
+                locator.click(timeout=request.timeout_ms)
+            except Exception as exc:
+                return _blocked_report(
+                    request,
+                    error_code=f"ADP_APPROVED_ENTRY_CLICK_FAILED:{type(exc).__name__}",
+                    pre_navigation=pre,
+                    click_attempts=1,
+                    resolved_observation_key=observation_key,
+                )
+
             page.wait_for_timeout(1_000)
             if len(context.pages) != 1:
                 post = {
@@ -316,23 +441,15 @@ def run_adp_navigation_canary(
                 )
             route = next_route(post)
             return {
-                "canary_version": CANARY_VERSION,
-                "navigation_canary_only": True,
-                "requested_url": request.application_url,
-                "expected_schema_fingerprint": request.expected_schema_fingerprint,
-                "approved_entry_observation_key": request.entry_observation_key,
-                "approved_entry_label": request.expected_label,
+                **_base_report(request),
+                "canary_status": "clicked",
+                "error_code": "",
+                "resolved_entry_observation_key": observation_key,
                 "pre_navigation": pre,
                 "post_navigation": post,
                 "next_route": route,
-                "navigation_click_attempts": click_attempts,
+                "navigation_click_attempts": 1,
                 "navigation_click_successes": 1,
-                "credential_entry_attempts": 0,
-                "form_value_write_attempts": 0,
-                "file_upload_attempts": 0,
-                "submit_attempts": 0,
-                "safe_fill_allowed": False,
-                "final_submit_allowed": False,
             }
         finally:
             if context is not None:
@@ -343,15 +460,15 @@ def run_adp_navigation_canary(
 def main() -> int:
     parser = argparse.ArgumentParser(description="ADP exactly-one-click navigation canary")
     parser.add_argument("--url", required=True, dest="application_url")
-    parser.add_argument("--expected-schema-fingerprint", required=True)
-    parser.add_argument("--entry-observation-key", required=True)
+    parser.add_argument("--expected-navigation-surface-fingerprint", required=True)
+    parser.add_argument("--entry-ordinal", required=True, type=int)
     parser.add_argument("--expected-label", default="Apply")
     parser.add_argument("--output", default="adp-navigation-canary.json")
     args = parser.parse_args()
     request = AdpNavigationCanaryRequest(
         application_url=args.application_url,
-        expected_schema_fingerprint=args.expected_schema_fingerprint,
-        entry_observation_key=args.entry_observation_key,
+        expected_navigation_surface_fingerprint=args.expected_navigation_surface_fingerprint,
+        entry_ordinal=args.entry_ordinal,
         expected_label=args.expected_label,
     )
     report = run_adp_navigation_canary(request)
