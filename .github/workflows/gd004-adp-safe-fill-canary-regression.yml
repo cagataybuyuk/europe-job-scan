@@ -36,8 +36,13 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           src = Path('src/ejs/services/adp_safe_fill_canary.py').read_text(encoding='utf-8')
-          assert src.count('.click(') == 1, src.count('.click(')
+          assert src.count('.click(') == 2, src.count('.click(')
           assert src.count('.fill(') == 1, src.count('.fill(')
+          assert 'ONETRUST_REJECT_SELECTOR = "#onetrust-reject-all-handler"' in src
+          assert 'ONETRUST_ACCEPT_SELECTOR = "#onetrust-accept-btn-handler"' in src
+          assert 'COOKIE_POLICY_DENY_OPTIONAL = "deny_optional"' in src
+          assert 'optional_cookie_accept_attempts": 0' in src
+          assert 'page.locator(ONETRUST_ACCEPT_SELECTOR).click' not in src
           assert 'set_input_files(' not in src
           assert 'select_option(' not in src
           assert 'force=True' not in src
@@ -49,7 +54,10 @@ jobs:
           assert "EJS_FILE_UPLOAD: 'false'" in wf
           assert "EJS_FINAL_SUBMIT: 'false'" in wf
           assert "EJS_KILL_SWITCH: 'true'" in wf
+          assert "EJS_OPTIONAL_COOKIE_ACCEPT: 'false'" in wf
           assert 'APPROVE-TEST-ADP-IDENTITY-SAFE-FILL' in wf
+          assert 'APPROVE-TEST-ADP-DENY-OPTIONAL-COOKIES-AND-IDENTITY-SAFE-FILL' in wf
+          assert 'options: [block, deny_optional]' in wf
           assert 'EJS_ADP_CANARY_PROFILE_JSON' in wf
           assert 'EJS_LIVE_CANARY_MANIFEST_JSON' not in wf
           assert "rm -f adp-profile.json" in wf
