@@ -1,9 +1,14 @@
 """Bounded ADP identity safe-fill canary.
 
-Authority is limited to one already-reviewed Apply navigation click followed by
-exactly three AUTO_SAFE identity writes: first name, last name, and email.
-It never enters credentials, changes phone/country, uploads files, clicks a
-second action, accepts consent, bypasses a challenge, or submits.
+Authority is limited to one reviewed Apply navigation click followed by exactly
+three AUTO_SAFE identity writes: first name, last name, and email. When a known
+OneTrust cookie banner blocks the reviewed Apply action, a separately approved
+privacy-preserving policy may click only the exact "Deny" non-essential-cookie
+control before the Apply click.
+
+It never accepts optional cookies, enters credentials, changes phone/country,
+uploads files, clicks another application action, bypasses a challenge, or
+submits an application.
 """
 from __future__ import annotations
 
@@ -27,8 +32,16 @@ from ejs.services.adp_navigation_canary import (
 )
 from ejs.services.browser_worker import BrowserRuntimeConfig
 
-CANARY_VERSION = "adp-safe-fill-canary-v1"
+CANARY_VERSION = "adp-safe-fill-canary-v2"
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+COOKIE_POLICY_BLOCK = "block"
+COOKIE_POLICY_DENY_OPTIONAL = "deny_optional"
+COOKIE_POLICIES = frozenset({COOKIE_POLICY_BLOCK, COOKIE_POLICY_DENY_OPTIONAL})
+ONETRUST_BANNER_SELECTOR = "#onetrust-banner-sdk"
+ONETRUST_REJECT_SELECTOR = "#onetrust-reject-all-handler"
+ONETRUST_ACCEPT_SELECTOR = "#onetrust-accept-btn-handler"
+ONETRUST_REJECT_LABEL = "deny"
+ONETRUST_ACCEPT_LABEL = "agree and proceed"
 TARGETS = (
     ("candidate.first_name", "guestFirstName", "First Name", "text", True),
     ("candidate.last_name", "guestLastName", "Last Name", "text", True),
@@ -44,6 +57,7 @@ class AdpSafeFillCanaryRequest:
     expected_safe_fill_surface_fingerprint: str
     profile_manifest_path: str
     expected_label: str = "Apply"
+    cookie_policy: str = COOKIE_POLICY_BLOCK
     timeout_ms: int = 20_000
     render_wait_ms: int = 10_000
 
@@ -64,6 +78,8 @@ def validate_request(request: AdpSafeFillCanaryRequest) -> None:
         raise ValueError("INVALID_ADP_ENTRY_ORDINAL")
     if _normalize(request.expected_label) not in {"apply", "apply now"}:
         raise ValueError("ADP_SAFE_FILL_REQUIRES_APPLY_LABEL")
+    if request.cookie_policy not in COOKIE_POLICIES:
+        raise ValueError("INVALID_ADP_COOKIE_POLICY")
     if request.timeout_ms < 1_000 or request.timeout_ms > 60_000:
         raise ValueError("INVALID_CANARY_TIMEOUT")
     if request.render_wait_ms < 1_000 or request.render_wait_ms > 15_000:
@@ -176,6 +192,51 @@ def _visible_button_labels(page) -> list[dict]:
     return results
 
 
+def _one_trust_boundary(page) -> dict:
+    banner = page.locator(ONETRUST_BANNER_SELECTOR)
+    reject = page.locator(ONETRUST_REJECT_SELECTOR)
+    accept = page.locator(ONETRUST_ACCEPT_SELECTOR)
+
+    def _visible(locator) -> bool:
+        try:
+            return locator.count() == 1 and locator.is_visible()
+        except Exception:
+            return False
+
+    def _label(locator) -> str:
+        try:
+            if locator.count() != 1:
+                return ""
+            return _normalize_label(locator.get_attribute("aria-label") or locator.inner_text() or "")
+        except Exception:
+            return ""
+
+    return {
+        "banner_present": banner.count() == 1,
+        "banner_visible": _visible(banner),
+        "reject_present": reject.count() == 1,
+        "reject_visible": _visible(reject),
+        "reject_enabled": reject.count() == 1 and reject.is_enabled(),
+        "reject_label": _label(reject),
+        "accept_present": accept.count() == 1,
+        "accept_visible": _visible(accept),
+        "accept_label": _label(accept),
+    }
+
+
+def _validate_one_trust_boundary(boundary: dict) -> None:
+    if boundary.get("banner_visible") is not True:
+        raise PermissionError("ADP_COOKIE_BOUNDARY_NOT_VISIBLE")
+    if boundary.get("reject_present") is not True or boundary.get("reject_visible") is not True:
+        raise PermissionError("ADP_COOKIE_DENY_CONTROL_NOT_AVAILABLE")
+    if boundary.get("reject_enabled") is not True:
+        raise PermissionError("ADP_COOKIE_DENY_CONTROL_DISABLED")
+    if boundary.get("reject_label") != ONETRUST_REJECT_LABEL:
+        raise PermissionError("ADP_COOKIE_DENY_LABEL_DRIFT")
+    if boundary.get("accept_present") is not True or boundary.get("accept_label") != ONETRUST_ACCEPT_LABEL:
+        raise PermissionError("ADP_COOKIE_ACCEPT_SURFACE_DRIFT")
+
+
 def _base_report(request: AdpSafeFillCanaryRequest, profile_version: str) -> dict:
     return {
         "canary_version": CANARY_VERSION,
@@ -185,6 +246,10 @@ def _base_report(request: AdpSafeFillCanaryRequest, profile_version: str) -> dic
         "expected_safe_fill_surface_fingerprint": request.expected_safe_fill_surface_fingerprint,
         "approved_entry_ordinal": request.entry_ordinal,
         "candidate_profile_version": profile_version,
+        "cookie_policy": request.cookie_policy,
+        "cookie_preference_click_attempts": 0,
+        "cookie_preference_click_successes": 0,
+        "optional_cookie_accept_attempts": 0,
         "navigation_click_attempts": 0,
         "navigation_click_successes": 0,
         "credential_entry_attempts": 0,
@@ -198,11 +263,25 @@ def _base_report(request: AdpSafeFillCanaryRequest, profile_version: str) -> dic
     }
 
 
-def _blocked(base: dict, error_code: str, *, pre=None, form=None, writes=0, click_attempts=0, click_successes=0) -> dict:
+def _blocked(
+    base: dict,
+    error_code: str,
+    *,
+    pre=None,
+    form=None,
+    cookie_boundary=None,
+    cookie_attempts=0,
+    cookie_successes=0,
+    writes=0,
+    click_attempts=0,
+    click_successes=0,
+) -> dict:
     report = {
         **base,
         "canary_status": "blocked",
         "error_code": error_code,
+        "cookie_preference_click_attempts": cookie_attempts,
+        "cookie_preference_click_successes": cookie_successes,
         "navigation_click_attempts": click_attempts,
         "navigation_click_successes": click_successes,
         "form_value_write_attempts": writes,
@@ -211,6 +290,8 @@ def _blocked(base: dict, error_code: str, *, pre=None, form=None, writes=0, clic
         report["pre_navigation"] = pre
     if form is not None:
         report["pre_fill"] = form
+    if cookie_boundary is not None:
+        report["cookie_boundary"] = cookie_boundary
     return report
 
 
@@ -260,24 +341,109 @@ def run_adp_safe_fill_canary(
                 return _blocked(base, "ADP_SAFE_FILL_PREFLIGHT_BOUNDARY_OBSERVED", pre=pre)
             if navigation_surface_fingerprint(pre) != request.expected_navigation_surface_fingerprint:
                 return _blocked(base, "ADP_SAFE_FILL_NAVIGATION_SURFACE_MISMATCH", pre=pre)
+
+            cookie_boundary = _one_trust_boundary(page)
+            cookie_attempts = 0
+            cookie_successes = 0
+            if cookie_boundary.get("banner_visible") is True:
+                if request.cookie_policy != COOKIE_POLICY_DENY_OPTIONAL:
+                    return _blocked(
+                        base,
+                        "ADP_COOKIE_CONSENT_BOUNDARY",
+                        pre=pre,
+                        cookie_boundary=cookie_boundary,
+                    )
+                try:
+                    _validate_one_trust_boundary(cookie_boundary)
+                except PermissionError as exc:
+                    return _blocked(
+                        base,
+                        str(exc),
+                        pre=pre,
+                        cookie_boundary=cookie_boundary,
+                    )
+                reject = page.locator(ONETRUST_REJECT_SELECTOR)
+                try:
+                    cookie_attempts = 1
+                    reject.click(timeout=min(request.timeout_ms, 10_000))
+                    cookie_successes = 1
+                except Exception as exc:
+                    return _blocked(
+                        base,
+                        f"ADP_COOKIE_DENY_CLICK_FAILED:{type(exc).__name__}",
+                        pre=pre,
+                        cookie_boundary=cookie_boundary,
+                        cookie_attempts=cookie_attempts,
+                        cookie_successes=cookie_successes,
+                    )
+                page.wait_for_timeout(300)
+                after_cookie = _one_trust_boundary(page)
+                if after_cookie.get("banner_visible") is True or after_cookie.get("reject_visible") is True:
+                    return _blocked(
+                        base,
+                        "ADP_COOKIE_BOUNDARY_PERSISTED_AFTER_DENY",
+                        pre=pre,
+                        cookie_boundary=after_cookie,
+                        cookie_attempts=cookie_attempts,
+                        cookie_successes=cookie_successes,
+                    )
+
             try:
                 approved = _approved_entry(pre, request.entry_ordinal, request.expected_label)
                 observation_key = str(approved.get("observation_key", ""))
                 entry = _resolve_document_locator(page, observation_key)
             except PermissionError as exc:
-                return _blocked(base, str(exc), pre=pre)
+                return _blocked(
+                    base,
+                    str(exc),
+                    pre=pre,
+                    cookie_boundary=cookie_boundary,
+                    cookie_attempts=cookie_attempts,
+                    cookie_successes=cookie_successes,
+                )
             if not entry.is_visible() or not entry.is_enabled():
-                return _blocked(base, "ADP_SAFE_FILL_ENTRY_NOT_ACTIONABLE", pre=pre)
+                return _blocked(
+                    base,
+                    "ADP_SAFE_FILL_ENTRY_NOT_ACTIONABLE",
+                    pre=pre,
+                    cookie_boundary=cookie_boundary,
+                    cookie_attempts=cookie_attempts,
+                    cookie_successes=cookie_successes,
+                )
             actual_label = entry.get_attribute("aria-label") or entry.inner_text() or ""
             if _normalize(actual_label) != _normalize(request.expected_label):
-                return _blocked(base, "ADP_SAFE_FILL_ENTRY_LABEL_DRIFT", pre=pre)
+                return _blocked(
+                    base,
+                    "ADP_SAFE_FILL_ENTRY_LABEL_DRIFT",
+                    pre=pre,
+                    cookie_boundary=cookie_boundary,
+                    cookie_attempts=cookie_attempts,
+                    cookie_successes=cookie_successes,
+                )
             try:
                 entry.click(timeout=request.timeout_ms)
             except Exception as exc:
-                return _blocked(base, f"ADP_SAFE_FILL_ENTRY_CLICK_FAILED:{type(exc).__name__}", pre=pre, click_attempts=1)
+                return _blocked(
+                    base,
+                    f"ADP_SAFE_FILL_ENTRY_CLICK_FAILED:{type(exc).__name__}",
+                    pre=pre,
+                    cookie_boundary=cookie_boundary,
+                    cookie_attempts=cookie_attempts,
+                    cookie_successes=cookie_successes,
+                    click_attempts=1,
+                )
             page.wait_for_timeout(1_000)
             if len(context.pages) != 1:
-                return _blocked(base, "ADP_SAFE_FILL_NAVIGATION_OPENED_NEW_PAGE", pre=pre, click_attempts=1, click_successes=1)
+                return _blocked(
+                    base,
+                    "ADP_SAFE_FILL_NAVIGATION_OPENED_NEW_PAGE",
+                    pre=pre,
+                    cookie_boundary=cookie_boundary,
+                    cookie_attempts=cookie_attempts,
+                    cookie_successes=cookie_successes,
+                    click_attempts=1,
+                    click_successes=1,
+                )
 
             form = _snapshot(
                 page,
@@ -286,27 +452,78 @@ def run_adp_safe_fill_canary(
                 render_wait_ms=request.render_wait_ms,
             )
             if form.get("captcha_observed") is True or form.get("auth_observed") is True:
-                return _blocked(base, "ADP_SAFE_FILL_POST_NAV_BOUNDARY_OBSERVED", pre=pre, form=form, click_attempts=1, click_successes=1)
+                return _blocked(
+                    base,
+                    "ADP_SAFE_FILL_POST_NAV_BOUNDARY_OBSERVED",
+                    pre=pre,
+                    form=form,
+                    cookie_boundary=cookie_boundary,
+                    cookie_attempts=cookie_attempts,
+                    cookie_successes=cookie_successes,
+                    click_attempts=1,
+                    click_successes=1,
+                )
             if form.get("runtime_state") != "inspected":
-                return _blocked(base, "ADP_SAFE_FILL_FORM_NOT_INSPECTED", pre=pre, form=form, click_attempts=1, click_successes=1)
+                return _blocked(
+                    base,
+                    "ADP_SAFE_FILL_FORM_NOT_INSPECTED",
+                    pre=pre,
+                    form=form,
+                    cookie_boundary=cookie_boundary,
+                    cookie_attempts=cookie_attempts,
+                    cookie_successes=cookie_successes,
+                    click_attempts=1,
+                    click_successes=1,
+                )
             actual_surface = safe_fill_surface_fingerprint(form)
             if actual_surface != request.expected_safe_fill_surface_fingerprint:
-                return _blocked(base, "ADP_SAFE_FILL_SURFACE_MISMATCH", pre=pre, form=form, click_attempts=1, click_successes=1)
+                return _blocked(
+                    base,
+                    "ADP_SAFE_FILL_SURFACE_MISMATCH",
+                    pre=pre,
+                    form=form,
+                    cookie_boundary=cookie_boundary,
+                    cookie_attempts=cookie_attempts,
+                    cookie_successes=cookie_successes,
+                    click_attempts=1,
+                    click_successes=1,
+                )
 
             targets = []
             try:
                 for spec in TARGETS:
                     targets.append((spec, _validate_target_control(form, spec)))
             except PermissionError as exc:
-                return _blocked(base, str(exc), pre=pre, form=form, click_attempts=1, click_successes=1)
+                return _blocked(
+                    base,
+                    str(exc),
+                    pre=pre,
+                    form=form,
+                    cookie_boundary=cookie_boundary,
+                    cookie_attempts=cookie_attempts,
+                    cookie_successes=cookie_successes,
+                    click_attempts=1,
+                    click_successes=1,
+                )
 
             results = []
             writes = 0
-            for spec, control in targets:
+            for spec, _control in targets:
                 canonical, element_id, _label, _ctype, _required = spec
                 locator = page.locator(f"#{element_id}")
                 if locator.count() != 1 or not locator.is_visible() or not locator.is_enabled():
-                    return _blocked(base, f"ADP_SAFE_FILL_RUNTIME_LOCATOR_DRIFT:{canonical}", pre=pre, form=form, writes=writes, click_attempts=1, click_successes=1)
+                    return _blocked(
+                        base,
+                        f"ADP_SAFE_FILL_RUNTIME_LOCATOR_DRIFT:{canonical}",
+                        pre=pre,
+                        form=form,
+                        cookie_boundary=cookie_boundary,
+                        cookie_attempts=cookie_attempts,
+                        cookie_successes=cookie_successes,
+                        writes=writes,
+                        click_attempts=1,
+                        click_successes=1,
+                    )
                 desired = profile[canonical]
                 before = locator.input_value()
                 executed = before != desired
@@ -314,7 +531,18 @@ def run_adp_safe_fill_canary(
                     try:
                         locator.fill(desired, timeout=request.timeout_ms)
                     except Exception as exc:
-                        return _blocked(base, f"ADP_SAFE_FILL_WRITE_FAILED:{canonical}:{type(exc).__name__}", pre=pre, form=form, writes=writes + 1, click_attempts=1, click_successes=1)
+                        return _blocked(
+                            base,
+                            f"ADP_SAFE_FILL_WRITE_FAILED:{canonical}:{type(exc).__name__}",
+                            pre=pre,
+                            form=form,
+                            cookie_boundary=cookie_boundary,
+                            cookie_attempts=cookie_attempts,
+                            cookie_successes=cookie_successes,
+                            writes=writes + 1,
+                            click_attempts=1,
+                            click_successes=1,
+                        )
                     writes += 1
                 readback = locator.input_value()
                 valid = locator.evaluate("el => el.checkValidity ? el.checkValidity() : true")
@@ -330,7 +558,18 @@ def run_adp_safe_fill_canary(
                 })
                 if not matched:
                     return {
-                        **_blocked(base, f"ADP_SAFE_FILL_READBACK_MISMATCH:{canonical}", pre=pre, form=form, writes=writes, click_attempts=1, click_successes=1),
+                        **_blocked(
+                            base,
+                            f"ADP_SAFE_FILL_READBACK_MISMATCH:{canonical}",
+                            pre=pre,
+                            form=form,
+                            cookie_boundary=cookie_boundary,
+                            cookie_attempts=cookie_attempts,
+                            cookie_successes=cookie_successes,
+                            writes=writes,
+                            click_attempts=1,
+                            click_successes=1,
+                        ),
                         "field_results": results,
                     }
 
@@ -342,7 +581,18 @@ def run_adp_safe_fill_canary(
             )
             if safe_fill_surface_fingerprint(post) != actual_surface:
                 return {
-                    **_blocked(base, "ADP_SAFE_FILL_POST_WRITE_SURFACE_DRIFT", pre=pre, form=form, writes=writes, click_attempts=1, click_successes=1),
+                    **_blocked(
+                        base,
+                        "ADP_SAFE_FILL_POST_WRITE_SURFACE_DRIFT",
+                        pre=pre,
+                        form=form,
+                        cookie_boundary=cookie_boundary,
+                        cookie_attempts=cookie_attempts,
+                        cookie_successes=cookie_successes,
+                        writes=writes,
+                        click_attempts=1,
+                        click_successes=1,
+                    ),
                     "field_results": results,
                     "post_fill": post,
                 }
@@ -352,11 +602,14 @@ def run_adp_safe_fill_canary(
                 "error_code": "",
                 "resolved_entry_observation_key": observation_key,
                 "pre_navigation": pre,
+                "cookie_boundary": cookie_boundary,
                 "pre_fill": form,
                 "post_fill": post,
                 "observed_safe_fill_surface_fingerprint": actual_surface,
                 "field_results": results,
                 "visible_button_accessibility": _visible_button_labels(page),
+                "cookie_preference_click_attempts": cookie_attempts,
+                "cookie_preference_click_successes": cookie_successes,
                 "navigation_click_attempts": 1,
                 "navigation_click_successes": 1,
                 "form_value_write_attempts": writes,
@@ -374,6 +627,7 @@ def main() -> int:
     parser.add_argument("--entry-ordinal", required=True, type=int)
     parser.add_argument("--expected-safe-fill-surface-fingerprint", required=True)
     parser.add_argument("--profile-manifest", required=True)
+    parser.add_argument("--cookie-policy", choices=sorted(COOKIE_POLICIES), default=COOKIE_POLICY_BLOCK)
     parser.add_argument("--output", default="adp-safe-fill-canary.json")
     args = parser.parse_args()
     report = run_adp_safe_fill_canary(AdpSafeFillCanaryRequest(
@@ -382,11 +636,13 @@ def main() -> int:
         entry_ordinal=args.entry_ordinal,
         expected_safe_fill_surface_fingerprint=args.expected_safe_fill_surface_fingerprint,
         profile_manifest_path=args.profile_manifest,
+        cookie_policy=args.cookie_policy,
     ))
     Path(args.output).write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({
         "canary_status": report.get("canary_status"),
         "error_code": report.get("error_code"),
+        "cookie_preference_click_attempts": report.get("cookie_preference_click_attempts", 0),
         "navigation_click_attempts": report.get("navigation_click_attempts", 0),
         "form_value_write_attempts": report.get("form_value_write_attempts", 0),
         "file_upload_attempts": report.get("file_upload_attempts", 0),
