@@ -54,15 +54,23 @@ jobs:
           python -m ejs.services.smartrecruiters_live_inspector \
             --url "$TARGET_URL" \
             --output live-inspection.json
-      - name: Reassert zero side effects
+      - name: Reassert zero side effects and fail-closed discovery state
         run: |
           python - <<'PY'
           import json
           report = json.load(open('live-inspection.json', encoding='utf-8'))
           assert report['inspection_only'] is True
+          assert report.get('live_execution_ready') is False
           assert report.get('form_value_write_attempts', 0) == 0
           assert report.get('file_upload_attempts', 0) == 0
           assert report.get('submit_attempts', 0) == 0
+          assert report.get('runtime_state') in {
+              'inspected',
+              'captcha_boundary',
+              'form_structure_not_discovered',
+          }
+          if report.get('runtime_state') == 'form_structure_not_discovered':
+              assert report.get('error_code') == 'FORM_STRUCTURE_NOT_DISCOVERED'
           PY
       - uses: actions/upload-artifact@v4
         with:
