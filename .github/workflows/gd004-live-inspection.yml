@@ -71,9 +71,34 @@ jobs:
           }
           if report.get('runtime_state') == 'form_structure_not_discovered':
               assert report.get('error_code') == 'FORM_STRUCTURE_NOT_DISCOVERED'
+          if report.get('runtime_state') == 'captcha_boundary':
+              assert report.get('error_code') == 'CAPTCHA_BOUNDARY'
+              assert report.get('captcha_observed') is True
+          PY
+      - name: Route inspection evidence without execution authority
+        run: |
+          python -m ejs.services.smartrecruiters_live_route \
+            --input live-inspection.json \
+            --output live-route.json
+      - name: Reassert routing cannot authorize execution
+        run: |
+          python - <<'PY'
+          import json
+          inspection = json.load(open('live-inspection.json', encoding='utf-8'))
+          route = json.load(open('live-route.json', encoding='utf-8'))
+          assert route['route'] in {'human_handoff', 'manifest_review_candidate', 'diagnostic_review'}
+          assert route.get('automation_resume_allowed') is False
+          assert route.get('safe_fill_allowed') is False
+          assert route.get('final_submit_allowed') is False
+          if inspection.get('runtime_state') == 'captcha_boundary':
+              assert route.get('route') == 'human_handoff'
+              assert route.get('reason_code') == 'CAPTCHA_BOUNDARY'
+              assert route.get('manifest_review_allowed') is False
           PY
       - uses: actions/upload-artifact@v4
         with:
           name: gd004-live-inspection-${{ github.run_id }}
-          path: live-inspection.json
+          path: |
+            live-inspection.json
+            live-route.json
           retention-days: 14

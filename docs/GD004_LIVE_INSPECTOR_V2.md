@@ -53,6 +53,24 @@ The 2026-09-15 Version1 live run observed a cross-origin `https://geo.captcha-de
 
 The classification uses only the cross-origin frame origin. The challenge iframe DOM is never inspected and no CAPTCHA bypass is attempted.
 
+## Fail-closed routing
+
+Each live inspection now produces a second artifact, `live-route.json`, derived only from the read-only inspection report. The router never opens a browser and cannot authorize execution.
+
+Routing outcomes are:
+
+- `human_handoff`: challenge evidence such as `CAPTCHA_BOUNDARY` is present. The user must handle the site-required challenge in a trusted interactive browser. Automation must not resume until a fresh read-only inspection no longer reports the boundary.
+- `manifest_review_candidate`: inspectable controls are present without a challenge boundary. This permits only human review and scoped manifest preparation; safe-fill is still disabled.
+- `diagnostic_review`: no trustworthy control structure is available. Continue read-only diagnostics before any live write path is considered.
+
+Every route keeps:
+
+- `automation_resume_allowed = false`
+- `safe_fill_allowed = false`
+- `final_submit_allowed = false`
+
+This routing layer complements the existing GD-004 durable queue behavior where non-rendered browser outcomes are reconciled as `REVIEW_REQUIRED`; it does not replace or weaken that gate.
+
 ## Frame policy
 
 Only same-origin child frames are inspected. Other cross-origin frames are reported as `cross_origin_not_inspected`; their DOM is not traversed. Known CAPTCHA-delivery origins may be classified as challenge evidence using the origin string alone. Frame observations are rebased into unique scope identities before aggregation so controls from separate documents cannot collide.
@@ -73,9 +91,9 @@ The manual workflow continues to require an immutable source SHA and explicit `A
 
 ## Promotion criterion
 
-Review each uploaded `live-inspection.json` artifact before any manifest is prepared.
+Review each uploaded `live-inspection.json` and `live-route.json` artifact before any manifest is prepared.
 
-- If native controls are discovered, prepare a reviewed scoped manifest from the observed identities and proceed toward the safe-fill + single-CV-upload canary.
-- If a CAPTCHA boundary is observed, do not attempt bypass. Route the opportunity to a human/trusted-browser handoff or choose another approved canary target that does not present a challenge to the execution environment.
+- If native controls are discovered and the route is `manifest_review_candidate`, prepare a reviewed scoped manifest from the observed identities and proceed toward the safe-fill + single-CV-upload canary only after explicit promotion.
+- If the route is `human_handoff`, do not attempt CAPTCHA bypass. Use a trusted interactive browser for the site-required challenge or choose another approved canary target that does not present a challenge to the execution environment.
 - If only custom elements, closed Shadow DOM indicators, landing-page actions or other cross-origin frames are observed, build the smallest read-only adapter needed for that structure before any live writes.
-- If the page remains structurally empty without challenge evidence, investigate render/network evidence before changing execution authority.
+- If the route is `diagnostic_review`, investigate render/network evidence before changing execution authority.
