@@ -1,0 +1,39 @@
+name: GD-004 LinkedIn Resolver Regression
+
+on:
+  pull_request:
+    paths:
+      - 'src/ejs/services/linkedin_live_resolver.py'
+      - 'tests/unit/test_linkedin_live_resolver.py'
+      - '.github/workflows/gd004-linkedin-source-resolution.yml'
+      - '.github/workflows/gd004-linkedin-resolver-regression.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/ejs/services/linkedin_live_resolver.py'
+      - 'tests/unit/test_linkedin_live_resolver.py'
+      - '.github/workflows/gd004-linkedin-source-resolution.yml'
+      - '.github/workflows/gd004-linkedin-resolver-regression.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[test]'
+      - run: python -m unittest discover -s tests/unit -p test_linkedin_live_resolver.py -v
+      - name: Assert workflow remains read-only
+        shell: bash
+        run: |
+          grep -q "EJS_FORM_WRITE: 'false'" .github/workflows/gd004-linkedin-source-resolution.yml
+          grep -q "EJS_FILE_UPLOAD: 'false'" .github/workflows/gd004-linkedin-source-resolution.yml
+          grep -q "EJS_FINAL_SUBMIT: 'false'" .github/workflows/gd004-linkedin-source-resolution.yml
+          grep -q "EJS_KILL_SWITCH: 'true'" .github/workflows/gd004-linkedin-source-resolution.yml
+          grep -q "click_attempts', 0) == 0" .github/workflows/gd004-linkedin-source-resolution.yml
