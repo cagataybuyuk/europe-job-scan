@@ -5,6 +5,8 @@ from pathlib import Path
 
 from ejs.services.adp_safe_fill_canary import (
     AdpSafeFillCanaryRequest,
+    COOKIE_POLICY_DENY_OPTIONAL,
+    _validate_one_trust_boundary,
     load_identity_profile,
     safe_fill_surface_fingerprint,
     validate_request,
@@ -35,6 +37,22 @@ def snapshot(*, key_shift=0, phone_required=False, hidden_cookie=True):
     }
 
 
+def one_trust_boundary(**overrides):
+    value = {
+        "banner_present": True,
+        "banner_visible": True,
+        "reject_present": True,
+        "reject_visible": True,
+        "reject_enabled": True,
+        "reject_label": "deny",
+        "accept_present": True,
+        "accept_visible": True,
+        "accept_label": "agree and proceed",
+    }
+    value.update(overrides)
+    return value
+
+
 class AdpSafeFillCanaryTests(unittest.TestCase):
     def test_valid_request(self):
         validate_request(AdpSafeFillCanaryRequest(
@@ -44,6 +62,27 @@ class AdpSafeFillCanaryTests(unittest.TestCase):
             expected_safe_fill_surface_fingerprint=FP,
             profile_manifest_path="profile.json",
         ))
+
+    def test_valid_request_with_deny_optional_cookie_policy(self):
+        validate_request(AdpSafeFillCanaryRequest(
+            application_url=URL,
+            expected_navigation_surface_fingerprint=FP,
+            entry_ordinal=0,
+            expected_safe_fill_surface_fingerprint=FP,
+            profile_manifest_path="profile.json",
+            cookie_policy=COOKIE_POLICY_DENY_OPTIONAL,
+        ))
+
+    def test_rejects_invalid_cookie_policy(self):
+        with self.assertRaisesRegex(ValueError, "INVALID_ADP_COOKIE_POLICY"):
+            validate_request(AdpSafeFillCanaryRequest(
+                application_url=URL,
+                expected_navigation_surface_fingerprint=FP,
+                entry_ordinal=0,
+                expected_safe_fill_surface_fingerprint=FP,
+                profile_manifest_path="profile.json",
+                cookie_policy="accept_all",
+            ))
 
     def test_rejects_invalid_surface_fingerprint(self):
         with self.assertRaisesRegex(ValueError, "INVALID_EXPECTED_SAFE_FILL_SURFACE_FINGERPRINT"):
@@ -72,6 +111,21 @@ class AdpSafeFillCanaryTests(unittest.TestCase):
             safe_fill_surface_fingerprint(snapshot()),
             "d8b72afea27912bd5e280d8a819ec836e44c2982faa3a3179bbb06c7aa58aa7f",
         )
+
+    def test_exact_onetrust_deny_boundary_is_allowed(self):
+        _validate_one_trust_boundary(one_trust_boundary())
+
+    def test_onetrust_accept_label_drift_fails_closed(self):
+        with self.assertRaisesRegex(PermissionError, "ADP_COOKIE_ACCEPT_SURFACE_DRIFT"):
+            _validate_one_trust_boundary(one_trust_boundary(accept_label="accept all"))
+
+    def test_onetrust_deny_label_drift_fails_closed(self):
+        with self.assertRaisesRegex(PermissionError, "ADP_COOKIE_DENY_LABEL_DRIFT"):
+            _validate_one_trust_boundary(one_trust_boundary(reject_label="reject"))
+
+    def test_onetrust_missing_deny_fails_closed(self):
+        with self.assertRaisesRegex(PermissionError, "ADP_COOKIE_DENY_CONTROL_NOT_AVAILABLE"):
+            _validate_one_trust_boundary(one_trust_boundary(reject_present=False, reject_visible=False))
 
     def test_load_identity_profile_extracts_only_three_auto_safe_values(self):
         payload = {
