@@ -31,20 +31,29 @@ The pre-navigation surface remains:
 
 ## Profile privacy
 
-The workflow reads candidate values from the existing `EJS_LIVE_CANARY_MANIFEST_JSON` GitHub secret. Values are never passed as workflow-dispatch inputs and are never emitted in the artifact. Evidence stores only short SHA-256 value/readback hashes plus boolean validity/readback results.
+The workflow reads candidate values only from the dedicated `EJS_ADP_CANARY_PROFILE_JSON` GitHub secret. This secret is intentionally separate from the broader live canary manifest/CV configuration so ADP identity writes do not depend on unrelated ATS or upload metadata.
 
-Only the canonical fields `candidate.first_name`, `candidate.last_name`, and `candidate.email` are read from the profile manifest.
+Expected secret shape:
+
+```json
+{"first_name":"...","last_name":"...","email":"...","profile_version":"adp-canary-profile-v1"}
+```
+
+`profile_version` is optional. Candidate values are never passed as workflow-dispatch inputs and are never emitted in the artifact. The workflow materializes a temporary canonical profile file, deletes the raw secret-derived JSON before browser execution, and evidence stores only short SHA-256 value/readback hashes plus boolean validity/readback results.
+
+Only `candidate.first_name`, `candidate.last_name`, and `candidate.email` are made available to the safe-fill runtime.
 
 ## Fail-closed gates
 
 Before any write, the canary requires:
 
 1. exact immutable source SHA and explicit approval phrase;
-2. exact approved pre-navigation surface fingerprint;
-3. exactly one normal Apply click for the approved ordinal;
-4. no CAPTCHA/auth boundary after navigation;
-5. exact approved visible-control surface fingerprint;
-6. unique, visible, enabled controls with exact reviewed IDs, labels, types and requiredness.
+2. non-empty dedicated ADP identity profile secret with first name, last name and a minimally valid email;
+3. exact approved pre-navigation surface fingerprint;
+4. exactly one normal Apply click for the approved ordinal;
+5. no CAPTCHA/auth boundary after navigation;
+6. exact approved visible-control surface fingerprint;
+7. unique, visible, enabled controls with exact reviewed IDs, labels, types and requiredness.
 
 Any mismatch stops before the first form write.
 
