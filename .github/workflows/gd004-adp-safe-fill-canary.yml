@@ -71,20 +71,37 @@ jobs:
       - run: python -m pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
 
-      - name: Materialize candidate profile without logging values
+      - name: Materialize dedicated ADP identity profile without logging values
         env:
-          PROFILE_MANIFEST: ${{ secrets.EJS_LIVE_CANARY_MANIFEST_JSON }}
+          PROFILE_JSON: ${{ secrets.EJS_ADP_CANARY_PROFILE_JSON }}
         shell: bash
         run: |
-          test -n "$PROFILE_MANIFEST"
-          printf '%s\n' "$PROFILE_MANIFEST" > candidate-profile.json
+          test -n "$PROFILE_JSON"
+          printf '%s\n' "$PROFILE_JSON" > adp-profile.json
           python - <<'PY'
           import json
-          data = json.load(open('candidate-profile.json', encoding='utf-8'))
-          assert isinstance(data.get('field_plan'), list)
-          canonical = {str(x.get('canonical_field', '')) for x in data['field_plan'] if isinstance(x, dict)}
-          assert {'candidate.first_name', 'candidate.last_name', 'candidate.email'} <= canonical
+          from pathlib import Path
+
+          raw = json.load(open('adp-profile.json', encoding='utf-8'))
+          required = ('first_name', 'last_name', 'email')
+          for key in required:
+              assert isinstance(raw.get(key), str) and raw[key].strip()
+          assert '@' in raw['email'] and '.' in raw['email'].split('@')[-1]
+
+          manifest = {
+              'candidate_profile_version': str(raw.get('profile_version') or 'adp-canary-profile-v1'),
+              'field_plan': [
+                  {'canonical_field': 'candidate.first_name', 'value': raw['first_name']},
+                  {'canonical_field': 'candidate.last_name', 'value': raw['last_name']},
+                  {'canonical_field': 'candidate.email', 'value': raw['email']},
+              ],
+          }
+          Path('candidate-profile.json').write_text(
+              json.dumps(manifest, ensure_ascii=False, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
           PY
+          rm -f adp-profile.json
 
       - name: Execute one Apply click plus three reviewed identity writes
         env:
