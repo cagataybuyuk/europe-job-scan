@@ -6,15 +6,17 @@ Advance an approved ADP Workforce Now job-detail page through exactly one visibl
 
 ## Required evidence
 
-The manual workflow requires all of the following from a fresh read-only inspection:
+The manual workflow requires all of the following:
 
 - exact immutable `main` SHA;
 - exact approved ADP URL;
-- exact 64-character schema fingerprint;
-- exact document-scoped visible `Apply` observation key;
+- exact 64-character navigation-surface fingerprint derived from reviewed read-only evidence;
+- zero-based approved visible `Apply` ordinal within that reviewed surface;
 - explicit phrase `APPROVE-TEST-ADP-ONE-CLICK-NAVIGATION`.
 
-The current live candidate that motivated this canary exposed two visible `Apply` actions. The canary never chooses between duplicates on its own; the workflow input must name exactly one observation key.
+The navigation-surface fingerprint intentionally excludes hidden cookie-preference controls and raw DOM observation indices. It covers the visible application-entry surface and fail-closed boundary state, so harmless OneTrust/DOM index drift cannot grant or revoke click authority by itself.
+
+The current live candidate exposed two visible `Apply` actions. The reviewed surface therefore contains two document-scoped `Apply` entries, and ordinal `0` selects the first one. The live DOM observation key is resolved only after the approved surface fingerprint matches.
 
 ## Fail-closed preflight
 
@@ -23,11 +25,13 @@ Before the click, the canary re-renders the page and requires:
 - `runtime_state=application_entry_observed`;
 - no CAPTCHA or auth boundary;
 - zero visible application controls;
-- exact schema fingerprint match;
-- exactly one approved entry action matching the supplied observation key and label;
-- the resolved element is visible and enabled.
+- exact navigation-surface fingerprint match;
+- the approved `Apply` ordinal exists within the matched surface;
+- the live resolved element is still a document-scoped supported observation identity;
+- the resolved element is visible and enabled;
+- the live label remains `Apply`.
 
-Any drift stops execution before the click.
+Any drift stops execution before the click. A blocked preflight writes diagnostic evidence and keeps all application-mutation authority disabled.
 
 ## Authority
 

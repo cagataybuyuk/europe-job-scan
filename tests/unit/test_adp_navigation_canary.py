@@ -3,6 +3,8 @@ import unittest
 from ejs.services.adp_navigation_canary import (
     AdpNavigationCanaryRequest,
     _approved_entry,
+    navigation_surface_descriptor,
+    navigation_surface_fingerprint,
     next_route,
     validate_canary_request,
 )
@@ -15,8 +17,9 @@ URL = (
 FP = "a" * 64
 
 
-def snapshot(*, captcha=False, auth=False, controls=None, code="", entries=None):
+def snapshot(*, captcha=False, auth=False, controls=None, code="", entries=None, state="application_entry_observed"):
     return {
+        "runtime_state": state,
         "captcha_observed": captcha,
         "auth_observed": auth,
         "visible_application_control_keys": controls or [],
@@ -29,51 +32,89 @@ class AdpNavigationCanaryTests(unittest.TestCase):
     def test_valid_request(self):
         validate_canary_request(AdpNavigationCanaryRequest(
             application_url=URL,
-            expected_schema_fingerprint=FP,
-            entry_observation_key="document/button@121",
+            expected_navigation_surface_fingerprint=FP,
+            entry_ordinal=0,
         ))
 
     def test_rejects_invalid_fingerprint(self):
-        with self.assertRaisesRegex(ValueError, "INVALID_EXPECTED_SCHEMA_FINGERPRINT"):
+        with self.assertRaisesRegex(ValueError, "INVALID_EXPECTED_NAVIGATION_SURFACE_FINGERPRINT"):
             validate_canary_request(AdpNavigationCanaryRequest(
                 application_url=URL,
-                expected_schema_fingerprint="abc",
-                entry_observation_key="document/button@121",
+                expected_navigation_surface_fingerprint="abc",
+                entry_ordinal=0,
             ))
 
-    def test_rejects_shadow_or_frame_observation_key(self):
-        with self.assertRaisesRegex(ValueError, "REQUIRES_DOCUMENT_OBSERVATION_KEY"):
+    def test_rejects_invalid_ordinal(self):
+        with self.assertRaisesRegex(ValueError, "INVALID_ADP_ENTRY_ORDINAL"):
             validate_canary_request(AdpNavigationCanaryRequest(
                 application_url=URL,
-                expected_schema_fingerprint=FP,
-                entry_observation_key="frame:1/document/button@3",
+                expected_navigation_surface_fingerprint=FP,
+                entry_ordinal=-1,
             ))
 
     def test_rejects_non_apply_label(self):
         with self.assertRaisesRegex(ValueError, "REQUIRES_APPLY_LABEL"):
             validate_canary_request(AdpNavigationCanaryRequest(
                 application_url=URL,
-                expected_schema_fingerprint=FP,
-                entry_observation_key="document/button@121",
+                expected_navigation_surface_fingerprint=FP,
+                entry_ordinal=0,
                 expected_label="Continue",
             ))
 
-    def test_exact_entry_is_required(self):
+    def test_entry_ordinal_resolves_live_observation_key(self):
         snap = snapshot(entries=[
-            {"observation_key": "document/button@121", "label": "Apply"},
-            {"observation_key": "document/button@167", "label": "Apply"},
+            {"scope": "document", "observation_key": "document/button@121", "label": "Apply"},
+            {"scope": "document", "observation_key": "document/button@167", "label": "Apply"},
         ])
-        chosen = _approved_entry(snap, "document/button@121", "Apply")
-        self.assertEqual(chosen["observation_key"], "document/button@121")
-        with self.assertRaisesRegex(PermissionError, "NOT_UNIQUE"):
-            _approved_entry(
-                snapshot(entries=[
-                    {"observation_key": "document/button@121", "label": "Apply"},
-                    {"observation_key": "document/button@121", "label": "Apply"},
-                ]),
-                "document/button@121",
-                "Apply",
-            )
+        chosen = _approved_entry(snap, 1, "Apply")
+        self.assertEqual(chosen["observation_key"], "document/button@167")
+        with self.assertRaisesRegex(PermissionError, "ORDINAL_NOT_AVAILABLE"):
+            _approved_entry(snap, 2, "Apply")
+
+    def test_surface_fingerprint_ignores_observation_key_drift(self):
+        left = snapshot(
+            code="APPLICATION_ENTRY_REQUIRES_NAVIGATION",
+            entries=[
+                {"scope": "document", "observation_key": "document/button@121", "label": "Apply"},
+                {"scope": "document", "observation_key": "document/button@167", "label": "Apply"},
+            ],
+        )
+        right = snapshot(
+            code="APPLICATION_ENTRY_REQUIRES_NAVIGATION",
+            entries=[
+                {"scope": "document", "observation_key": "document/button@133", "label": "Apply"},
+                {"scope": "document", "observation_key": "document/button@179", "label": "Apply"},
+            ],
+        )
+        self.assertEqual(navigation_surface_descriptor(left), navigation_surface_descriptor(right))
+        self.assertEqual(navigation_surface_fingerprint(left), navigation_surface_fingerprint(right))
+
+    def test_surface_fingerprint_changes_when_visible_entry_surface_changes(self):
+        left = snapshot(
+            code="APPLICATION_ENTRY_REQUIRES_NAVIGATION",
+            entries=[{"scope": "document", "observation_key": "document/button@121", "label": "Apply"}],
+        )
+        right = snapshot(
+            code="APPLICATION_ENTRY_REQUIRES_NAVIGATION",
+            entries=[
+                {"scope": "document", "observation_key": "document/button@121", "label": "Apply"},
+                {"scope": "document", "observation_key": "document/button@167", "label": "Apply"},
+            ],
+        )
+        self.assertNotEqual(navigation_surface_fingerprint(left), navigation_surface_fingerprint(right))
+
+    def test_known_live_surface_fingerprint_is_stable(self):
+        snap = snapshot(
+            code="APPLICATION_ENTRY_REQUIRES_NAVIGATION",
+            entries=[
+                {"scope": "document", "observation_key": "document/button@121", "label": "Apply"},
+                {"scope": "document", "observation_key": "document/button@167", "label": "Apply"},
+            ],
+        )
+        self.assertEqual(
+            navigation_surface_fingerprint(snap),
+            "567e7890f5a01f151dbeeb23851ad7cf5fb8100a32c3e0386227d17cd507d313",
+        )
 
     def test_captcha_routes_to_human_handoff(self):
         route = next_route(snapshot(captcha=True))
