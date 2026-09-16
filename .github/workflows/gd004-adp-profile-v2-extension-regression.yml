@@ -1,0 +1,38 @@
+name: GD-004 ADP Profile V2 Extension Secret Regression
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/gd004-adp-profile-v2-continue-canary.yml'
+      - '.github/workflows/gd004-adp-profile-v2-extension-regression.yml'
+      - 'docs/GD004_ADP_PROFILE_POLICY.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert base plus extension secret composition
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          workflow = Path('.github/workflows/gd004-adp-profile-v2-continue-canary.yml').read_text(encoding='utf-8')
+          assert 'secrets.EJS_ADP_CANARY_PROFILE_JSON' in workflow
+          assert 'secrets.EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON' in workflow
+          assert "allowed_extension = {" in workflow
+          for key in ('phone_country_iso2', 'phone_national_number', 'adp_ascii_name_policy_approved'):
+              assert key in workflow
+          assert 'assert set(extension) == allowed_extension' in workflow
+          assert 'adp-profile-base.json' in workflow
+          assert 'adp-profile-v2-extension.json' in workflow
+          assert 'rm -f adp-profile-base.json adp-profile-v2-extension.json' in workflow
+          assert "EJS_FILE_UPLOAD: 'false'" in workflow
+          assert "EJS_FINAL_SUBMIT: 'false'" in workflow
+          assert "EJS_KILL_SWITCH: 'true'" in workflow
+          PY
