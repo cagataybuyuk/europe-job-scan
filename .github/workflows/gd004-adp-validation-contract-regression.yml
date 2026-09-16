@@ -1,0 +1,45 @@
+name: GD-004 ADP Validation Contract Regression
+
+on:
+  pull_request:
+    paths:
+      - 'src/ejs/services/adp_validation_contract.py'
+      - 'tests/unit/test_adp_validation_contract.py'
+      - '.github/workflows/gd004-adp-validation-contract-regression.yml'
+      - 'docs/GD004_ADP_VALIDATION_CONTRACT.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[test]'
+      - name: Run ADP validation contract unit tests
+        run: python -m unittest discover -s tests/unit -p 'test_adp_validation_contract.py' -v
+      - name: Assert classification-only authority
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          source = Path('src/ejs/services/adp_validation_contract.py').read_text(encoding='utf-8')
+          forbidden = (
+              '.click(', '.fill(', 'set_input_files', 'select_option(',
+              'sync_playwright', 'page.goto(', 'requests.', 'httpx.',
+          )
+          for token in forbidden:
+              assert token not in source, token
+          assert 'browser_write_allowed": False' in source
+          assert 'continue_click_allowed": False' in source
+          assert 'file_upload_allowed": False' in source
+          assert 'final_submit_allowed": False' in source
+          assert 'TURKISH_ASCII_TRANSLITERATION' in source
+          PY
