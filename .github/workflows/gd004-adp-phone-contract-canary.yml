@@ -1,0 +1,146 @@
+name: GD-004 ADP Phone Contract Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact immutable main SHA to execute
+        required: true
+        type: string
+      target_url:
+        description: Approved HTTPS ADP Workforce Now application URL
+        required: true
+        type: string
+      expected_navigation_surface_fingerprint:
+        description: Exact approved pre-navigation surface fingerprint
+        required: true
+        type: string
+      expected_preference_surface_fingerprint:
+        description: Exact approved OneTrust preference-center fingerprint
+        required: true
+        type: string
+      entry_ordinal:
+        description: Approved visible Apply ordinal
+        required: true
+        type: number
+      expected_safe_fill_surface_fingerprint:
+        description: Exact approved identity surface fingerprint
+        required: true
+        type: string
+      approval_phrase:
+        description: Exact R2-reviewed phone-contract inspection approval phrase
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gd004-adp-phone-contract-${{ inputs.expected_sha }}
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: gd004-safe-fill-upload-canary
+    env:
+      EJS_FORM_WRITE: 'false'
+      EJS_FILE_UPLOAD: 'false'
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_KILL_SWITCH: 'true'
+      EJS_OPTIONAL_COOKIE_ACCEPT: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+
+      - name: Assert immutable reviewed phone-contract boundary
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          APPROVAL: ${{ inputs.approval_phrase }}
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$APPROVAL" = "APPROVE-TEST-ADP-PHONE-CONTRACT-INSPECTION"
+          test "$EJS_FORM_WRITE" = "false"
+          test "$EJS_FILE_UPLOAD" = "false"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+          test "$EJS_OPTIONAL_COOKIE_ACCEPT" = "false"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Inspect ADP phone controls without profile writes
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+          EXPECTED_NAV_FP: ${{ inputs.expected_navigation_surface_fingerprint }}
+          EXPECTED_PREF_FP: ${{ inputs.expected_preference_surface_fingerprint }}
+          ENTRY_ORDINAL: ${{ inputs.entry_ordinal }}
+          EXPECTED_FILL_FP: ${{ inputs.expected_safe_fill_surface_fingerprint }}
+        shell: bash
+        run: |
+          set +e
+          python -m ejs.services.adp_phone_contract_canary \
+            --url "$TARGET_URL" \
+            --expected-navigation-surface-fingerprint "$EXPECTED_NAV_FP" \
+            --expected-preference-surface-fingerprint "$EXPECTED_PREF_FP" \
+            --entry-ordinal "$ENTRY_ORDINAL" \
+            --expected-safe-fill-surface-fingerprint "$EXPECTED_FILL_FP" \
+            --output adp-phone-contract-canary.json
+          status=$?
+          echo "CANARY_EXIT_CODE=$status" >> "$GITHUB_ENV"
+          exit 0
+
+      - name: Reassert read-only phone-contract authority
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          report = json.load(open('adp-phone-contract-canary.json', encoding='utf-8'))
+          assert report.get('phone_contract_inspection_only') is True
+          assert report.get('preference_navigation_click_attempts', 0) <= 1
+          assert report.get('cookie_unselect_all_click_attempts', 0) <= 1
+          assert report.get('cookie_save_click_attempts', 0) <= 1
+          assert report.get('navigation_click_attempts', 0) <= 1
+          assert report.get('form_value_write_attempts', 0) == 0
+          assert report.get('second_action_click_attempts', 0) == 0
+          assert report.get('credential_entry_attempts', 0) == 0
+          assert report.get('file_upload_attempts', 0) == 0
+          assert report.get('submit_attempts', 0) == 0
+          assert report.get('optional_cookie_accept_attempts', 0) == 0
+          assert report.get('phone_write_allowed') is False
+          assert report.get('continue_click_allowed') is False
+          assert report.get('file_upload_allowed') is False
+          assert report.get('final_submit_allowed') is False
+          PY
+
+      - name: Upload non-secret phone-contract evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gd004-adp-phone-contract-${{ github.run_id }}
+          path: adp-phone-contract-canary.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Fail closed when phone contract was not inspected
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          report = json.load(open('adp-phone-contract-canary.json', encoding='utf-8'))
+          assert os.environ.get('CANARY_EXIT_CODE') == '0'
+          assert report.get('canary_status') == 'inspected'
+          assert report.get('form_value_write_attempts', 0) == 0
+          assert report.get('second_action_click_attempts', 0) == 0
+          assert report.get('file_upload_attempts', 0) == 0
+          assert report.get('submit_attempts', 0) == 0
+          PY
