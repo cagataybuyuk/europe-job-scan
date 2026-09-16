@@ -47,7 +47,23 @@ The environment-scoped `EJS_ADP_CANARY_PROFILE_JSON` secret is upgraded to profi
 - The phone input must match the reviewed structural contract before the national number is written.
 - Raw phone values are never written to artifacts or logs; only a value hash, digit count, and country ISO-2 may be emitted.
 
-## Next live authority
+## Reviewed phone fingerprint
+
+The structural fingerprint derived from live run `35067757870`, excluding transient selected-option state while preserving the complete country-option set and phone-control contract, is:
+
+`d6f3dc96678e66f5785c39ffc8bd4d6451204b69b2afbdf08493a6596727305c`
+
+The profile-v2 canary must match this fingerprint before selecting a country or writing a phone value.
+
+## Live canary authority
+
+Workflow: `.github/workflows/gd004-adp-profile-v2-continue-canary.yml`
+
+Environment: `gd004-safe-fill-upload-canary`
+
+Approval phrase:
+
+`APPROVE-TEST-ADP-PROFILE-V2-PHONE-AND-CONTINUE`
 
 The reviewed profile-v2 continuation canary may perform only this sequence:
 
@@ -62,4 +78,13 @@ The reviewed profile-v2 continuation canary may perform only this sequence:
 9. click exactly one `Continue`;
 10. inspect the resulting application surface read-only.
 
-No credentials, social sign-in, CV upload, further application action, CAPTCHA bypass, or Final Submit is authorized.
+Maximum authority is five reviewed click paths and five profile writes. No credentials, social sign-in, CV upload, further application action, CAPTCHA bypass, or Final Submit is authorized.
+
+## Required user-controlled release inputs
+
+Before the live profile-v2 canary is dispatched, the user must explicitly:
+
+1. choose whether `adp_ascii_name_policy_approved` is `true` or `false`;
+2. update the environment-scoped `EJS_ADP_CANARY_PROFILE_JSON` secret with `phone_country_iso2` and an exact digits-only `phone_national_number`.
+
+If either requirement is missing, execution fails before any browser profile write.
