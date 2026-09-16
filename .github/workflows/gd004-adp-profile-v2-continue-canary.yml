@@ -87,20 +87,48 @@ jobs:
 
       - name: Materialize private ADP profile v2 without logging values
         env:
-          PROFILE_JSON: ${{ secrets.EJS_ADP_CANARY_PROFILE_JSON }}
+          BASE_PROFILE_JSON: ${{ secrets.EJS_ADP_CANARY_PROFILE_JSON }}
+          EXTENSION_JSON: ${{ secrets.EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON }}
         shell: bash
         run: |
-          test -n "$PROFILE_JSON"
-          printf '%s' "$PROFILE_JSON" > adp-profile-v2.json
+          test -n "$BASE_PROFILE_JSON"
+          test -n "$EXTENSION_JSON"
+          printf '%s' "$BASE_PROFILE_JSON" > adp-profile-base.json
+          printf '%s' "$EXTENSION_JSON" > adp-profile-v2-extension.json
           python - <<'PY'
           import json
+          from pathlib import Path
           from ejs.services.adp_profile_policy import resolve_adp_profile
-          raw = json.load(open('adp-profile-v2.json', encoding='utf-8'))
-          resolved = resolve_adp_profile(raw)
+
+          base = json.load(open('adp-profile-base.json', encoding='utf-8'))
+          extension = json.load(open('adp-profile-v2-extension.json', encoding='utf-8'))
+          assert isinstance(base, dict)
+          assert isinstance(extension, dict)
+          for key in ('first_name', 'last_name', 'email'):
+              assert isinstance(base.get(key), str) and base[key]
+          allowed_extension = {
+              'phone_country_iso2',
+              'phone_national_number',
+              'adp_ascii_name_policy_approved',
+          }
+          assert set(extension) == allowed_extension
+          merged = {
+              'profile_version': 'adp-canary-profile-v2',
+              'first_name': base['first_name'],
+              'last_name': base['last_name'],
+              'email': base['email'],
+              **extension,
+          }
+          Path('adp-profile-v2.json').write_text(
+              json.dumps(merged, ensure_ascii=False, separators=(',', ':')),
+              encoding='utf-8',
+          )
+          resolved = resolve_adp_profile(merged)
           evidence = resolved.non_secret_evidence()
           assert evidence['raw_values_exposed'] is False
           assert evidence['phone']['digit_count'] >= 4
           PY
+          rm -f adp-profile-base.json adp-profile-v2-extension.json
 
       - name: Execute reviewed profile-v2 phone + Continue flow
         env:
@@ -168,7 +196,7 @@ jobs:
       - name: Remove private profile material
         if: always()
         shell: bash
-        run: rm -f adp-profile-v2.json
+        run: rm -f adp-profile-base.json adp-profile-v2-extension.json adp-profile-v2.json
 
       - name: Upload non-secret profile-v2 diagnostics
         if: always()
