@@ -1,0 +1,193 @@
+name: GD-004 ADP Profile V2 Phone + Continue Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact immutable main SHA to execute
+        required: true
+        type: string
+      target_url:
+        description: Approved HTTPS ADP Workforce Now application URL
+        required: true
+        type: string
+      expected_navigation_surface_fingerprint:
+        description: Exact approved pre-navigation surface fingerprint
+        required: true
+        type: string
+      expected_preference_surface_fingerprint:
+        description: Exact approved OneTrust preference-center fingerprint
+        required: true
+        type: string
+      entry_ordinal:
+        description: Approved visible Apply ordinal
+        required: true
+        type: number
+      expected_safe_fill_surface_fingerprint:
+        description: Exact approved identity surface fingerprint
+        required: true
+        type: string
+      expected_phone_contract_fingerprint:
+        description: Exact reviewed phone-control structural fingerprint
+        required: true
+        type: string
+      expected_post_fill_action_surface_fingerprint:
+        description: Exact approved Continue-button surface fingerprint
+        required: true
+        type: string
+      approval_phrase:
+        description: Exact R2-reviewed profile-v2 Continue approval phrase
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gd004-adp-profile-v2-continue-${{ inputs.expected_sha }}
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: gd004-safe-fill-upload-canary
+    env:
+      EJS_FORM_WRITE: 'true'
+      EJS_FILE_UPLOAD: 'false'
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_KILL_SWITCH: 'true'
+      EJS_OPTIONAL_COOKIE_ACCEPT: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+
+      - name: Assert immutable reviewed profile-v2 boundary
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          APPROVAL: ${{ inputs.approval_phrase }}
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$APPROVAL" = "APPROVE-TEST-ADP-PROFILE-V2-PHONE-AND-CONTINUE"
+          test "$EJS_FORM_WRITE" = "true"
+          test "$EJS_FILE_UPLOAD" = "false"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+          test "$EJS_OPTIONAL_COOKIE_ACCEPT" = "false"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Materialize private ADP profile v2 without logging values
+        env:
+          PROFILE_JSON: ${{ secrets.EJS_ADP_CANARY_PROFILE_JSON }}
+        shell: bash
+        run: |
+          test -n "$PROFILE_JSON"
+          printf '%s' "$PROFILE_JSON" > adp-profile-v2.json
+          python - <<'PY'
+          import json
+          from ejs.services.adp_profile_policy import resolve_adp_profile
+          raw = json.load(open('adp-profile-v2.json', encoding='utf-8'))
+          resolved = resolve_adp_profile(raw)
+          evidence = resolved.non_secret_evidence()
+          assert evidence['raw_values_exposed'] is False
+          assert evidence['phone']['digit_count'] >= 4
+          PY
+
+      - name: Execute reviewed profile-v2 phone + Continue flow
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+          EXPECTED_NAV_FP: ${{ inputs.expected_navigation_surface_fingerprint }}
+          EXPECTED_PREF_FP: ${{ inputs.expected_preference_surface_fingerprint }}
+          ENTRY_ORDINAL: ${{ inputs.entry_ordinal }}
+          EXPECTED_FILL_FP: ${{ inputs.expected_safe_fill_surface_fingerprint }}
+          EXPECTED_PHONE_FP: ${{ inputs.expected_phone_contract_fingerprint }}
+          EXPECTED_ACTION_FP: ${{ inputs.expected_post_fill_action_surface_fingerprint }}
+        shell: bash
+        run: |
+          set +e
+          python -m ejs.services.adp_profile_v2_continue_canary \
+            --url "$TARGET_URL" \
+            --expected-navigation-surface-fingerprint "$EXPECTED_NAV_FP" \
+            --expected-preference-surface-fingerprint "$EXPECTED_PREF_FP" \
+            --entry-ordinal "$ENTRY_ORDINAL" \
+            --expected-safe-fill-surface-fingerprint "$EXPECTED_FILL_FP" \
+            --expected-phone-contract-fingerprint "$EXPECTED_PHONE_FP" \
+            --expected-post-fill-action-surface-fingerprint "$EXPECTED_ACTION_FP" \
+            --profile-json adp-profile-v2.json \
+            --output adp-profile-v2-continue-canary.json
+          status=$?
+          echo "CANARY_EXIT_CODE=$status" >> "$GITHUB_ENV"
+          exit 0
+
+      - name: Reassert bounded profile-v2 authority
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          report = json.load(open('adp-profile-v2-continue-canary.json', encoding='utf-8'))
+          assert report.get('profile_v2_continue_canary_only') is True
+          assert report.get('preference_navigation_click_attempts', 0) <= 1
+          assert report.get('cookie_unselect_all_click_attempts', 0) <= 1
+          assert report.get('cookie_save_click_attempts', 0) <= 1
+          assert report.get('navigation_click_attempts', 0) <= 1
+          assert report.get('form_value_write_attempts', 0) <= 5
+          assert report.get('form_value_write_successes', 0) <= 5
+          assert report.get('second_action_click_attempts', 0) <= 1
+          assert report.get('credential_entry_attempts', 0) == 0
+          assert report.get('file_upload_attempts', 0) == 0
+          assert report.get('submit_attempts', 0) == 0
+          assert report.get('optional_cookie_accept_attempts', 0) == 0
+          assert report.get('further_navigation_allowed') is False
+          assert report.get('file_upload_allowed') is False
+          assert report.get('final_submit_allowed') is False
+          evidence = report.get('profile_evidence', {})
+          if evidence:
+              assert evidence.get('raw_values_exposed') is False
+          if report.get('canary_status') == 'diagnosed':
+              assert report.get('navigation_click_attempts') == 1
+              assert report.get('navigation_click_successes') == 1
+              assert report.get('second_action_click_attempts') == 1
+              assert report.get('second_action_click_successes') == 1
+              fields = report.get('field_results', [])
+              assert len(fields) == 3
+              assert all(x.get('readback_match') is True for x in fields)
+              phone = report.get('phone_result', {})
+              assert phone.get('country_readback_match') is True
+              assert phone.get('phone_readback_match') is True
+          PY
+
+      - name: Remove private profile material
+        if: always()
+        shell: bash
+        run: rm -f adp-profile-v2.json
+
+      - name: Upload non-secret profile-v2 diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gd004-adp-profile-v2-continue-${{ github.run_id }}
+          path: adp-profile-v2-continue-canary.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Fail closed when reviewed flow was not diagnosed
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          report = json.load(open('adp-profile-v2-continue-canary.json', encoding='utf-8'))
+          assert os.environ.get('CANARY_EXIT_CODE') == '0'
+          assert report.get('canary_status') == 'diagnosed'
+          assert report.get('file_upload_attempts', 0) == 0
+          assert report.get('submit_attempts', 0) == 0
+          PY
