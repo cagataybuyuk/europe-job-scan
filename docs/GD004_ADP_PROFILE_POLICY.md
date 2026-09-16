@@ -14,21 +14,25 @@ Live ADP run `35067757870` inspected the phone controls without loading or writi
 
 The earlier validation contract also established that ADP first/last names accept the documented ASCII-oriented grammar. A deterministic Turkish-to-ASCII candidate transformation exists but is not authorized for browser writes without explicit user approval.
 
-## Secret schema
+## Secret composition
 
-The environment-scoped `EJS_ADP_CANARY_PROFILE_JSON` secret is upgraded to profile v2 by adding three fields while retaining the existing identity fields:
+The existing environment-scoped `EJS_ADP_CANARY_PROFILE_JSON` remains the source for the already configured identity facts:
+
+- `first_name`
+- `last_name`
+- `email`
+
+A separate environment-scoped secret, `EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON`, carries only the new phone/policy facts:
 
 ```json
 {
-  "profile_version": "adp-canary-profile-v2",
-  "first_name": "<private>",
-  "last_name": "<private>",
-  "email": "<private>",
   "phone_country_iso2": "<private ISO-2>",
   "phone_national_number": "<private digits only>",
   "adp_ascii_name_policy_approved": true
 }
 ```
+
+The live workflow merges the two secrets into an ephemeral in-run profile, validates it, then removes the temporary files. This avoids forcing the user to re-enter the existing identity secret.
 
 ## Name policy
 
@@ -80,11 +84,12 @@ The reviewed profile-v2 continuation canary may perform only this sequence:
 
 Maximum authority is five reviewed click paths and five profile writes. No credentials, social sign-in, CV upload, further application action, CAPTCHA bypass, or Final Submit is authorized.
 
-## Required user-controlled release inputs
+## Required user-controlled release input
 
-Before the live profile-v2 canary is dispatched, the user must explicitly:
+Before the live profile-v2 canary is dispatched, the user only needs to create/update `EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON` with:
 
-1. choose whether `adp_ascii_name_policy_approved` is `true` or `false`;
-2. update the environment-scoped `EJS_ADP_CANARY_PROFILE_JSON` secret with `phone_country_iso2` and an exact digits-only `phone_national_number`.
+1. `phone_country_iso2`;
+2. exact digits-only `phone_national_number`;
+3. explicit boolean `adp_ascii_name_policy_approved`.
 
-If either requirement is missing, execution fails before any browser profile write.
+If the extension secret is missing, malformed, or does not contain exactly those three keys, execution fails before any browser profile write.
