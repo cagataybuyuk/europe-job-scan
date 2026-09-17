@@ -21,10 +21,17 @@ function Invoke-NativeUtf8Stdin {
   [void]$process.Start()
 
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($Payload)
+  $stdinStream = $null
   try {
-    $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
-    $process.StandardInput.BaseStream.Flush()
-    $process.StandardInput.Close()
+    # StandardInput is exposed as a StreamWriter. Use only its underlying raw
+    # stream and close that stream directly. Calling StandardInput.Close()
+    # would flush the text-writer layer and can change the byte sequence on
+    # Windows PowerShell 5.1.
+    $stdinStream = $process.StandardInput.BaseStream
+    $stdinStream.Write($bytes, 0, $bytes.Length)
+    $stdinStream.Flush()
+    $stdinStream.Close()
+    $stdinStream = $null
 
     $stdout = $process.StandardOutput.ReadToEnd()
     $stderr = $process.StandardError.ReadToEnd()
@@ -36,6 +43,9 @@ function Invoke-NativeUtf8Stdin {
       StdErr = $stderr
     }
   } finally {
+    if ($stdinStream) {
+      $stdinStream.Dispose()
+    }
     if ($bytes) {
       [Array]::Clear($bytes, 0, $bytes.Length)
     }
