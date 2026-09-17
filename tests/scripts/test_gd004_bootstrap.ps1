@@ -5,6 +5,29 @@ $Tokens = $null
 $Errors = $null
 $Ast = [System.Management.Automation.Language.Parser]::ParseFile($SourcePath, [ref]$Tokens, [ref]$Errors)
 if ($Errors.Count) { throw 'Bootstrap syntax errors' }
+
+# Parse every user-facing ADP PowerShell helper with the actual Windows
+# PowerShell 5.1 parser used by this workflow. This catches UTF-8/no-BOM source
+# text that can parse in pwsh but break in powershell.exe.
+foreach ($RelativePath in @(
+  '../../scripts/set_adp_base_profile.ps1',
+  '../../scripts/set_adp_profile_v2_extension.ps1'
+)) {
+  $HelperPath = Join-Path $PSScriptRoot $RelativePath
+  $HelperTokens = $null
+  $HelperErrors = $null
+  [void][System.Management.Automation.Language.Parser]::ParseFile(
+    $HelperPath,
+    [ref]$HelperTokens,
+    [ref]$HelperErrors
+  )
+  if ($HelperErrors.Count) {
+    $Messages = ($HelperErrors | ForEach-Object { $_.Message }) -join '; '
+    throw "PowerShell 5.1 syntax errors in $RelativePath : $Messages"
+  }
+}
+Write-Host 'PASS: ADP user-facing helpers parse on Windows PowerShell 5.1'
+
 # Load the actual pure helpers without running OAuth or changing accounts.
 foreach ($Name in @('Assert-NativeSuccess', 'New-HmacSecret', 'Clear-BootstrapClipboard')) {
   $Function = $Ast.Find({ param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq $Name }, $true)
