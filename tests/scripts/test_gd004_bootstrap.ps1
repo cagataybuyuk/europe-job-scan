@@ -6,8 +6,6 @@ $Errors = $null
 $Ast = [System.Management.Automation.Language.Parser]::ParseFile($SourcePath, [ref]$Tokens, [ref]$Errors)
 if ($Errors.Count) { throw 'Bootstrap syntax errors' }
 
-# Parse every user-facing ADP PowerShell helper and the shared UTF-8 stdin
-# transport with the actual Windows PowerShell 5.1 parser used by this job.
 $AdpHelperRelativePaths = @(
   '../../scripts/set_adp_base_profile.ps1',
   '../../scripts/set_adp_profile_v2_extension.ps1',
@@ -29,9 +27,6 @@ foreach ($RelativePath in $AdpHelperRelativePaths) {
 }
 Write-Host 'PASS: ADP user-facing helpers parse on Windows PowerShell 5.1'
 
-# Secret JSON must never travel as a native command-line argument. PowerShell
-# 5.1 can strip embedded JSON quotes there. Both helpers must use the shared
-# UTF-8 stdin transport instead.
 foreach ($RelativePath in @(
   '../../scripts/set_adp_base_profile.ps1',
   '../../scripts/set_adp_profile_v2_extension.ps1'
@@ -41,9 +36,6 @@ foreach ($RelativePath in @(
   if ($HelperText -notmatch 'Invoke-GhSecretSetUtf8') { throw "$RelativePath must use UTF-8 stdin transport" }
 }
 
-# Exercise the real Windows PowerShell 5.1 native pipeline against a harmless
-# executable. Construct Unicode by code point so this test source stays safe
-# under Windows PowerShell 5.1 source decoding.
 $Utf8HelperPath = Join-Path $PSScriptRoot '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 . $Utf8HelperPath
 $EchoSource = @'
@@ -63,21 +55,21 @@ $EchoExe = Join-Path $env:RUNNER_TEMP ('ejs-stdin-echo-' + [Guid]::NewGuid().ToS
 try {
   Add-Type -TypeDefinition $EchoSource -OutputAssembly $EchoExe -OutputType ConsoleApplication
   $Payload = '{"first_name":"' + [char]0x00C7 + 'a' + [char]0x011F + 'atay","last_name":"B' + [char]0x00FC + 'y' + [char]0x00FC + 'k"}'
-  # A PowerShell native pipeline terminates one emitted string record with the
-  # platform newline. That trailing JSON whitespace is valid and expected.
   $ExpectedWireText = $Payload + [Environment]::NewLine
   $ExpectedBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($ExpectedWireText)
   $ExpectedBase64 = [Convert]::ToBase64String($ExpectedBytes)
   $RoundTrip = Invoke-NativeUtf8Stdin -FileName $EchoExe -Payload $Payload
   if ($RoundTrip.ExitCode -ne 0) { throw 'UTF-8 stdin echo process failed' }
-  if ($RoundTrip.Output.Trim() -ne $ExpectedBase64) { throw 'UTF-8 stdin bytes changed in transport' }
+  $ActualBase64 = $RoundTrip.Output.Trim()
+  if ($ActualBase64 -ne $ExpectedBase64) {
+    throw "UTF-8 stdin bytes changed in transport expected=$ExpectedBase64 actual=$ActualBase64"
+  }
   [Array]::Clear($ExpectedBytes, 0, $ExpectedBytes.Length)
 } finally {
   Remove-Item $EchoExe -Force -ErrorAction SilentlyContinue
 }
 Write-Host 'PASS: ADP secret JSON survives Windows PowerShell native UTF-8 stdin'
 
-# Load the actual pure bootstrap helpers without running OAuth or changing accounts.
 foreach ($Name in @('Assert-NativeSuccess', 'New-HmacSecret', 'Clear-BootstrapClipboard')) {
   $Function = $Ast.Find({ param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq $Name }, $true)
   if (-not $Function) { throw "Missing helper $Name" }
@@ -100,13 +92,10 @@ if (-not $Rejected) { throw 'Native failure was accepted' }
 & cmd.exe /c 'exit 0'
 Write-Host 'PASS: Windows PowerShell HMAC generation and native failure handling'
 
-# Exercise the real Windows clipboard API with harmless data, including cleanup.
 Set-Clipboard -Value 'bootstrap-test-placeholder'
 Clear-BootstrapClipboard
 if ((Get-Clipboard -Raw) -ne ' ') { throw 'Clipboard was not overwritten' }
 
-# Resume must bypass project creation, OAuth, HMAC rotation and the saved-property prompt.
-# Stop at the deployment dispatch boundary using a failed native command double.
 function git {
   $global:LASTEXITCODE = 0
   if ($args[0] -eq 'rev-parse' -and $args[1] -eq '--show-toplevel') { return (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path }
