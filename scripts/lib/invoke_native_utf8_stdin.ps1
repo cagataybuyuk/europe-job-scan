@@ -7,12 +7,13 @@ function Invoke-NativeUtf8Stdin {
     [Parameter(Mandatory = $true)][string]$Payload
   )
 
-  $previousOutputEncoding = $OutputEncoding
+  $previousOutputEncoding = $global:OutputEncoding
   try {
-    # Windows PowerShell 5.1 encodes text sent to a native process using
-    # $OutputEncoding. Set it explicitly to UTF-8 without a BOM so JSON stays
-    # off the command line while quotes and non-ASCII identity text survive.
-    $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    # Windows PowerShell 5.1 consults the global OutputEncoding preference when
+    # serializing pipeline text into a native process stdin stream. A local
+    # function-scope assignment is not sufficient. Use UTF-8 without BOM and
+    # restore the caller's original preference afterwards.
+    $global:OutputEncoding = New-Object System.Text.UTF8Encoding($false)
     $nativeOutput = @($Payload | & $FileName @ArgumentList 2>&1)
     $exitCode = $LASTEXITCODE
     $outputText = ($nativeOutput | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
@@ -22,7 +23,7 @@ function Invoke-NativeUtf8Stdin {
       Output = $outputText
     }
   } finally {
-    $OutputEncoding = $previousOutputEncoding
+    $global:OutputEncoding = $previousOutputEncoding
   }
 }
 
