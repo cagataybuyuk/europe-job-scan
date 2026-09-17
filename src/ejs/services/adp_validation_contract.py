@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import unicodedata
 from typing import Mapping
 
 from ejs.contracts.prefill import value_hash
@@ -60,8 +61,16 @@ def validate_adp_name(value: str) -> tuple[bool, str]:
 
 
 def turkish_ascii_candidate(value: str) -> str:
-    """Return a candidate transformation only; never authorizes its use."""
-    return value.translate(TURKISH_ASCII_TRANSLITERATION)
+    """Return a reviewed Turkish-to-ASCII candidate without widening policy.
+
+    Unicode text can represent the same visible Turkish name in composed or
+    decomposed form. Normalize to NFC first so decomposed sequences such as
+    ``C + COMBINING CEDILLA`` become the reviewed Turkish code point before the
+    explicit mapping is applied. This does not authorize transliteration; it
+    only makes the existing reviewed mapping normalization-form invariant.
+    """
+    normalized = unicodedata.normalize("NFC", value)
+    return normalized.translate(TURKISH_ASCII_TRANSLITERATION)
 
 
 def classify_name(value: str) -> NameContractResult:

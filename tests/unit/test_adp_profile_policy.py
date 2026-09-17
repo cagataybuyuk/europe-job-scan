@@ -46,6 +46,17 @@ class AdpProfilePolicyTests(unittest.TestCase):
         self.assertTrue(resolved.first_name_transliterated)
         self.assertTrue(resolved.last_name_transliterated)
 
+    def test_approved_decomposed_turkish_name_resolves_identically(self):
+        profile = self._base()
+        profile["first_name"] = "C\u0327ag\u0306atay"
+        profile["last_name"] = "Bu\u0308yu\u0308k"
+        profile["adp_ascii_name_policy_approved"] = True
+        resolved = resolve_adp_profile(profile)
+        self.assertEqual(resolved.first_name, "Cagatay")
+        self.assertEqual(resolved.last_name, "Buyuk")
+        self.assertTrue(resolved.first_name_transliterated)
+        self.assertTrue(resolved.last_name_transliterated)
+
     def test_phone_country_must_be_uppercase_iso2(self):
         profile = self._base()
         profile["phone_country_iso2"] = "tr"
