@@ -36,9 +36,10 @@ $extension = @{
 } | ConvertTo-Json -Compress
 
 try {
-  $extension | gh secret set EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON `
+  gh secret set EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON `
     --repo $Repo `
-    --env $Environment
+    --env $Environment `
+    --body $extension
   if ($LASTEXITCODE -ne 0) {
     throw "gh secret set failed with exit code $LASTEXITCODE"
   }
