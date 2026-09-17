@@ -3,53 +3,26 @@ $ErrorActionPreference = 'Stop'
 function Invoke-NativeUtf8Stdin {
   param(
     [Parameter(Mandatory = $true)][string]$FileName,
-    [string]$Arguments = '',
+    [string[]]$ArgumentList = @(),
     [Parameter(Mandatory = $true)][string]$Payload
   )
 
-  $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-  $startInfo.FileName = $FileName
-  $startInfo.Arguments = $Arguments
-  $startInfo.UseShellExecute = $false
-  $startInfo.RedirectStandardInput = $true
-  $startInfo.RedirectStandardOutput = $true
-  $startInfo.RedirectStandardError = $true
-  $startInfo.CreateNoWindow = $true
-
-  $process = New-Object System.Diagnostics.Process
-  $process.StartInfo = $startInfo
-  [void]$process.Start()
-
-  $bytes = [System.Text.Encoding]::UTF8.GetBytes($Payload)
-  $stdinStream = $null
+  $previousOutputEncoding = $OutputEncoding
   try {
-    # StandardInput is exposed as a StreamWriter. Use only its underlying raw
-    # stream and close that stream directly. Calling StandardInput.Close()
-    # would flush the text-writer layer and can change the byte sequence on
-    # Windows PowerShell 5.1.
-    $stdinStream = $process.StandardInput.BaseStream
-    $stdinStream.Write($bytes, 0, $bytes.Length)
-    $stdinStream.Flush()
-    $stdinStream.Close()
-    $stdinStream = $null
-
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
+    # Windows PowerShell 5.1 encodes text sent to a native process using
+    # $OutputEncoding. Set it explicitly to UTF-8 without a BOM so JSON stays
+    # off the command line while quotes and non-ASCII identity text survive.
+    $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    $nativeOutput = @($Payload | & $FileName @ArgumentList 2>&1)
+    $exitCode = $LASTEXITCODE
+    $outputText = ($nativeOutput | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
 
     return [pscustomobject]@{
-      ExitCode = $process.ExitCode
-      StdOut = $stdout
-      StdErr = $stderr
+      ExitCode = $exitCode
+      Output = $outputText
     }
   } finally {
-    if ($stdinStream) {
-      $stdinStream.Dispose()
-    }
-    if ($bytes) {
-      [Array]::Clear($bytes, 0, $bytes.Length)
-    }
-    $process.Dispose()
+    $OutputEncoding = $previousOutputEncoding
   }
 }
 
@@ -72,11 +45,11 @@ function Invoke-GhSecretSetUtf8 {
   }
 
   $gh = Get-Command gh -CommandType Application -ErrorAction Stop | Select-Object -First 1
-  $arguments = "secret set $SecretName --repo $Repo --env $Environment"
-  $result = Invoke-NativeUtf8Stdin -FileName $gh.Source -Arguments $arguments -Payload $Json
+  $arguments = @('secret', 'set', $SecretName, '--repo', $Repo, '--env', $Environment)
+  $result = Invoke-NativeUtf8Stdin -FileName $gh.Source -ArgumentList $arguments -Payload $Json
   if ($result.ExitCode -ne 0) {
-    $message = ($result.StdErr | Out-String).Trim()
-    if (-not $message) { $message = 'no stderr returned' }
+    $message = $result.Output.Trim()
+    if (-not $message) { $message = 'no diagnostic output returned' }
     throw "gh secret set failed with exit code $($result.ExitCode): $message"
   }
 }
