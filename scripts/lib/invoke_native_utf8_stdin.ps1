@@ -35,15 +35,19 @@ function Invoke-NativeUtf8Stdin {
 
   try {
     [IO.File]::WriteAllText($stdinPath, $Payload, $utf8NoBom)
-    $process = Start-Process `
-      -FilePath $FileName `
-      -ArgumentList $ArgumentList `
-      -RedirectStandardInput $stdinPath `
-      -RedirectStandardOutput $stdoutPath `
-      -RedirectStandardError $stderrPath `
-      -NoNewWindow `
-      -Wait `
-      -PassThru
+    $startParams = @{
+      FilePath = $FileName
+      RedirectStandardInput = $stdinPath
+      RedirectStandardOutput = $stdoutPath
+      RedirectStandardError = $stderrPath
+      NoNewWindow = $true
+      Wait = $true
+      PassThru = $true
+    }
+    if ($ArgumentList -and $ArgumentList.Count -gt 0) {
+      $startParams.ArgumentList = $ArgumentList
+    }
+    $process = Start-Process @startParams
 
     $stdout = if (Test-Path -LiteralPath $stdoutPath) { [IO.File]::ReadAllText($stdoutPath) } else { '' }
     $stderr = if (Test-Path -LiteralPath $stderrPath) { [IO.File]::ReadAllText($stderrPath) } else { '' }
