@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'lib/invoke_native_utf8_stdin.ps1')
 
 function Read-ExactText([string]$Prompt, [string]$FieldName) {
   $value = Read-Host $Prompt
@@ -17,9 +18,6 @@ function Read-ExactText([string]$Prompt, [string]$FieldName) {
 }
 
 function Test-ContainsMojibakeMarker([string]$Value) {
-  # Keep this source file ASCII-only so Windows PowerShell 5.1 cannot
-  # misdecode the helper itself. These code points are common markers of
-  # UTF-8 text that was decoded through a legacy Windows/Latin code page.
   $markerCodePoints = @(0x00C2, 0x00C3, 0x00C4, 0x00C5, 0xFFFD)
   foreach ($character in $Value.ToCharArray()) {
     if ($markerCodePoints -contains [int][char]$character) {
@@ -48,14 +46,12 @@ $base = @{
 } | ConvertTo-Json -Compress
 
 try {
-  gh secret set EJS_ADP_CANARY_PROFILE_JSON `
-    --repo $Repo `
-    --env $Environment `
-    --body $base
-  if ($LASTEXITCODE -ne 0) {
-    throw "gh secret set failed with exit code $LASTEXITCODE"
-  }
-  Write-Host "ADP base profile secret updated successfully with Unicode-safe argument passing."
+  Invoke-GhSecretSetUtf8 `
+    -SecretName 'EJS_ADP_CANARY_PROFILE_JSON' `
+    -Json $base `
+    -Repo $Repo `
+    -Environment $Environment
+  Write-Host "ADP base profile secret updated successfully with byte-safe UTF-8 stdin."
 } finally {
   Remove-Variable base, first, last, email -ErrorAction SilentlyContinue
 }

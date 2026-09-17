@@ -16,13 +16,13 @@ The earlier validation contract also established that ADP first/last names accep
 
 ## Secret composition
 
-The existing environment-scoped `EJS_ADP_CANARY_PROFILE_JSON` remains the source for the already configured identity facts:
+The environment-scoped `EJS_ADP_CANARY_PROFILE_JSON` is the source for:
 
 - `first_name`
 - `last_name`
 - `email`
 
-A separate environment-scoped secret, `EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON`, carries only the new phone/policy facts:
+A separate environment-scoped secret, `EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON`, carries only the phone/policy facts:
 
 ```json
 {
@@ -32,18 +32,20 @@ A separate environment-scoped secret, `EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON`
 }
 ```
 
-The live workflow merges the two secrets into an ephemeral in-run profile, validates it, then removes the temporary files. This avoids forcing the user to re-enter the existing identity secret.
+The live workflow merges the two secrets into an ephemeral in-run profile, validates it, then removes the temporary files.
 
-## Unicode-safe local provisioning
+## Windows PowerShell-safe local provisioning
 
-Live runs `35217722708` and `35218619116` failed before browser execution because the previously stored base identity secret produced a first-name value that still violated the ADP ASCII candidate contract. The reviewed Turkish transliteration logic already handles composed and decomposed Unicode forms, so the remaining safe remediation is to replace the old base secret rather than guess at or auto-repair corrupted text.
+Runs `35217722708` and `35218619116` established that the original base secret contained identity text incompatible with the reviewed ADP name policy. Unicode normalization and PowerShell 5.1 source parsing were then corrected. Run `35220789712` exposed a separate Windows PowerShell 5.1 boundary: passing compressed JSON through `gh secret set --body $json` can lose embedded JSON quote characters when PowerShell constructs the native command line. The resulting environment secret is non-empty but not valid JSON, so the live workflow fails before browser execution.
 
-Use the repository helpers when creating these secrets from Windows PowerShell:
+The helpers therefore never place secret JSON on the native command line. `scripts/lib/invoke_native_utf8_stdin.ps1` writes the JSON to a uniquely named local temporary file using explicit UTF-8 without BOM, launches `gh` with `Start-Process -RedirectStandardInput`, and then removes the temporary files in `finally`. The sensitive stdin file receives a best-effort zero overwrite before deletion. Raw identity values are not committed to the repository or written to workflow artifacts.
+
+Use:
 
 - `scripts/set_adp_base_profile.ps1` for `EJS_ADP_CANARY_PROFILE_JSON`;
 - `scripts/set_adp_profile_v2_extension.ps1` for `EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON`.
 
-Both helpers pass the complete JSON through `gh secret set --body` instead of a PowerShell pipeline. The base helper normalizes freshly typed names to Unicode NFC, validates required identity fields, and rejects common mojibake markers before writing the secret. Raw identity values are not committed to the repository or written to workflow artifacts.
+The Windows regression suite parses all three PowerShell files with Windows PowerShell 5.1, statically rejects any return to `--body` JSON transport, and runs a harmless native executable to verify that Turkish Unicode JSON reaches stdin as the exact expected UTF-8 byte sequence with no BOM.
 
 ## Name policy
 
@@ -98,7 +100,7 @@ Maximum authority is five reviewed click paths and five profile writes. No crede
 
 ## Required user-controlled release input
 
-Before the live profile-v2 canary is dispatched, the user needs valid environment-scoped base and extension secrets. For the extension secret, the required values are:
+Before the live profile-v2 canary is dispatched, both environment secrets must have been provisioned through the current byte-safe helpers. For the extension secret, the required values are:
 
 1. `phone_country_iso2`;
 2. exact digits-only `phone_national_number`;

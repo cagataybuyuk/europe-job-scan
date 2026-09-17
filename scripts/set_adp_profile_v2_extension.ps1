@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'lib/invoke_native_utf8_stdin.ps1')
 
 $country = (Read-Host "Phone country ISO-2 (orn: TR)").Trim().ToUpperInvariant()
 if ($country -notmatch '^[A-Z]{2}$') {
@@ -36,14 +37,12 @@ $extension = @{
 } | ConvertTo-Json -Compress
 
 try {
-  gh secret set EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON `
-    --repo $Repo `
-    --env $Environment `
-    --body $extension
-  if ($LASTEXITCODE -ne 0) {
-    throw "gh secret set failed with exit code $LASTEXITCODE"
-  }
-  Write-Host "ADP profile-v2 extension secret updated successfully."
+  Invoke-GhSecretSetUtf8 `
+    -SecretName 'EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON' `
+    -Json $extension `
+    -Repo $Repo `
+    -Environment $Environment
+  Write-Host "ADP profile-v2 extension secret updated successfully with byte-safe UTF-8 stdin."
 } finally {
   Remove-Variable extension, phone, country, answer, approval -ErrorAction SilentlyContinue
 }
