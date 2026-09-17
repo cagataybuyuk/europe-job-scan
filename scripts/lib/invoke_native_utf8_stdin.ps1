@@ -1,5 +1,24 @@
 $ErrorActionPreference = 'Stop'
 
+function Remove-EjsTempFile {
+  param(
+    [string]$Path,
+    [switch]$Sensitive
+  )
+  if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return }
+  if ($Sensitive) {
+    try {
+      $length = (Get-Item -LiteralPath $Path).Length
+      if ($length -gt 0) {
+        [IO.File]::WriteAllBytes($Path, (New-Object byte[] $length))
+      }
+    } catch {
+      # Deletion is still required even when best-effort overwrite is blocked.
+    }
+  }
+  Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+}
+
 function Invoke-NativeUtf8Stdin {
   param(
     [Parameter(Mandatory = $true)][string]$FileName,
@@ -7,23 +26,37 @@ function Invoke-NativeUtf8Stdin {
     [Parameter(Mandatory = $true)][string]$Payload
   )
 
-  $previousOutputEncoding = $global:OutputEncoding
+  $token = [Guid]::NewGuid().ToString('N')
+  $tempRoot = [IO.Path]::GetTempPath()
+  $stdinPath = Join-Path $tempRoot ("ejs-stdin-$token.tmp")
+  $stdoutPath = Join-Path $tempRoot ("ejs-stdout-$token.tmp")
+  $stderrPath = Join-Path $tempRoot ("ejs-stderr-$token.tmp")
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
   try {
-    # Windows PowerShell 5.1 consults the global OutputEncoding preference when
-    # serializing pipeline text into a native process stdin stream. A local
-    # function-scope assignment is not sufficient. Use UTF-8 without BOM and
-    # restore the caller's original preference afterwards.
-    $global:OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-    $nativeOutput = @($Payload | & $FileName @ArgumentList 2>&1)
-    $exitCode = $LASTEXITCODE
-    $outputText = ($nativeOutput | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($stdinPath, $Payload, $utf8NoBom)
+    $process = Start-Process `
+      -FilePath $FileName `
+      -ArgumentList $ArgumentList `
+      -RedirectStandardInput $stdinPath `
+      -RedirectStandardOutput $stdoutPath `
+      -RedirectStandardError $stderrPath `
+      -NoNewWindow `
+      -Wait `
+      -PassThru
+
+    $stdout = if (Test-Path -LiteralPath $stdoutPath) { [IO.File]::ReadAllText($stdoutPath) } else { '' }
+    $stderr = if (Test-Path -LiteralPath $stderrPath) { [IO.File]::ReadAllText($stderrPath) } else { '' }
+    $combined = @($stdout.Trim(), $stderr.Trim()) | Where-Object { $_ } | ForEach-Object { [string]$_ }
 
     return [pscustomobject]@{
-      ExitCode = $exitCode
-      Output = $outputText
+      ExitCode = $process.ExitCode
+      Output = ($combined -join [Environment]::NewLine)
     }
   } finally {
-    $global:OutputEncoding = $previousOutputEncoding
+    Remove-EjsTempFile -Path $stdinPath -Sensitive
+    Remove-EjsTempFile -Path $stdoutPath
+    Remove-EjsTempFile -Path $stderrPath
   }
 }
 
