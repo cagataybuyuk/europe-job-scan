@@ -55,20 +55,16 @@ $EchoExe = Join-Path $env:RUNNER_TEMP ('ejs-stdin-echo-' + [Guid]::NewGuid().ToS
 try {
   Add-Type -TypeDefinition $EchoSource -OutputAssembly $EchoExe -OutputType ConsoleApplication
   $Payload = '{"first_name":"' + [char]0x00C7 + 'a' + [char]0x011F + 'atay","last_name":"B' + [char]0x00FC + 'y' + [char]0x00FC + 'k"}'
-  $ExpectedWireText = $Payload + [Environment]::NewLine
-  $ExpectedBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($ExpectedWireText)
+  $ExpectedBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($Payload)
   $ExpectedBase64 = [Convert]::ToBase64String($ExpectedBytes)
   $RoundTrip = Invoke-NativeUtf8Stdin -FileName $EchoExe -Payload $Payload
   if ($RoundTrip.ExitCode -ne 0) { throw 'UTF-8 stdin echo process failed' }
-  $ActualBase64 = $RoundTrip.Output.Trim()
-  if ($ActualBase64 -ne $ExpectedBase64) {
-    throw "UTF-8 stdin bytes changed in transport expected=$ExpectedBase64 actual=$ActualBase64"
-  }
+  if ($RoundTrip.Output.Trim() -ne $ExpectedBase64) { throw 'UTF-8 stdin bytes changed in transport' }
   [Array]::Clear($ExpectedBytes, 0, $ExpectedBytes.Length)
 } finally {
   Remove-Item $EchoExe -Force -ErrorAction SilentlyContinue
 }
-Write-Host 'PASS: ADP secret JSON survives Windows PowerShell native UTF-8 stdin'
+Write-Host 'PASS: ADP secret JSON reaches native stdin as exact UTF-8 without BOM'
 
 foreach ($Name in @('Assert-NativeSuccess', 'New-HmacSecret', 'Clear-BootstrapClipboard')) {
   $Function = $Ast.Find({ param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq $Name }, $true)
