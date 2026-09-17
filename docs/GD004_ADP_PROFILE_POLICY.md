@@ -36,16 +36,16 @@ The live workflow merges the two secrets into an ephemeral in-run profile, valid
 
 ## Windows PowerShell-safe local provisioning
 
-Runs `35217722708` and `35218619116` established that the original base secret contained identity text incompatible with the reviewed ADP name policy. Unicode normalization and PowerShell 5.1 source parsing were then corrected. Run `35220789712` exposed a separate Windows PowerShell 5.1 boundary: passing compressed JSON through `gh secret set --body $json` can lose the embedded JSON quote characters when PowerShell constructs the native command line. The resulting environment secret is non-empty but is not valid JSON, so the live workflow fails before browser execution.
+Runs `35217722708` and `35218619116` established that the original base secret contained identity text incompatible with the reviewed ADP name policy. Unicode normalization and PowerShell 5.1 source parsing were then corrected. Run `35220789712` exposed a separate Windows PowerShell 5.1 boundary: passing compressed JSON through `gh secret set --body $json` can lose embedded JSON quote characters when PowerShell constructs the native command line. The resulting environment secret is non-empty but not valid JSON, so the live workflow fails before browser execution.
 
-The repository helpers therefore must not pass secret JSON as a native command-line argument. They use `scripts/lib/invoke_native_utf8_stdin.ps1`, which launches `gh` with redirected stdin and writes the JSON payload directly to the process stdin `BaseStream` as explicit UTF-8 bytes. The raw JSON is not part of the native argument string, shell quoting does not touch it, and the temporary UTF-8 byte array is cleared after the write.
+The helpers therefore never place secret JSON on the native command line. `scripts/lib/invoke_native_utf8_stdin.ps1` writes the JSON to a uniquely named local temporary file using explicit UTF-8 without BOM, launches `gh` with `Start-Process -RedirectStandardInput`, and then removes the temporary files in `finally`. The sensitive stdin file receives a best-effort zero overwrite before deletion. Raw identity values are not committed to the repository or written to workflow artifacts.
 
 Use:
 
 - `scripts/set_adp_base_profile.ps1` for `EJS_ADP_CANARY_PROFILE_JSON`;
 - `scripts/set_adp_profile_v2_extension.ps1` for `EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON`.
 
-The Windows regression suite parses all three PowerShell files with Windows PowerShell 5.1, rejects any return to `--body` JSON transport, and performs a native-process UTF-8 byte round-trip using Turkish Unicode code points.
+The Windows regression suite parses all three PowerShell files with Windows PowerShell 5.1, statically rejects any return to `--body` JSON transport, and runs a harmless native executable to verify that Turkish Unicode JSON reaches stdin as the exact expected UTF-8 byte sequence with no BOM.
 
 ## Name policy
 
