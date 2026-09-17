@@ -6,13 +6,14 @@ $Errors = $null
 $Ast = [System.Management.Automation.Language.Parser]::ParseFile($SourcePath, [ref]$Tokens, [ref]$Errors)
 if ($Errors.Count) { throw 'Bootstrap syntax errors' }
 
-# Parse every user-facing ADP PowerShell helper with the actual Windows
-# PowerShell 5.1 parser used by this workflow. This catches UTF-8/no-BOM source
-# text that can parse in pwsh but break in powershell.exe.
-foreach ($RelativePath in @(
+# Parse every user-facing ADP PowerShell helper and the shared UTF-8 stdin
+# transport with the actual Windows PowerShell 5.1 parser used by this job.
+$AdpHelperRelativePaths = @(
   '../../scripts/set_adp_base_profile.ps1',
-  '../../scripts/set_adp_profile_v2_extension.ps1'
-)) {
+  '../../scripts/set_adp_profile_v2_extension.ps1',
+  '../../scripts/lib/invoke_native_utf8_stdin.ps1'
+)
+foreach ($RelativePath in $AdpHelperRelativePaths) {
   $HelperPath = Join-Path $PSScriptRoot $RelativePath
   $HelperTokens = $null
   $HelperErrors = $null
@@ -28,7 +29,52 @@ foreach ($RelativePath in @(
 }
 Write-Host 'PASS: ADP user-facing helpers parse on Windows PowerShell 5.1'
 
-# Load the actual pure helpers without running OAuth or changing accounts.
+# Secret JSON must never travel as a native command-line argument. PowerShell
+# 5.1 can strip embedded JSON quotes there. Both helpers must use the shared
+# byte-safe stdin transport instead.
+foreach ($RelativePath in @(
+  '../../scripts/set_adp_base_profile.ps1',
+  '../../scripts/set_adp_profile_v2_extension.ps1'
+)) {
+  $HelperText = Get-Content -Raw (Join-Path $PSScriptRoot $RelativePath)
+  if ($HelperText -match '--body') { throw "$RelativePath must not pass JSON through --body" }
+  if ($HelperText -notmatch 'Invoke-GhSecretSetUtf8') { throw "$RelativePath must use byte-safe stdin transport" }
+}
+
+# Exercise the real UTF-8 byte transport against a harmless native test
+# executable. Construct Unicode by code point so this test source stays safe
+# under Windows PowerShell 5.1 source decoding.
+$Utf8HelperPath = Join-Path $PSScriptRoot '../../scripts/lib/invoke_native_utf8_stdin.ps1'
+. $Utf8HelperPath
+$EchoSource = @'
+using System;
+using System.IO;
+public static class StdinEcho {
+  public static int Main() {
+    Stream input = Console.OpenStandardInput();
+    MemoryStream output = new MemoryStream();
+    input.CopyTo(output);
+    Console.Write(Convert.ToBase64String(output.ToArray()));
+    return 0;
+  }
+}
+'@
+$EchoExe = Join-Path $env:RUNNER_TEMP ('ejs-stdin-echo-' + [Guid]::NewGuid().ToString('N') + '.exe')
+try {
+  Add-Type -TypeDefinition $EchoSource -OutputAssembly $EchoExe -OutputType ConsoleApplication
+  $Payload = '{"first_name":"' + [char]0x00C7 + 'a' + [char]0x011F + 'atay","last_name":"B' + [char]0x00FC + 'y' + [char]0x00FC + 'k"}'
+  $ExpectedBytes = [System.Text.Encoding]::UTF8.GetBytes($Payload)
+  $ExpectedBase64 = [Convert]::ToBase64String($ExpectedBytes)
+  $RoundTrip = Invoke-NativeUtf8Stdin -FileName $EchoExe -Payload $Payload
+  if ($RoundTrip.ExitCode -ne 0) { throw 'UTF-8 stdin echo process failed' }
+  if ($RoundTrip.StdOut.Trim() -ne $ExpectedBase64) { throw 'UTF-8 stdin bytes changed in transport' }
+  [Array]::Clear($ExpectedBytes, 0, $ExpectedBytes.Length)
+} finally {
+  Remove-Item $EchoExe -Force -ErrorAction SilentlyContinue
+}
+Write-Host 'PASS: ADP secret JSON survives native UTF-8 stdin byte-for-byte'
+
+# Load the actual pure bootstrap helpers without running OAuth or changing accounts.
 foreach ($Name in @('Assert-NativeSuccess', 'New-HmacSecret', 'Clear-BootstrapClipboard')) {
   $Function = $Ast.Find({ param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq $Name }, $true)
   if (-not $Function) { throw "Missing helper $Name" }
