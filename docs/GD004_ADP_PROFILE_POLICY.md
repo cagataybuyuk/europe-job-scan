@@ -34,11 +34,23 @@ A separate environment-scoped secret, `EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON`
 
 The live workflow merges the two secrets into an ephemeral in-run profile, validates it, then removes the temporary files. This avoids forcing the user to re-enter the existing identity secret.
 
+## Unicode-safe local provisioning
+
+Live runs `35217722708` and `35218619116` failed before browser execution because the previously stored base identity secret produced a first-name value that still violated the ADP ASCII candidate contract. The reviewed Turkish transliteration logic already handles composed and decomposed Unicode forms, so the remaining safe remediation is to replace the old base secret rather than guess at or auto-repair corrupted text.
+
+Use the repository helpers when creating these secrets from Windows PowerShell:
+
+- `scripts/set_adp_base_profile.ps1` for `EJS_ADP_CANARY_PROFILE_JSON`;
+- `scripts/set_adp_profile_v2_extension.ps1` for `EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON`.
+
+Both helpers pass the complete JSON through `gh secret set --body` instead of a PowerShell pipeline. The base helper normalizes freshly typed names to Unicode NFC, validates required identity fields, and rejects common mojibake markers before writing the secret. Raw identity values are not committed to the repository or written to workflow artifacts.
+
 ## Name policy
 
 - If a supplied name already satisfies the ADP name contract, it is used unchanged.
 - If it does not, the deterministic Turkish-to-ASCII candidate can be used only when `adp_ascii_name_policy_approved` is exactly `true`.
 - The transformed value must independently satisfy the ADP name contract.
+- Canonically equivalent composed/decomposed Turkish Unicode forms are normalized before the reviewed Turkish-to-ASCII mapping.
 - Outer whitespace, repeated invalid punctuation, or an invalid post-transliteration result fail closed.
 - Raw and transformed name values are never written to artifacts or logs; only hashes and booleans may be emitted.
 
@@ -86,10 +98,10 @@ Maximum authority is five reviewed click paths and five profile writes. No crede
 
 ## Required user-controlled release input
 
-Before the live profile-v2 canary is dispatched, the user only needs to create/update `EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON` with:
+Before the live profile-v2 canary is dispatched, the user needs valid environment-scoped base and extension secrets. For the extension secret, the required values are:
 
 1. `phone_country_iso2`;
 2. exact digits-only `phone_national_number`;
 3. explicit boolean `adp_ascii_name_policy_approved`.
 
-If the extension secret is missing, malformed, or does not contain exactly those three keys, execution fails before any browser profile write.
+If either secret is missing, malformed, or contains unsupported identity text, execution fails before any browser profile write.
