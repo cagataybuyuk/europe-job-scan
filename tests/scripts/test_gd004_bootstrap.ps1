@@ -31,17 +31,17 @@ Write-Host 'PASS: ADP user-facing helpers parse on Windows PowerShell 5.1'
 
 # Secret JSON must never travel as a native command-line argument. PowerShell
 # 5.1 can strip embedded JSON quotes there. Both helpers must use the shared
-# byte-safe stdin transport instead.
+# UTF-8 stdin transport instead.
 foreach ($RelativePath in @(
   '../../scripts/set_adp_base_profile.ps1',
   '../../scripts/set_adp_profile_v2_extension.ps1'
 )) {
   $HelperText = Get-Content -Raw (Join-Path $PSScriptRoot $RelativePath)
   if ($HelperText -match '--body') { throw "$RelativePath must not pass JSON through --body" }
-  if ($HelperText -notmatch 'Invoke-GhSecretSetUtf8') { throw "$RelativePath must use byte-safe stdin transport" }
+  if ($HelperText -notmatch 'Invoke-GhSecretSetUtf8') { throw "$RelativePath must use UTF-8 stdin transport" }
 }
 
-# Exercise the real UTF-8 byte transport against a harmless native test
+# Exercise the real Windows PowerShell 5.1 native pipeline against a harmless
 # executable. Construct Unicode by code point so this test source stays safe
 # under Windows PowerShell 5.1 source decoding.
 $Utf8HelperPath = Join-Path $PSScriptRoot '../../scripts/lib/invoke_native_utf8_stdin.ps1'
@@ -63,16 +63,19 @@ $EchoExe = Join-Path $env:RUNNER_TEMP ('ejs-stdin-echo-' + [Guid]::NewGuid().ToS
 try {
   Add-Type -TypeDefinition $EchoSource -OutputAssembly $EchoExe -OutputType ConsoleApplication
   $Payload = '{"first_name":"' + [char]0x00C7 + 'a' + [char]0x011F + 'atay","last_name":"B' + [char]0x00FC + 'y' + [char]0x00FC + 'k"}'
-  $ExpectedBytes = [System.Text.Encoding]::UTF8.GetBytes($Payload)
+  # A PowerShell native pipeline terminates one emitted string record with the
+  # platform newline. That trailing JSON whitespace is valid and expected.
+  $ExpectedWireText = $Payload + [Environment]::NewLine
+  $ExpectedBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($ExpectedWireText)
   $ExpectedBase64 = [Convert]::ToBase64String($ExpectedBytes)
   $RoundTrip = Invoke-NativeUtf8Stdin -FileName $EchoExe -Payload $Payload
   if ($RoundTrip.ExitCode -ne 0) { throw 'UTF-8 stdin echo process failed' }
-  if ($RoundTrip.StdOut.Trim() -ne $ExpectedBase64) { throw 'UTF-8 stdin bytes changed in transport' }
+  if ($RoundTrip.Output.Trim() -ne $ExpectedBase64) { throw 'UTF-8 stdin bytes changed in transport' }
   [Array]::Clear($ExpectedBytes, 0, $ExpectedBytes.Length)
 } finally {
   Remove-Item $EchoExe -Force -ErrorAction SilentlyContinue
 }
-Write-Host 'PASS: ADP secret JSON survives native UTF-8 stdin byte-for-byte'
+Write-Host 'PASS: ADP secret JSON survives Windows PowerShell native UTF-8 stdin'
 
 # Load the actual pure bootstrap helpers without running OAuth or changing accounts.
 foreach ($Name in @('Assert-NativeSuccess', 'New-HmacSecret', 'Clear-BootstrapClipboard')) {
