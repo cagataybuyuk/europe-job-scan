@@ -64,6 +64,20 @@ function Invoke-NativeUtf8Stdin {
   }
 }
 
+function Assert-EjsAdpSecretNameAllowed {
+  param(
+    [Parameter(Mandatory = $true)][string]$SecretName
+  )
+
+  $allowedSecretNames = @(
+    'EJS_ADP_CANARY_PROFILE_JSON',
+    'EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON'
+  )
+  if ($allowedSecretNames -notcontains $SecretName) {
+    throw 'Secret name is not in the reviewed ADP allowlist.'
+  }
+}
+
 function Invoke-GhSecretSetUtf8 {
   param(
     [Parameter(Mandatory = $true)][string]$SecretName,
@@ -72,9 +86,7 @@ function Invoke-GhSecretSetUtf8 {
     [Parameter(Mandatory = $true)][string]$Environment
   )
 
-  if ($SecretName -notmatch '^[A-Z0-9_]+$') {
-    throw 'Secret name contains unsupported characters.'
-  }
+  Assert-EjsAdpSecretNameAllowed -SecretName $SecretName
   if ($Repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
     throw 'Repository must be in owner/name form using safe characters only.'
   }

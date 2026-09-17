@@ -38,6 +38,22 @@ foreach ($RelativePath in @(
 
 $Utf8HelperPath = Join-Path $PSScriptRoot '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 . $Utf8HelperPath
+
+foreach ($AllowedSecretName in @(
+  'EJS_ADP_CANARY_PROFILE_JSON',
+  'EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON'
+)) {
+  Assert-EjsAdpSecretNameAllowed -SecretName $AllowedSecretName
+}
+$RejectedSecretName = $false
+try {
+  Assert-EjsAdpSecretNameAllowed -SecretName 'EJS_UNREVIEWED_SECRET'
+} catch {
+  $RejectedSecretName = $_.Exception.Message -match 'reviewed ADP allowlist'
+}
+if (-not $RejectedSecretName) { throw 'Unreviewed ADP secret name was accepted' }
+Write-Host 'PASS: reviewed ADP secret names are exact-allowlisted'
+
 $EchoSource = @'
 using System;
 using System.IO;
