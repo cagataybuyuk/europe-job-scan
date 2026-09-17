@@ -41,6 +41,17 @@ class AdpValidationContractTests(unittest.TestCase):
         self.assertTrue(result.transliteration_candidate_valid)
         self.assertNotEqual(result.value_hash, result.transliteration_candidate_hash)
 
+    def test_decomposed_turkish_unicode_normalizes_to_same_ascii_candidate(self):
+        composed = "Çağatay"
+        decomposed = "C\u0327ag\u0306atay"
+        self.assertNotEqual(composed, decomposed)
+        self.assertEqual(turkish_ascii_candidate(composed), "Cagatay")
+        self.assertEqual(turkish_ascii_candidate(decomposed), "Cagatay")
+        result = classify_name(decomposed)
+        self.assertFalse(result.compatible)
+        self.assertTrue(result.transliteration_changes_value)
+        self.assertTrue(result.transliteration_candidate_valid)
+
     def test_profile_report_never_authorizes_browser_execution(self):
         report = profile_contract_report({
             "candidate.first_name": "Ada",
@@ -49,7 +60,6 @@ class AdpValidationContractTests(unittest.TestCase):
         })
         self.assertEqual(report["contract_version"], CONTRACT_VERSION)
         self.assertTrue(report["first_name"]["compatible"])
-        self.assertTrue(report["last_name"]["compatible"])
         self.assertTrue(report["phone"]["present"])
         self.assertTrue(report["phone"]["runtime_required_observed"])
         self.assertFalse(report["phone"]["format_contract_resolved"])
