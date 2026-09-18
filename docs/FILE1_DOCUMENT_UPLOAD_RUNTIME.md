@@ -19,4 +19,4 @@ FILE-1 adds a separate, bounded browser authority for attaching approved CV and 
 
 ## Production gate
 
-Current host browser egress remains blocked. FILE-1 production employer upload is therefore disabled until BE-1B can obtain a current trusted external form fingerprint in an outbound-enabled browser runtime. Local canaries may use approved production assets against isolated local fixture forms; these do not create production `Application Execution Log` or `Submission Artifact Registry` rows.
+FILE-1 employer upload remains adapter-gated rather than globally enabled. A production adapter may use FILE-1 only after its approved live runtime obtains a current trusted external form fingerprint and the adapter-specific upload surface is validated. Historical egress failures are target/run evidence rather than a universal runtime assumption. Local canaries may use approved production assets against isolated fixture forms; these do not create production `Application Execution Log` or `Submission Artifact Registry` rows.
