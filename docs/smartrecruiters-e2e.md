@@ -1,6 +1,6 @@
 # SMARTRECRUITERS-EXEC-0.1 — End-to-End Preparation Runtime
 
-Status: Local runtime PASS / production live egress pending.
+Status: Preparation runtime PASS / production live revalidation and submit adapter pending.
 
 ## Scope
 
@@ -35,8 +35,8 @@ Run: `SRE2E-20260822-1105`
 
 ## Live gate
 
-Current tracked Rituals SmartRecruiters requisition `744000112936917` remains a valid To Apply route, but Chromium in the current host is blocked before employer DOM render with `ERR_BLOCKED_BY_ADMINISTRATOR`. No live fill, upload, form inference or submit is allowed without a trusted current form fingerprint.
+Historical testing of tracked Rituals SmartRecruiters requisition `744000112936917` observed `ERR_BLOCKED_BY_ADMINISTRATOR` before employer DOM render. That result is retained as target/run evidence, not as a system-wide egress assumption. The production adapter must re-inspect the current target from the approved live runtime and obtain a trusted current form fingerprint before any fill, upload or submit.
 
 ## Production runtime requirement
 
-The next live gate requires an outbound-enabled Linux runtime able to run Docker/Chromium and persist encrypted browser/session state. Secrets, cookies and credentials must never be written to Sheets or source control.
+The next live gate is a current SmartRecruiters re-inspection from the approved browser runtime, followed by an adapter-scoped safe-fill/upload validation and reviewed final-submit canary. Any required session material must remain encrypted and outside Sheets/source control.

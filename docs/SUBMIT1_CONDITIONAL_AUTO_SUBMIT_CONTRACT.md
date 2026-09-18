@@ -44,3 +44,23 @@ Validation key:
 `submitval:<execution_id>:<form_fingerprint>:<policy_version>`
 
 Exact retry is a no-op / duplicate-suppressed. Immutable-key collision with changed payload fails closed.
+
+
+## Multi-ATS launch application
+
+As of the 2026-09-18 production-scope revision, SUBMIT-1 is the common submit policy for all first-launch adapters:
+
+- LinkedIn Easy Apply;
+- SmartRecruiters;
+- Workday;
+- Greenhouse;
+- Lever;
+- ADP Workforce Now.
+
+External LinkedIn Apply links are first resolved to the underlying ATS and then governed by that ATS adapter.
+
+SUBMIT-1 eligibility is necessary but not sufficient for a live click. Each adapter family must separately prove an exact live submit control, current surface fingerprint, required-field completeness, document state, challenge-free runtime state and confirmation strategy. Authority is therefore **adapter-scoped**, not granted globally because another ATS has passed a canary.
+
+The existing rollout principle remains staged: one reviewed live canary before unattended production use, followed by the currently approved limited daily rollout until a later explicit expansion. A newly implemented adapter starts at its own canary boundary even when other adapters are already live.
+
+Required/ambiguous questions that cannot be resolved from verified facts or approved policy route to `human_review`; they are never answered merely to preserve automation rate.
