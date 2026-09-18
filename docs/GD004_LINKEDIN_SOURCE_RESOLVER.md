@@ -44,3 +44,17 @@ Use `.github/workflows/gd004-linkedin-source-resolution.yml` with:
 - approval phrase `APPROVE-TEST-LINKEDIN-SOURCE-RESOLUTION`.
 
 If the result is `external_apply_resolved`, the next step is to classify the external host/ATS and run the appropriate read-only inspector. No source-resolution result authorizes safe-fill or submit by itself.
+
+
+## Production-scope revision — 2026-09-18
+
+The first production launch now includes a **separate LinkedIn Easy Apply adapter** in addition to this external-source resolver.
+
+This document continues to define the current resolver's authority: it remains read-only and does not itself gain Easy Apply click/write/submit operations. The new production architecture treats LinkedIn as two distinct paths:
+
+1. **External Apply:** this resolver discovers the external target, the ATS classifier identifies SmartRecruiters / Workday / Greenhouse / Lever / ADP / other, and the corresponding ATS adapter owns execution.
+2. **Easy Apply:** a dedicated session-aware adapter owns modal inspection, verified field writes, approved document attachment, policy-backed screening answers and conditional submit.
+
+The Easy Apply adapter must stop at login, MFA, CAPTCHA/security verification, account-recovery or unknown required-question boundaries. No resolver result and no existing LinkedIn session alone authorizes final submit.
+
+Launch acceptance and phased implementation are defined in `PRODUCTION_MULTI_ATS_LAUNCH_PLAN.md`.
