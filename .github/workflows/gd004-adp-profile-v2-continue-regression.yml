@@ -44,6 +44,8 @@ jobs:
           )
           found = [token for token in forbidden if token in text]
           assert not found, found
+          assert 'preference_surface_before_click=preference_surface_descriptor(page)' in text
+          assert 'pre_navigation=pre' in text
           workflow = Path('.github/workflows/gd004-adp-profile-v2-continue-canary.yml').read_text(encoding='utf-8')
           assert "EJS_FILE_UPLOAD: 'false'" in workflow
           assert "EJS_FINAL_SUBMIT: 'false'" in workflow
