@@ -2,6 +2,12 @@
 
 Canonical source repository for the Europe Job Scan autonomous application system.
 
+## Production target
+
+The first production launch target is a **daily multi-ATS autonomous application runtime**, not a single-ATS MVP. Priority launch coverage is LinkedIn (external routing + Easy Apply where safely automatable), SmartRecruiters, Workday, Greenhouse, Lever and ADP Workforce Now. Unsupported/ambiguous/challenged applications fail closed into `human_review`; CAPTCHA/MFA bypass and invented candidate facts remain forbidden.
+
+Canonical launch plan: [`docs/PRODUCTION_MULTI_ATS_LAUNCH_PLAN.md`](docs/PRODUCTION_MULTI_ATS_LAUNCH_PLAN.md).
+
 ## Source ownership
 
 - **Code:** this private GitHub repository (`main` after an approved PR is merged).
@@ -51,4 +57,4 @@ TEST deployment must retain the GD-002 boundaries: request-based runtime, min in
 - No CAPTCHA/MFA bypass.
 - No invented work-right, sponsorship, salary, legal, experience or demographic facts.
 - A submit click alone can never mark an application Applied.
-- Production submit behavior is governed by the separately approved SUBMIT-1 runtime gates and is not enabled by this migration.
+- Production submit behavior is governed by SUBMIT-1 and remains adapter-gated: each priority ATS must earn its own reviewed live submit canary before unattended production submit is enabled for that adapter.
