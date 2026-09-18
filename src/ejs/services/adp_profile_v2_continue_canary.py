@@ -58,7 +58,7 @@ from ejs.services.adp_safe_fill_canary import (
 )
 from ejs.services.browser_worker import BrowserRuntimeConfig
 
-CANARY_VERSION = "adp-profile-v2-continue-canary-v1"
+CANARY_VERSION = "adp-profile-v2-continue-canary-v2"
 
 
 @dataclass(frozen=True)
@@ -326,11 +326,28 @@ def run_adp_profile_v2_continue_canary(
 
             try:
                 preferences = _unique_actionable_button(page, PREFERENCES_LABEL)
+            except PermissionError as exc:
+                return _result(
+                    base,
+                    counters,
+                    "blocked",
+                    str(exc),
+                    pre_navigation=pre,
+                    preference_surface_before_click=preference_surface_descriptor(page),
+                )
+            try:
                 counters["preference_navigation_click_attempts"] = 1
                 preferences.click(timeout=request.timeout_ms)
                 counters["preference_navigation_click_successes"] = 1
             except Exception as exc:
-                return _result(base, counters, "blocked", f"ADP_PROFILE_V2_COOKIE_PREFS_CLICK_FAILED:{type(exc).__name__}")
+                return _result(
+                    base,
+                    counters,
+                    "blocked",
+                    f"ADP_PROFILE_V2_COOKIE_PREFS_CLICK_FAILED:{type(exc).__name__}",
+                    pre_navigation=pre,
+                    preference_surface_before_click=preference_surface_descriptor(page),
+                )
             page.wait_for_timeout(500)
 
             pref = preference_surface_descriptor(page)
