@@ -53,7 +53,7 @@ from ejs.services.adp_safe_fill_canary import (
 )
 from ejs.services.browser_worker import BrowserRuntimeConfig
 
-CANARY_VERSION = "adp-continue-diagnostic-canary-v1"
+CANARY_VERSION = "adp-continue-diagnostic-canary-v2"
 EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 PHONE_RE = re.compile(r"(?<!\w)\+?\d[\d\s().-]{7,}\d(?!\w)")
 
@@ -226,6 +226,43 @@ def _active_element_evidence(page) -> dict:
         return {}
 
 
+VERIFICATION_CODE_CONTROL_ID = "oneTimePassWord"
+VERIFICATION_CODE_LABEL = "Enter the Verification Code"
+VERIFY_BUTTON_LABEL = "verify"
+
+
+def _verification_code_surface(visible_controls: list[dict], button_surface: dict, alerts: list[dict]) -> dict:
+    control = next(
+        (
+            item for item in visible_controls
+            if str(item.get("id", "")) == VERIFICATION_CODE_CONTROL_ID
+            and str(item.get("label", "")) == VERIFICATION_CODE_LABEL
+            and item.get("required") is True
+            and item.get("disabled") is not True
+        ),
+        None,
+    )
+    verify_buttons = [
+        item for item in (button_surface.get("visible_buttons", []) or [])
+        if str(item.get("label", "")).strip().casefold() == VERIFY_BUTTON_LABEL
+    ]
+    sent_notice = any(
+        "verification code sent to your email address" in str(item.get("text", "")).casefold()
+        for item in alerts
+    )
+    observed = control is not None and len(verify_buttons) == 1 and sent_notice
+    return {
+        "observed": observed,
+        "channel": "email" if observed else "",
+        "control_id": VERIFICATION_CODE_CONTROL_ID if control is not None else "",
+        "control_required": bool(control is not None),
+        "verify_button_present": len(verify_buttons) == 1,
+        "verify_button_enabled": bool(verify_buttons and verify_buttons[0].get("enabled") is True),
+        "sent_notice_observed": sent_notice,
+        "raw_code_exposed": False,
+    }
+
+
 def post_continue_diagnostics(page, profile: dict[str, str], snapshot: dict, expected_fill_fp: str) -> dict:
     alerts = _visible_text_evidence(
         page,
@@ -239,9 +276,13 @@ def post_continue_diagnostics(page, profile: dict[str, str], snapshot: dict, exp
     )
     invalid_controls = _invalid_control_evidence(page, profile)
     visible_controls = visible_application_controls(snapshot.get("form", {}))
+    button_surface = action_surface_descriptor(page)
+    verification = _verification_code_surface(visible_controls, button_surface, alerts)
     observed_fill_fp = safe_fill_surface_fingerprint(snapshot)
     same_identity_surface = observed_fill_fp == expected_fill_fp
-    if alerts or invalid_controls or error_text:
+    if verification["observed"]:
+        diagnosis = "verification_code_surface_observed"
+    elif alerts or invalid_controls or error_text:
         diagnosis = "validation_or_error_surface_observed"
     elif same_identity_surface:
         diagnosis = "no_stage_transition_identity_surface_persisted"
@@ -264,7 +305,8 @@ def post_continue_diagnostics(page, profile: dict[str, str], snapshot: dict, exp
             }
             for c in visible_controls
         ],
-        "visible_button_surface": action_surface_descriptor(page),
+        "visible_button_surface": button_surface,
+        "verification_boundary": verification,
         "alerts": alerts,
         "error_text": error_text,
         "invalid_controls": invalid_controls,
