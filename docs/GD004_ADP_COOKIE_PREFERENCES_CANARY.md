@@ -41,3 +41,15 @@ Workflow: `GD-004 ADP Cookie Preferences Inspector`
 Approval phrase: `APPROVE-TEST-ADP-OPEN-COOKIE-PREFERENCES`
 
 The workflow uses the existing `gd004-safe-fill-upload-canary` environment so the R2 deployment reviewer remains required.
+
+
+## Opener contract revision — 2026-09-22
+
+Live run `35716218979` showed that OneTrust can render two preference-related controls at the same time:
+
+- legacy `#ot-sdk-btn`, retaining the older “To manage your preferences…” label;
+- banner CTA `#onetrust-pc-btn-handler`, currently exposed as “Set your preferences…” and previously observed with the older label variant.
+
+The legacy text-based locator could report visible/enabled and still time out during the normal Playwright click. The reviewed opener is therefore now bound to the exact stable banner CTA ID `#onetrust-pc-btn-handler`.
+
+The contract accepts only the two live-observed accessible-label prefixes for that exact ID. It does not use a generic text match, force-click, DOM-dispatch click, retry loop, optional-cookie acceptance, or broader cookie authority.
