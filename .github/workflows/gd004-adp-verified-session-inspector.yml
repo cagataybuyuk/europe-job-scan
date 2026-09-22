@@ -1,0 +1,151 @@
+name: GD-004 ADP Verified Session Inspector
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed main SHA
+        required: true
+        type: string
+      target_url:
+        description: Exact reviewed ADP application URL
+        required: true
+        type: string
+      expected_navigation_surface_fingerprint:
+        description: Reviewed ADP navigation surface fingerprint
+        required: true
+        type: string
+      entry_ordinal:
+        description: Reviewed Apply entry ordinal
+        required: true
+        default: "0"
+        type: string
+      approval_phrase:
+        description: Exact reviewed approval phrase
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gd004-adp-verified-session-inspector
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    environment: gd004-safe-fill-upload-canary
+    env:
+      EJS_FILE_UPLOAD: "false"
+      EJS_FINAL_SUBMIT: "false"
+      EJS_KILL_SWITCH: "true"
+      EJS_OPTIONAL_COOKIE_ACCEPT: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert immutable reviewed verified-session boundary
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          APPROVAL_PHRASE: ${{ inputs.approval_phrase }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "$EXPECTED_SHA"
+          test "$APPROVAL_PHRASE" = "APPROVE-TEST-ADP-VERIFIED-SESSION-INSPECT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Materialize protected verified session without logging values
+        shell: bash
+        env:
+          SESSION_JSON: ${{ secrets.EJS_ADP_VERIFIED_STORAGE_STATE_JSON }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          raw = os.environ.get("SESSION_JSON", "")
+          if not raw:
+              raise SystemExit("EJS_ADP_VERIFIED_STORAGE_STATE_JSON is not configured")
+          state = json.loads(raw)
+          if not isinstance(state, dict) or not isinstance(state.get("cookies"), list) or not isinstance(state.get("origins"), list):
+              raise SystemExit("ADP verified session state has invalid Playwright shape")
+          out = Path(os.environ["RUNNER_TEMP"]) / "adp-verified-storage-state.json"
+          out.write_text(raw, encoding="utf-8")
+          print(json.dumps({
+              "session_state_configured": True,
+              "cookie_count": len(state["cookies"]),
+              "origin_count": len(state["origins"]),
+              "raw_values_exposed": False,
+          }, sort_keys=True))
+          PY
+
+      - name: Inspect ADP with verified session
+        id: inspect
+        continue-on-error: true
+        shell: bash
+        run: |
+          python -m ejs.services.adp_verified_session_inspector             --url "${{ inputs.target_url }}"             --expected-navigation-surface-fingerprint "${{ inputs.expected_navigation_surface_fingerprint }}"             --entry-ordinal "${{ inputs.entry_ordinal }}"             --storage-state-json "$RUNNER_TEMP/adp-verified-storage-state.json"             --output adp-verified-session-inspector.json
+
+      - name: Reassert read-only verified-session authority
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f adp-verified-session-inspector.json
+          python - <<'PY'
+          import json
+          r = json.load(open("adp-verified-session-inspector.json", encoding="utf-8"))
+          assert r.get("navigation_click_attempts", 0) <= 1
+          assert r.get("navigation_click_successes", 0) <= 1
+          assert r.get("form_value_write_attempts", 0) == 0
+          assert r.get("credential_entry_attempts", 0) == 0
+          assert r.get("file_upload_attempts", 0) == 0
+          assert r.get("submit_attempts", 0) == 0
+          assert r.get("file_upload_allowed") is False
+          assert r.get("final_submit_allowed") is False
+          assert (r.get("storage_evidence") or {}).get("raw_storage_state_exposed") is False
+          PY
+
+      - name: Remove private session material
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          STATE="$RUNNER_TEMP/adp-verified-storage-state.json"
+          if [ -f "$STATE" ]; then
+            SIZE="$(wc -c < "$STATE" | tr -d ' ')"
+            if [ "$SIZE" -gt 0 ]; then
+              dd if=/dev/zero of="$STATE" bs=1 count="$SIZE" conv=notrunc status=none || true
+            fi
+            rm -f "$STATE"
+          fi
+
+      - name: Upload non-secret verified-session diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gd004-adp-verified-session-${{ github.run_id }}
+          path: adp-verified-session-inspector.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Fail closed when verified session is not reusable
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          r = json.load(open("adp-verified-session-inspector.json", encoding="utf-8"))
+          assert r.get("inspector_status") == "inspected", r.get("error_code")
+          assert r.get("session_reused") is True
+          PY
