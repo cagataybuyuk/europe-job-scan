@@ -28,6 +28,24 @@ foreach ($RelativePath in $AdpHelperRelativePaths) {
 }
 Write-Host 'PASS: ADP user-facing helpers parse on Windows PowerShell 5.1'
 
+$VerifiedSessionHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/bootstrap_adp_verified_session.ps1')
+foreach ($RequiredSnippet in @(
+  'function Resolve-EjsPython3',
+  "@{ Name = 'py'; PrefixArgs = @('-3') }",
+  "@{ Name = 'python3'; PrefixArgs = @() }",
+  "@{ Name = 'python'; PrefixArgs = @() }",
+  'winget install -e --id Python.Python.3.12',
+  '& $python.Source @pythonPrefixArgs -m ejs.services.adp_verified_session_bootstrap'
+)) {
+  if ($VerifiedSessionHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Verified-session helper is missing launcher contract: $RequiredSnippet"
+  }
+}
+if ($VerifiedSessionHelperText -match 'Get-Command python -CommandType Application -ErrorAction Stop') {
+  throw 'Verified-session helper must not hard-bind to the Windows Store python alias'
+}
+Write-Host 'PASS: ADP verified-session helper resolves a real Python 3 launcher fail-closed'
+
 foreach ($RelativePath in @(
   '../../scripts/set_adp_base_profile.ps1',
   '../../scripts/set_adp_profile_v2_extension.ps1',
