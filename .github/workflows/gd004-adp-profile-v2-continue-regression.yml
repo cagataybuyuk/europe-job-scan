@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'src/ejs/services/adp_profile_v2_continue_canary.py'
+      - 'src/ejs/services/adp_cookie_preferences_canary.py'
       - 'src/ejs/services/adp_profile_policy.py'
       - 'src/ejs/services/adp_phone_contract_canary.py'
       - 'tests/unit/test_adp_profile_v2_continue_canary.py'
@@ -35,7 +36,12 @@ jobs:
           from pathlib import Path
           p = Path('src/ejs/services/adp_profile_v2_continue_canary.py')
           text = p.read_text(encoding='utf-8')
-          assert text.count('.click(') == 5, text.count('.click(')
+          cookie = Path('src/ejs/services/adp_cookie_preferences_canary.py').read_text(encoding='utf-8')
+          assert text.count('.click(') == 4, text.count('.click(')
+          assert 'reviewed_preferences_button(page)' in text
+          assert cookie.count('.click(') == 1, cookie.count('.click(')
+          assert 'PREFERENCES_BUTTON_ID = "onetrust-pc-btn-handler"' in cookie
+          assert 'force=True' not in cookie
           assert text.count('.select_option(') == 1, text.count('.select_option(')
           assert text.count('.fill(') == 2, text.count('.fill(')
           forbidden = (
