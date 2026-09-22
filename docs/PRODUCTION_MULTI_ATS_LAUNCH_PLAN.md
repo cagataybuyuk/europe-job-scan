@@ -41,7 +41,7 @@ As of 2026-09-18:
 
 | Surface | Current state | Launch work remaining |
 | --- | --- | --- |
-| ADP Workforce Now | Live inspection/navigation/profile-v2 canary path exists; current work is at the OneTrust preference boundary before Apply | Finish stable cookie path, full application manifest, CV upload, submit canary, confirmation reconciliation |
+| ADP Workforce Now | Identity/phone + Continue path is live-proven; Continue reaches a required email verification-code boundary | Bootstrap/reuse a verified session, inspect the post-verification application manifest, then complete CV upload, submit canary and confirmation reconciliation |
 | SmartRecruiters | E2E preparation runtime exists through inspection, safe-fill, approved document upload and pre-submit validation; historical live-host restrictions are no longer treated as a universal runtime assumption | Revalidate live surface, add reviewed final-submit path, confirmation reconciliation, production adapter |
 | LinkedIn external apply | Read-only resolver exists and can route external ATS targets | Promote resolver into daily routing/orchestration path |
 | LinkedIn Easy Apply | Currently classified as a human-action boundary | Build dedicated session-aware Easy Apply adapter and canary; never bypass login/MFA/challenges |
@@ -133,7 +133,7 @@ No external browser authority change is introduced by L0.
 
 Complete the current ADP path end to end:
 
-`entry -> cookie policy -> Apply -> identity/phone -> application manifest -> safe answers -> CV -> pre-submit -> Submit canary -> confirmation`
+`entry -> cookie policy -> Apply -> identity/phone -> email verification boundary -> verified session -> application manifest -> safe answers -> CV -> pre-submit -> Submit canary -> confirmation`
 
 ADP becomes the reference implementation for adapter evidence and fail-closed behavior.
 
