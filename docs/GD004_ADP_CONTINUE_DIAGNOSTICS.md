@@ -90,3 +90,25 @@ The next development step is a **reviewed ADP validation-contract investigation*
 The application must not proceed to CV upload or later form stages until this identity/phone validation gate passes.
 
 Final Submit remains disabled throughout.
+
+
+## Live profile-v2 result — 2026-09-22
+
+Run: `35712126399`
+
+The previously observed OneTrust timeout did not recur. The bounded sequence reached and completed:
+
+- preference-center navigation: `1/1`;
+- `Unselect All`: `1/1`;
+- `Save Changes`: `1/1`;
+- reviewed `Apply`: `1/1`;
+- profile writes: `5/5` attempted/succeeded at the Playwright operation level;
+- credentials: `0`;
+- upload: `0`;
+- submit: `0`.
+
+Profile materialization also passed: the reviewed Turkish-to-ASCII policy produced ADP-compatible name evidence, email validation passed, and the observed phone structural fingerprint exactly matched the reviewed contract.
+
+The run stopped **before Continue** with `ADP_PROFILE_V2_WRITE_FAILED:PermissionError`. Given the counters and code ordering, all three identity fields and the country select had already passed their exact readback checks and the phone fill operation had completed. The remaining PermissionError branch is the phone readback mismatch invariant. Therefore the current blocker has narrowed to **ADP phone-value normalization/readback**, not cookie navigation, Apply navigation, identity transliteration, phone control discovery, upload or submit.
+
+The v3 diagnostic patch records only sanitized phone readback shape on mismatch (digit counts, suffix-equivalence, TR calling-code prefix, trunk-zero prefix and formatting presence). It never persists the raw phone value. Continue remains blocked until this normalization behavior is evidenced and reviewed.
