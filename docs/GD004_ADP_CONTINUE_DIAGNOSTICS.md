@@ -147,3 +147,29 @@ The profile-v2 readback contract is revised narrowly for this evidenced behavior
 - do not expose the raw phone value.
 
 This changes validation semantics only. It does not add writes, clicks, upload authority or Submit authority.
+
+
+## Live verification boundary — run 35720538458
+
+Run `35720538458` completed successfully through the reviewed profile-v2 Continue canary. The final fail-closed gate passed, proving that the bounded authority remained intact while the flow reached the next stage.
+
+Observed sequence:
+
+- reviewed OneTrust opener: success;
+- Unselect All: success;
+- Save Changes: success;
+- Apply: success;
+- profile writes: 5/5 successful;
+- phone readback: semantic TR normalization accepted as `tr_calling_code_prefixed`;
+- Continue: 1/1 successful;
+- upload: 0;
+- submit: 0.
+
+Post-Continue evidence no longer matched the identity surface. The page exposed a required control with id `oneTimePassWord` and label `Enter the Verification Code`, plus a visible `Verify` action. The page also reported that a verification code had been sent to the candidate email address. No application-form mutation, document upload or submit occurred after Continue.
+
+This is now modeled as an **email verification boundary**, not a generic validation error. Production behavior is fail-closed:
+
+- never guess, scrape, brute-force or bypass the verification code;
+- route an expired/missing verified session to `human_review:verification_required`;
+- permit application continuation only after a user-authorized verification bootstrap has produced a reusable verified session;
+- keep final Submit disabled until the post-verification application manifest and submit path have separately passed review.
