@@ -37,9 +37,9 @@ class AdpVerifiedSessionInspectorRequest:
     expected_navigation_surface_fingerprint: str
     entry_ordinal: int
     storage_state_json_path: str
-    session_storage_json_path: str = ""
     timeout_ms: int = 20_000
     render_wait_ms: int = 10_000
+    session_storage_json_path: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionInspectorRequest) -> None:
