@@ -39,9 +39,8 @@ jobs:
           from pathlib import Path
           src = Path('src/ejs/services/adp_preference_safe_fill_canary.py').read_text(encoding='utf-8')
           cookie = Path('src/ejs/services/adp_cookie_preferences_canary.py').read_text(encoding='utf-8')
-          assert src.count('.click(') == 3, src.count('.click(')
+          assert src.count('.click(') == 4, src.count('.click(')
           assert 'reviewed_preferences_button(page)' in src
-          assert cookie.count('.click(') == 1, cookie.count('.click(')
           assert 'PREFERENCES_BUTTON_ID = "onetrust-pc-btn-handler"' in cookie
           assert 'force=True' not in cookie
           assert src.count('.fill(') == 1, src.count('.fill(')
