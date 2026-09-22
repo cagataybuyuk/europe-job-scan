@@ -62,6 +62,7 @@ class HumanReviewReason(str, Enum):
     AUTH_REQUIRED = "auth_required"
     SESSION_REQUIRED = "session_required"
     MFA_REQUIRED = "mfa_required"
+    VERIFICATION_REQUIRED = "verification_required"
     CAPTCHA_OR_CHALLENGE = "captcha_or_challenge"
     ATS_DRIFT = "ats_drift"
     UNKNOWN_REQUIRED_CONTROL = "unknown_required_control"
