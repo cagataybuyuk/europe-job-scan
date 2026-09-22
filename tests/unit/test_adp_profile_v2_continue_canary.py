@@ -6,6 +6,7 @@ from ejs.services.adp_profile_v2_continue_canary import (
     AdpProfileV2ContinueCanaryRequest,
     phone_contract_surface_descriptor,
     phone_contract_surface_fingerprint,
+    phone_readback_shape,
     validate_request,
 )
 
@@ -83,6 +84,33 @@ class AdpProfileV2ContinueCanaryTests(unittest.TestCase):
             phone_contract_surface_fingerprint(base),
             phone_contract_surface_fingerprint(changed),
         )
+
+
+    def test_phone_readback_shape_detects_country_code_prefix_without_exposing_value(self):
+        shape = phone_readback_shape("+90 5XX XXX XX XX".replace("X", "4"), "5444444444", "TR")
+        self.assertEqual(shape["digit_count"], 12)
+        self.assertEqual(shape["expected_digit_count"], 10)
+        self.assertTrue(shape["suffix_matches_expected"])
+        self.assertTrue(shape["country_calling_code_prefixed"])
+        self.assertFalse(shape["trunk_zero_prefixed"])
+        self.assertTrue(shape["non_digit_formatting_present"])
+        self.assertFalse(shape["raw_value_exposed"])
+        self.assertNotIn("+90", repr(shape))
+
+    def test_phone_readback_shape_detects_formatting_only(self):
+        shape = phone_readback_shape("544 444 44 44", "5444444444", "TR")
+        self.assertTrue(shape["exact_digit_match"])
+        self.assertTrue(shape["suffix_matches_expected"])
+        self.assertFalse(shape["country_calling_code_prefixed"])
+        self.assertTrue(shape["non_digit_formatting_present"])
+        self.assertFalse(shape["raw_value_exposed"])
+
+    def test_phone_readback_shape_detects_trunk_zero_prefix(self):
+        shape = phone_readback_shape("05444444444", "5444444444", "TR")
+        self.assertFalse(shape["exact_digit_match"])
+        self.assertTrue(shape["suffix_matches_expected"])
+        self.assertTrue(shape["trunk_zero_prefixed"])
+        self.assertFalse(shape["country_calling_code_prefixed"])
 
     def test_phone_contract_descriptor_sorts_options_and_preserves_structure(self):
         contract = {
