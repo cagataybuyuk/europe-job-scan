@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'src/ejs/services/adp_preference_safe_fill_canary.py'
+      - 'src/ejs/services/adp_cookie_preferences_canary.py'
       - 'tests/unit/test_adp_preference_safe_fill_canary.py'
       - '.github/workflows/gd004-adp-preference-safe-fill-canary.yml'
       - '.github/workflows/gd004-adp-preference-safe-fill-regression.yml'
@@ -36,7 +37,12 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           src = Path('src/ejs/services/adp_preference_safe_fill_canary.py').read_text(encoding='utf-8')
-          assert src.count('.click(') == 4, src.count('.click(')
+          cookie = Path('src/ejs/services/adp_cookie_preferences_canary.py').read_text(encoding='utf-8')
+          assert src.count('.click(') == 3, src.count('.click(')
+          assert 'reviewed_preferences_button(page)' in src
+          assert cookie.count('.click(') == 1, cookie.count('.click(')
+          assert 'PREFERENCES_BUTTON_ID = "onetrust-pc-btn-handler"' in cookie
+          assert 'force=True' not in cookie
           assert src.count('.fill(') == 1, src.count('.fill(')
           assert 'set_input_files(' not in src
           assert 'select_option(' not in src
