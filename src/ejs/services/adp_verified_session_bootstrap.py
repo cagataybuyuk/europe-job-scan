@@ -44,6 +44,44 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
         raise ValueError("INVALID_ADP_SESSION_BOOTSTRAP_TIMEOUT")
 
 
+def _open_reviewed_adp_target(page, application_url: str) -> dict:
+    """Open the reviewed target without requiring ADP's full DOMContentLoaded event."""
+    last_error = None
+    for attempt in range(1, 3):
+        try:
+            page.goto(application_url, wait_until="commit", timeout=45_000)
+            validate_adp_live_url(str(page.url))
+            page.wait_for_timeout(1_000)
+            return {
+                "navigation_attempts": attempt,
+                "navigation_commit_observed": True,
+                "navigation_timeout_tolerated": False,
+            }
+        except Exception as exc:
+            last_error = exc
+            # ADP can keep loading long after the reviewed document has already
+            # committed. Only tolerate a timeout when the current page is still
+            # on the reviewed ADP origin; never tolerate another origin.
+            if type(exc).__name__ == "TimeoutError":
+                try:
+                    validate_adp_live_url(str(page.url))
+                except ValueError:
+                    pass
+                else:
+                    if str(page.url) not in {"", "about:blank"}:
+                        page.wait_for_timeout(1_000)
+                        return {
+                            "navigation_attempts": attempt,
+                            "navigation_commit_observed": False,
+                            "navigation_timeout_tolerated": True,
+                        }
+            if attempt < 2:
+                page.wait_for_timeout(2_000)
+                continue
+            break
+    raise RuntimeError("ADP_SESSION_BOOTSTRAP_INITIAL_NAVIGATION_FAILED") from last_error
+
+
 def _visible(page, selector: str) -> bool:
     # Detached/loading DOM errors must reset readiness, never mean "absent".
     locator = page.locator(selector)
@@ -180,7 +218,13 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         context = browser.new_context(accept_downloads=False)
         try:
             page = context.new_page()
-            page.goto(request.application_url, wait_until="domcontentloaded", timeout=60_000)
+            navigation = _open_reviewed_adp_target(page, request.application_url)
+            if navigation["navigation_attempts"] > 1 or navigation["navigation_timeout_tolerated"]:
+                print(json.dumps({
+                    "initial_navigation_attempts": navigation["navigation_attempts"],
+                    "initial_navigation_timeout_tolerated": navigation["navigation_timeout_tolerated"],
+                    "raw_values_exposed": False,
+                }, sort_keys=True))
             print(
                 "ADP browser opened. Complete the application-entry steps manually. "
                 "When the email verification code appears, enter it directly in the browser "
