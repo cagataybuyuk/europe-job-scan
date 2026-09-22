@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ejs.services.adp_verified_session_bootstrap import (
     AdpVerifiedSessionBootstrapRequest,
+    _capture_session_storage,
     _form_surface_signature,
     _visible,
     run_bootstrap,
@@ -18,6 +19,8 @@ from ejs.services import adp_verified_session_inspector as inspector
 from ejs.services.browser_worker import BrowserRuntimeConfig
 from ejs.services.adp_verified_session_inspector import (
     AdpVerifiedSessionInspectorRequest,
+    _load_session_storage,
+    _session_storage_init_script,
     validate_request as validate_inspector_request,
     validate_storage_state,
 )
@@ -44,6 +47,27 @@ def surface(*controls):
 
 
 class AdpVerifiedSessionTests(unittest.TestCase):
+    def test_session_storage_capture_and_load_keep_diagnostics_value_free(self):
+        page = MagicMock()
+        page.evaluate.return_value = {"adp-session": "opaque-value"}
+        captured, capture_evidence = _capture_session_storage(page)
+        self.assertEqual(captured, {"adp-session": "opaque-value"})
+        self.assertEqual(capture_evidence["session_storage_entry_count"], 1)
+        self.assertFalse(capture_evidence["session_storage_values_exposed"])
+        self.assertNotIn("opaque-value", repr(capture_evidence))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.json"
+            path.write_text(json.dumps(captured), encoding="utf-8")
+            loaded, load_evidence = _load_session_storage(str(path))
+        self.assertEqual(loaded, captured)
+        self.assertEqual(load_evidence["session_storage_entry_count"], 1)
+        self.assertFalse(load_evidence["raw_session_storage_exposed"])
+        self.assertNotIn("opaque-value", repr(load_evidence))
+        script = _session_storage_init_script(URL, loaded)
+        self.assertIn("workforcenow.adp.com", script)
+        self.assertIn("sessionStorage.setItem", script)
+
     def test_windows_cli_passes_playwright_managed_configuration(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(inspector, "run_inspector") as run, patch("builtins.print"):
             run.return_value = {"inspector_status": "blocked"}
