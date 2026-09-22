@@ -76,6 +76,30 @@ Preferences -> Unselect All -> Save Changes path before Apply. Merely closing a
 banner is not evidence that the consent choice was persisted. Enter OTP only in
 the ADP browser and do not upload or submit anything.
 
+### Follow-up: identity returns after cookie gate clears
+
+The next corrected local run observed a stable post-verification form with 21 visible
+controls and exported 11 cookies plus one origin. Fresh local replay then completed
+the passive OneTrust gate, clicked the single reviewed Apply entry, and returned to
+the guest identity surface with
+`ADP_VERIFIED_SESSION_NOT_RECOGNIZED_IDENTITY_SURFACE`. This is stronger evidence
+than the earlier cookie-gate failure: ordinary Playwright storage state alone did
+not preserve the verified guest identity in a fresh browser context for this run.
+
+Playwright documents that normal storage-state reuse does not persist
+`sessionStorage`. Before changing the protected secret format or GitHub workflow,
+bootstrap v3 captures the current origin's sessionStorage only to a sensitive
+temporary local file, reports counts/byte size only, and deletes the file after the
+run. Inspector v3 can restore that state into a fresh local context. The PowerShell
+helper first tests ordinary storage-state reuse; only on the exact guest-identity
+failure does it perform a second read-only replay with sessionStorage restored.
+
+A successful second replay is diagnostic only: it deliberately leaves the existing
+GitHub secret unchanged and stops with a message that protected sessionStorage
+transport must be implemented next. A failed second replay means another
+browser-/server-scoped state mechanism must be investigated. Neither path adds
+field writes, credential automation, upload or Submit authority.
+
 ## Live evidence
 
 Run `35720538458` completed the reviewed profile-v2 flow successfully through:
