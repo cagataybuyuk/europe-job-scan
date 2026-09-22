@@ -112,3 +112,12 @@ Profile materialization also passed: the reviewed Turkish-to-ASCII policy produc
 The run stopped **before Continue** with `ADP_PROFILE_V2_WRITE_FAILED:PermissionError`. Given the counters and code ordering, all three identity fields and the country select had already passed their exact readback checks and the phone fill operation had completed. The remaining PermissionError branch is the phone readback mismatch invariant. Therefore the current blocker has narrowed to **ADP phone-value normalization/readback**, not cookie navigation, Apply navigation, identity transliteration, phone control discovery, upload or submit.
 
 The v3 diagnostic patch records only sanitized phone readback shape on mismatch (digit counts, suffix-equivalence, TR calling-code prefix, trunk-zero prefix and formatting presence). It never persists the raw phone value. Continue remains blocked until this normalization behavior is evidenced and reviewed.
+
+
+## Live opener recurrence — run 35716218979
+
+The v3 phone-readback diagnostic did not reach the phone stage because the legacy OneTrust opener path timed out again on its first click. The artifact proved that the application-entry fingerprint was unchanged and that `#onetrust-pc-btn-handler` was visible and enabled on the banner, while the older `#ot-sdk-btn` control also remained in the DOM.
+
+This explains why the earlier text-based opener was intermittent: it was bound to the legacy control rather than the banner CTA. The opener is now constrained to the exact reviewed ID `#onetrust-pc-btn-handler` with only the two observed accessible-label variants accepted. No force-click or retry authority was added.
+
+The phone-readback normalization question therefore remains open; the next live profile-v2 run must first prove the deterministic reviewed OneTrust opener and then, if it reaches the phone mismatch again, capture the existing sanitized phone shape evidence.
