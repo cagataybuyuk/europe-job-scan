@@ -21,7 +21,7 @@ from ejs.services.adp_navigation_canary import (
     _snapshot,
     navigation_surface_fingerprint,
 )
-from ejs.services.adp_continue_diagnostic_canary import OTP_CONTROL_ID
+from ejs.services.adp_continue_diagnostic_canary import VERIFICATION_CODE_CONTROL_ID
 from ejs.services.adp_continue_canary import action_surface_descriptor
 from ejs.services.browser_worker import BrowserRuntimeConfig
 
@@ -83,7 +83,7 @@ def _surface_descriptor(page, snapshot: dict) -> dict:
         for c in controls
     ]
     ids = {item["id"] for item in visible if item["id"]}
-    otp_present = OTP_CONTROL_ID in ids
+    otp_present = VERIFICATION_CODE_CONTROL_ID in ids
     identity_present = bool(IDENTITY_CONTROL_IDS.intersection(ids))
     file_controls = [item for item in visible if item["type"].casefold() == "file"]
     return {
