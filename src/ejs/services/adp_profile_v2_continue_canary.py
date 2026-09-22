@@ -58,7 +58,7 @@ from ejs.services.adp_safe_fill_canary import (
 )
 from ejs.services.browser_worker import BrowserRuntimeConfig
 
-CANARY_VERSION = "adp-profile-v2-continue-canary-v2"
+CANARY_VERSION = "adp-profile-v2-continue-canary-v3"
 
 
 @dataclass(frozen=True)
@@ -155,6 +155,29 @@ def phone_contract_surface_fingerprint(contract: dict) -> str:
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def phone_readback_shape(actual: str, expected_national: str, country_iso2: str) -> dict:
+    actual_digits = "".join(ch for ch in str(actual) if ch.isdigit())
+    expected_digits = "".join(ch for ch in str(expected_national) if ch.isdigit())
+    calling_code = {"TR": "90"}.get(str(country_iso2).upper(), "")
+    return {
+        "raw_length": len(str(actual)),
+        "digit_count": len(actual_digits),
+        "expected_digit_count": len(expected_digits),
+        "exact_digit_match": actual_digits == expected_digits,
+        "suffix_matches_expected": bool(expected_digits) and actual_digits.endswith(expected_digits),
+        "country_calling_code_prefixed": bool(calling_code) and actual_digits == calling_code + expected_digits,
+        "trunk_zero_prefixed": actual_digits == "0" + expected_digits,
+        "non_digit_formatting_present": any(not ch.isdigit() for ch in str(actual)),
+        "raw_value_exposed": False,
+    }
+
+
+class PhoneReadbackMismatch(PermissionError):
+    def __init__(self, shape: dict):
+        super().__init__("ADP_PROFILE_V2_PHONE_READBACK_MISMATCH")
+        self.shape = shape
 
 
 def _base_report(request: AdpProfileV2ContinueCanaryRequest, profile: ResolvedAdpProfile) -> dict:
@@ -261,7 +284,13 @@ def _write_phone_fields(page, profile: ResolvedAdpProfile, counters: dict) -> di
         counters["form_value_write_successes"] += 1
     phone_after = phone.input_value()
     if phone_after != profile.phone_national_number:
-        raise PermissionError("ADP_PROFILE_V2_PHONE_READBACK_MISMATCH")
+        raise PhoneReadbackMismatch(
+            phone_readback_shape(
+                phone_after,
+                profile.phone_national_number,
+                profile.phone_country_iso2,
+            )
+        )
 
     return {
         "country_iso2": profile.phone_country_iso2,
@@ -415,6 +444,24 @@ def run_adp_profile_v2_continue_canary(
             try:
                 field_results = _write_identity_fields(page, form, profile, counters)
                 phone_result = _write_phone_fields(page, profile, counters)
+            except PhoneReadbackMismatch as exc:
+                return _result(
+                    base,
+                    counters,
+                    "blocked",
+                    str(exc),
+                    observed_phone_contract_fingerprint=actual_phone_fp,
+                    field_results=field_results,
+                    phone_readback_shape=exc.shape,
+                )
+            except PermissionError as exc:
+                return _result(
+                    base,
+                    counters,
+                    "blocked",
+                    f"ADP_PROFILE_V2_WRITE_FAILED:{str(exc)}",
+                    observed_phone_contract_fingerprint=actual_phone_fp,
+                )
             except Exception as exc:
                 return _result(base, counters, "blocked", f"ADP_PROFILE_V2_WRITE_FAILED:{type(exc).__name__}", observed_phone_contract_fingerprint=actual_phone_fp)
 
