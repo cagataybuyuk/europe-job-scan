@@ -2,6 +2,8 @@ import unittest
 
 from ejs.services.adp_cookie_preferences_canary import (
     AdpCookiePreferencesCanaryRequest,
+    PREFERENCES_BUTTON_ID,
+    _is_reviewed_preferences_label,
     preference_surface_fingerprint,
     validate_request,
 )
@@ -26,6 +28,13 @@ class AdpCookiePreferencesCanaryTests(unittest.TestCase):
                 application_url=URL,
                 expected_navigation_surface_fingerprint="abc",
             ))
+
+    def test_reviewed_preference_opener_contract_accepts_observed_label_variants(self):
+        self.assertEqual(PREFERENCES_BUTTON_ID, "onetrust-pc-btn-handler")
+        self.assertTrue(_is_reviewed_preferences_label("Set your preferences, Opens the preference center dialog"))
+        self.assertTrue(_is_reviewed_preferences_label("To manage your preferences, click here, Opens the preference center dialog"))
+        self.assertFalse(_is_reviewed_preferences_label("Agree and proceed"))
+        self.assertFalse(_is_reviewed_preferences_label("Deny"))
 
     def test_surface_fingerprint_is_order_sensitive_only_to_descriptor_content(self):
         descriptor = {

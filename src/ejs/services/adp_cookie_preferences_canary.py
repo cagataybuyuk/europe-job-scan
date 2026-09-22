@@ -1,8 +1,9 @@
 """One-click ADP OneTrust preference-center inspection canary.
 
-Authority is limited to exactly one reviewed click on the visible OneTrust
-"To manage your preferences, click here" control. After that click the canary
-only inspects the visible preference-center control surface. It never changes a
+Authority is limited to exactly one reviewed click on the exact OneTrust
+banner preference-center opener `#onetrust-pc-btn-handler`. Two live-observed
+accessible-label variants are accepted for that same exact element. After that
+click the canary only inspects the visible preference-center control surface. It never changes a
 cookie toggle, saves/accepts/rejects preferences, clicks Apply, writes candidate
 fields, uploads a file, enters credentials, solves a challenge, or submits.
 """
@@ -25,6 +26,11 @@ from ejs.services.browser_worker import BrowserRuntimeConfig
 
 CANARY_VERSION = "adp-cookie-preferences-canary-v1"
 PREFERENCES_LABEL = "To manage your preferences, click here"
+PREFERENCES_BUTTON_ID = "onetrust-pc-btn-handler"
+PREFERENCES_REVIEWED_LABEL_PREFIXES = (
+    "Set your preferences",
+    "To manage your preferences, click here",
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,26 @@ class AdpCookiePreferencesCanaryRequest:
 
 def _normalize(value: str) -> str:
     return " ".join((value or "").split())
+
+
+def _is_reviewed_preferences_label(value: str) -> bool:
+    normalized = _normalize(value).casefold()
+    return any(
+        normalized.startswith(_normalize(prefix).casefold())
+        for prefix in PREFERENCES_REVIEWED_LABEL_PREFIXES
+    )
+
+
+def reviewed_preferences_button(page):
+    candidate = page.locator(f"#{PREFERENCES_BUTTON_ID}")
+    if candidate.count() != 1:
+        raise PermissionError("ADP_COOKIE_PREFS_REVIEWED_CONTROL_NOT_UNIQUE")
+    if not candidate.is_visible() or not candidate.is_enabled():
+        raise PermissionError("ADP_COOKIE_PREFS_REVIEWED_CONTROL_NOT_ACTIONABLE")
+    actual = candidate.get_attribute("aria-label") or candidate.inner_text() or ""
+    if not _is_reviewed_preferences_label(actual):
+        raise PermissionError("ADP_COOKIE_PREFS_REVIEWED_CONTROL_LABEL_DRIFT")
+    return candidate
 
 
 def validate_request(request: AdpCookiePreferencesCanaryRequest) -> None:
@@ -188,12 +214,10 @@ def run_adp_cookie_preferences_canary(
             if navigation_surface_fingerprint(pre) != request.expected_navigation_surface_fingerprint:
                 return {**base, "canary_status": "blocked", "error_code": "ADP_COOKIE_PREFS_NAVIGATION_SURFACE_MISMATCH", "pre_navigation": pre}
 
-            candidate = page.get_by_role("button", name=PREFERENCES_LABEL, exact=True)
-            if candidate.count() != 1 or not candidate.is_visible() or not candidate.is_enabled():
-                return {**base, "canary_status": "blocked", "error_code": "ADP_COOKIE_PREFS_CONTROL_NOT_UNIQUE_ACTIONABLE", "pre_navigation": pre}
-            actual = _normalize(candidate.get_attribute("aria-label") or candidate.inner_text() or "")
-            if actual != PREFERENCES_LABEL:
-                return {**base, "canary_status": "blocked", "error_code": "ADP_COOKIE_PREFS_CONTROL_LABEL_DRIFT", "pre_navigation": pre}
+            try:
+                candidate = reviewed_preferences_button(page)
+            except PermissionError as exc:
+                return {**base, "canary_status": "blocked", "error_code": str(exc), "pre_navigation": pre}
 
             try:
                 candidate.click(timeout=request.timeout_ms)

@@ -22,9 +22,9 @@ import sys
 
 from ejs.contracts.prefill import SAFE_VERIFIED_FIELDS, SafeFieldWriterAuthority, value_hash
 from ejs.services.adp_cookie_preferences_canary import (
-    PREFERENCES_LABEL,
     preference_surface_descriptor,
     preference_surface_fingerprint,
+    reviewed_preferences_button,
 )
 from ejs.services.adp_live_inspector import validate_adp_live_url
 from ejs.services.adp_navigation_canary import (
@@ -194,7 +194,7 @@ def run_adp_preference_safe_fill_canary(
                 return _result(base, counters, "blocked", "ADP_PREF_SAFE_FILL_NAVIGATION_SURFACE_MISMATCH", pre_navigation=pre)
 
             try:
-                preferences = _unique_actionable_button(page, PREFERENCES_LABEL)
+                preferences = reviewed_preferences_button(page)
             except PermissionError as exc:
                 return _result(base, counters, "blocked", str(exc), pre_navigation=pre)
             try:
