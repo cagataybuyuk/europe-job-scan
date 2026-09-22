@@ -113,14 +113,19 @@ After submit, the adapter performs read-only confirmation reconciliation. Only c
 
 ### L0 — Scope freeze and common contracts
 
-Deliverables:
+Status: **implementation foundation complete**; launch acceptance dashboard schema remains to be wired into L6 observability.
+
+Delivered:
 
 - this launch plan;
-- adapter capability interface;
-- common status/error taxonomy;
-- `human_review` contract;
+- adapter capability interface and registry;
+- common dispatch/status/error taxonomy;
+- structured `human_review` contract;
 - production coverage matrix;
-- launch acceptance dashboard schema.
+- fail-closed LinkedIn source-resolution boundary;
+- explicit invariant that L0 dispatch metadata cannot grant mutation or submit authority.
+
+Reference: `L0_COMMON_ATS_ADAPTER_CONTRACT.md`.
 
 No external browser authority change is introduced by L0.
 
