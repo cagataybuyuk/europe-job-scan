@@ -10,6 +10,7 @@ from ejs.services.adp_verified_session_bootstrap import (
     AdpVerifiedSessionBootstrapRequest,
     _capture_session_storage,
     _form_surface_signature,
+    _open_reviewed_adp_target,
     _visible,
     run_bootstrap,
     validate_request as validate_bootstrap_request,
@@ -47,6 +48,42 @@ def surface(*controls):
 
 
 class AdpVerifiedSessionTests(unittest.TestCase):
+    def test_initial_navigation_waits_only_for_commit(self):
+        page = MagicMock()
+        page.url = URL
+        result = _open_reviewed_adp_target(page, URL)
+        page.goto.assert_called_once_with(URL, wait_until="commit", timeout=45_000)
+        self.assertEqual(result["navigation_attempts"], 1)
+        self.assertTrue(result["navigation_commit_observed"])
+        self.assertFalse(result["navigation_timeout_tolerated"])
+
+    def test_initial_navigation_tolerates_timeout_only_on_reviewed_adp_origin(self):
+        page = MagicMock()
+        page.url = URL
+        page.goto.side_effect = TimeoutError("slow ADP load")
+        result = _open_reviewed_adp_target(page, URL)
+        self.assertEqual(result["navigation_attempts"], 1)
+        self.assertFalse(result["navigation_commit_observed"])
+        self.assertTrue(result["navigation_timeout_tolerated"])
+
+    def test_initial_navigation_retries_timeout_before_reviewed_origin(self):
+        page = MagicMock()
+        page.url = "about:blank"
+        calls = [0]
+
+        def navigate(*args, **kwargs):
+            calls[0] += 1
+            if calls[0] == 1:
+                raise TimeoutError("no commit")
+            page.url = URL
+            return None
+
+        page.goto.side_effect = navigate
+        result = _open_reviewed_adp_target(page, URL)
+        self.assertEqual(result["navigation_attempts"], 2)
+        self.assertTrue(result["navigation_commit_observed"])
+        self.assertEqual(page.goto.call_count, 2)
+
     def test_session_storage_capture_and_load_keep_diagnostics_value_free(self):
         page = MagicMock()
         page.evaluate.return_value = {"adp-session": "opaque-value"}
