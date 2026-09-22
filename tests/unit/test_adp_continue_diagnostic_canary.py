@@ -2,6 +2,7 @@ import unittest
 
 from ejs.services.adp_continue_diagnostic_canary import (
     AdpContinueDiagnosticCanaryRequest,
+    _verification_code_surface,
     post_continue_diagnostics,
     sanitize_text,
     validate_request,
@@ -76,6 +77,31 @@ class AdpContinueDiagnosticCanaryTests(unittest.TestCase):
         self.assertIn("[REDACTED_CANDIDATE_VALUE]", value)
         self.assertIn("[REDACTED_EMAIL]", value)
         self.assertIn("[REDACTED_PHONE]", value)
+
+    def test_verification_surface_requires_exact_email_otp_evidence(self):
+        visible_controls = [{
+            "id": "oneTimePassWord",
+            "label": "Enter the Verification Code",
+            "required": True,
+            "disabled": False,
+        }]
+        button_surface = {"visible_buttons": [{"label": "verify", "enabled": False}]}
+        alerts = [{"text": "Verification Code sent to your email address"}]
+        result = _verification_code_surface(visible_controls, button_surface, alerts)
+        self.assertTrue(result["observed"])
+        self.assertEqual(result["channel"], "email")
+        self.assertTrue(result["control_required"])
+        self.assertTrue(result["verify_button_present"])
+        self.assertFalse(result["verify_button_enabled"])
+        self.assertFalse(result["raw_code_exposed"])
+
+    def test_verification_surface_rejects_partial_evidence(self):
+        result = _verification_code_surface(
+            [{"id": "oneTimePassWord", "label": "Enter the Verification Code", "required": True, "disabled": False}],
+            {"visible_buttons": [{"label": "verify", "enabled": False}]},
+            [],
+        )
+        self.assertFalse(result["observed"])
 
     def test_diagnostics_classifies_persisted_identity_surface(self):
         snapshot = {
