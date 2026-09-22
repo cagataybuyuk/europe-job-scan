@@ -1,8 +1,9 @@
 """One-click ADP OneTrust preference-center inspection canary.
 
-Authority is limited to exactly one reviewed click on the visible OneTrust
-"To manage your preferences, click here" control. After that click the canary
-only inspects the visible preference-center control surface. It never changes a
+Authority is limited to exactly one reviewed click on the exact OneTrust
+banner preference-center opener `#onetrust-pc-btn-handler`. Two live-observed
+accessible-label variants are accepted for that same exact element. After that
+click the canary only inspects the visible preference-center control surface. It never changes a
 cookie toggle, saves/accepts/rejects preferences, clicks Apply, writes candidate
 fields, uploads a file, enters credentials, solves a challenge, or submits.
 """
