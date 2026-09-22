@@ -121,3 +121,29 @@ The v3 phone-readback diagnostic did not reach the phone stage because the legac
 This explains why the earlier text-based opener was intermittent: it was bound to the legacy control rather than the banner CTA. The opener is now constrained to the exact reviewed ID `#onetrust-pc-btn-handler` with only the two observed accessible-label variants accepted. No force-click or retry authority was added.
 
 The phone-readback normalization question therefore remains open; the next live profile-v2 run must first prove the deterministic reviewed OneTrust opener and then, if it reaches the phone mismatch again, capture the existing sanitized phone shape evidence.
+
+
+## Live phone normalization evidence — run 35719546694
+
+The reviewed OneTrust opener revision succeeded. The canary completed preference-center navigation, Unselect All, Save Changes, Apply and all five profile writes, then stopped before Continue on the explicit phone readback invariant.
+
+Sanitized readback evidence proved the transformation:
+
+- expected national digit count: `10`;
+- observed readback digit count: `12`;
+- expected national number is an exact suffix of the observed digits;
+- the only added prefix is Turkey's calling code `90`;
+- no trunk-zero prefix was added;
+- presentation formatting contains non-digit separators;
+- raw phone value was not persisted.
+
+Therefore ADP's live phone control semantically preserves the reviewed national number while rendering/storing it as `90 + national number` with display formatting after country `TR` is selected.
+
+The profile-v2 readback contract is revised narrowly for this evidenced behavior:
+
+- accept digit-equivalent national readback;
+- for `TR` only, also accept exact `90 + national number` digit normalization;
+- continue to reject trunk-zero insertion, another country calling code, digit drift or other transformations;
+- do not expose the raw phone value.
+
+This changes validation semantics only. It does not add writes, clicks, upload authority or Submit authority.
