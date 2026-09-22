@@ -1,6 +1,51 @@
 # GD-004 ADP Verified Session Bootstrap
 
-Status: design approved by live evidence; implementation next
+Status: bootstrap and inspector implemented; live session reuse not yet proven
+
+## 2026-09-22 early-export correction
+
+Run `35726250341` loaded 11 cookies and one origin, clicked the reviewed Apply
+entry, and stopped with `ADP_VERIFIED_SESSION_NOT_RECOGNIZED_IDENTITY_SURFACE`.
+The preceding local bootstrap reported zero visible controls. The user observed
+the window closing immediately after Verify, without seeing the application form.
+This establishes a failed reuse attempt; it does not establish whether ADP forbids
+session transfer. The old bootstrap incorrectly treated two absent-OTP polls as
+success, including blank navigation/loading screens.
+
+Bootstrap v2 requires observed OTP, absent OTP/guest identity, a minimum ten-second
+settling period after the last OTP observation, and an unchanged, non-empty form
+control structure for at least five seconds. Empty surfaces, buttons, search and
+known OneTrust controls, disabled/read-only fields and password screens cannot
+satisfy that signal. DOM observation errors reset stability. Unknown destinations
+and new windows stop the bootstrap. Unsupported frames/custom-only controls may
+time out conservatively; no selectors are invented for an unseen application form.
+
+This is a **candidate surface**, not a reviewed application manifest. It does not
+authorize application writes, upload or Submit. The helper now runs the existing
+read-only inspector in a fresh local browser before updating the protected secret.
+It uses the same reviewed URL, navigation fingerprint and Apply ordinal and makes
+at most one Apply click. A failed bootstrap or replay leaves the existing secret
+unchanged, and temporary state/reports are cleaned in either case. The inspector
+also stops at a post-Apply authentication/CAPTCHA boundary.
+
+After this PR is reviewed, test its branch locally with the existing command:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\bootstrap_adp_verified_session.ps1"
+```
+
+Enter the verification code only in the browser. Keep the window open after
+Verify; no CV upload or final Submit is required. Expected outcomes:
+
+- `FORM_NOT_READY`: no stable candidate form was observed; no secret update.
+- Local inspector blocked: candidate state did not survive a fresh local browser;
+  no secret update. Investigate state capture/ADP session semantics before retrying
+  the GitHub runner.
+- Local replay and secret update succeed: test GitHub-hosted reuse next, using the
+  exact reviewed main SHA after merge. Local success does not prove cross-runner reuse.
+
+The fingerprint default is specific to the reviewed job. A different target needs
+its own reviewed fingerprint and ordinal; do not relax the fingerprint gate.
 
 ## Live evidence
 
@@ -89,8 +134,8 @@ Requirements:
 Before using the session for any new mutation authority:
 
 1. local bootstrap succeeds with user-entered verification;
-2. a GitHub-hosted **read-only verified-session inspector** loads the protected storage state;
-3. the inspector proves whether the session survives on a fresh runner;
+2. a fresh local **read-only verified-session inspector** must pass before secret provisioning;
+3. the GitHub-hosted inspector proves whether the session also survives on a fresh runner;
 4. if valid, it captures the post-verification application control manifest;
 5. only after that manifest is reviewed do CV upload or application-answer writes receive separate canary authority.
 
@@ -102,10 +147,9 @@ Before using the session for any new mutation authority:
 - verification surface changes -> fail closed and require fresh evidence;
 - CAPTCHA/MFA/security-verification appears -> stop; no bypass.
 
-## Next implementation
+## Next live validation
 
-1. explicit verification-surface classifier (this milestone);
-2. local/headful verified-session bootstrap;
-3. byte-safe protected session secret provisioning;
-4. read-only fresh-run session inspector;
-5. post-verification application manifest canary.
+1. rerun the corrected local/headful bootstrap with user-entered verification;
+2. inspect the fresh local replay result;
+3. if successful, rerun the GitHub-hosted inspector;
+4. review the real post-verification application manifest before authorizing new actions.

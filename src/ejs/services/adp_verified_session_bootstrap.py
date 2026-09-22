@@ -1,9 +1,9 @@
 """Local/headful bootstrap for a user-verified ADP guest session.
 
 This tool never reads or enters the verification code. The user drives the
-browser manually. Once an observed verification surface has been completed and
-both the OTP control and guest-identity surface disappear, the tool exports
-Playwright storage state for protected secret provisioning.
+browser manually. Disappearing OTP/identity fields alone are not success: a
+stable, non-empty form surface must follow. Exported state is only a candidate;
+the PowerShell helper must prove fresh-browser reuse before provisioning it.
 """
 from __future__ import annotations
 
@@ -13,13 +13,16 @@ import json
 from pathlib import Path
 import sys
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 from ejs.services.adp_live_inspector import validate_adp_live_url
 
-BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v1"
+BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v2"
 OTP_CONTROL_ID = "oneTimePassWord"
 IDENTITY_CONTROL_IDS = ("guestFirstName", "guestLastName", "guestEmail")
 DEFAULT_TIMEOUT_SECONDS = 900
+MIN_POST_VERIFICATION_SECONDS = 10
+MIN_STABLE_SURFACE_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -41,11 +44,9 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
 
 
 def _visible(page, selector: str) -> bool:
-    try:
-        locator = page.locator(selector)
-        return locator.count() == 1 and locator.is_visible()
-    except Exception:
-        return False
+    # Detached/loading DOM errors must reset readiness, never mean "absent".
+    locator = page.locator(selector)
+    return any(locator.nth(i).is_visible() for i in range(locator.count()))
 
 
 def bootstrap_stage(page) -> dict:
@@ -66,11 +67,16 @@ def _sanitized_post_verification_report(page, verification_seen: bool) -> dict:
     controls = []
     try:
         locator = page.locator("input, select, textarea, button, sdf-button, input[type=file]")
-        for index in range(min(locator.count(), 80)):
+        count = locator.count()
+        if count > 500:
+            raise RuntimeError("ADP_SESSION_BOOTSTRAP_SURFACE_TOO_LARGE")
+        for index in range(count):
             item = locator.nth(index)
             try:
                 if not item.is_visible():
                     continue
+                if len(controls) >= 80:
+                    raise RuntimeError("ADP_SESSION_BOOTSTRAP_SURFACE_TOO_LARGE")
                 tag = str(item.evaluate("el => el.tagName.toLowerCase()") or "")
                 control_type = str(item.get_attribute("type") or "")
                 control_id = str(item.get_attribute("id") or "")[:120]
@@ -84,22 +90,43 @@ def _sanitized_post_verification_report(page, verification_seen: bool) -> dict:
                     "aria_label": aria_label,
                     "required": item.get_attribute("required") is not None,
                     "disabled": item.is_disabled(),
+                    "readonly": item.get_attribute("readonly") is not None,
                     "file_control": control_type.casefold() == "file",
                 })
             except Exception:
-                continue
+                raise RuntimeError("ADP_SESSION_BOOTSTRAP_SURFACE_UNAVAILABLE") from None
     except Exception:
-        controls = []
+        raise RuntimeError("ADP_SESSION_BOOTSTRAP_SURFACE_UNAVAILABLE") from None
+    parsed = urlsplit(str(page.url))
     return {
         "bootstrap_version": BOOTSTRAP_VERSION,
         "verification_seen": verification_seen,
-        "verification_completed": True,
-        "post_verification_url": str(page.url),
+        "verification_completed": False,
+        "post_verification_url": urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")),
         "visible_control_count": len(controls),
         "visible_controls": controls,
         "raw_values_exposed": False,
-        "storage_state_exported": True,
+        "storage_state_exported": False,
     }
+
+
+def _form_surface_signature(report: dict) -> tuple:
+    """A readiness signal, not a reviewed application manifest or write grant."""
+    controls = report["visible_controls"]
+    if any(c["type"].casefold() == "password" for c in controls):
+        return ()
+    excluded_types = {"hidden", "button", "submit", "reset", "image", "search"}
+    excluded_ids = {OTP_CONTROL_ID, *IDENTITY_CONTROL_IDS}
+    return tuple(sorted(
+        (c["tag"], c["type"], c["id"], c["name"])
+        for c in controls
+        if c["tag"] in {"input", "select", "textarea"}
+        and c["type"].casefold() not in excluded_types
+        and c["id"] not in excluded_ids
+        and not c["id"].casefold().startswith(("onetrust", "ot-"))
+        and not c["disabled"]
+        and not c.get("readonly", False)
+    ))
 
 
 def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
@@ -128,33 +155,85 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
 
             deadline = time.monotonic() + request.timeout_seconds
             verification_seen = False
-            stable_verified_polls = 0
+            stable_since = None
+            last_signature = None
+            last_otp_seen = None
+            last_control_count = 0
+            transition_announced = False
             while time.monotonic() < deadline:
                 if page.is_closed():
                     raise RuntimeError("ADP_SESSION_BOOTSTRAP_BROWSER_CLOSED")
-                stage = bootstrap_stage(page)
+                if len(context.pages) != 1:
+                    raise RuntimeError("ADP_SESSION_BOOTSTRAP_UNREVIEWED_NEW_PAGE")
+                try:
+                    validate_adp_live_url(str(page.url))
+                except ValueError:
+                    raise RuntimeError("ADP_SESSION_BOOTSTRAP_UNREVIEWED_ORIGIN") from None
+                try:
+                    stage = bootstrap_stage(page)
+                    report = _sanitized_post_verification_report(page, verification_seen)
+                except Exception:
+                    stable_since = None
+                    last_signature = None
+                    page.wait_for_timeout(1_000)
+                    continue
+                now = time.monotonic()
+                last_control_count = report["visible_control_count"]
                 if stage["verification_code_visible"]:
                     verification_seen = True
-                    stable_verified_polls = 0
+                    last_otp_seen = now
+                    stable_since = None
+                    last_signature = None
                 elif verification_seen and not stage["identity_surface_visible"]:
-                    stable_verified_polls += 1
-                    if stable_verified_polls >= 2:
+                    if not transition_announced:
+                        print("Verification screen closed. Waiting for a stable form; keep the browser open.")
+                        transition_announced = True
+                    signature = _form_surface_signature(report)
+                    surface_key = (str(page.url), signature)
+                    if not signature:
+                        stable_since = None
+                        last_signature = None
+                    elif surface_key != last_signature:
+                        stable_since = now
+                        last_signature = surface_key
+                    elif (
+                        stable_since is not None
+                        and now - stable_since >= MIN_STABLE_SURFACE_SECONDS
+                        and last_otp_seen is not None
+                        and now - last_otp_seen >= MIN_POST_VERIFICATION_SECONDS
+                    ):
                         context.storage_state(path=str(storage_path))
-                        report = _sanitized_post_verification_report(page, verification_seen=True)
+                        report.update({
+                            "verification_seen": True,
+                            "verification_completed": True,
+                            "post_verification_surface_stable": True,
+                            "visible_form_control_count": len(signature),
+                            "storage_state_exported": True,
+                            "session_reuse_proven": False,
+                        })
                         report_path.write_text(
                             json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                             encoding="utf-8",
                         )
                         print(
-                            "ADP verification transition observed. Session state exported locally "
-                            "for protected secret provisioning."
+                            "Stable post-verification form observed. Candidate session exported locally; "
+                            "fresh-browser reuse must pass before secret provisioning."
                         )
                         return report
                 else:
-                    stable_verified_polls = 0
+                    stable_since = None
+                    last_signature = None
                 page.wait_for_timeout(1_000)
 
-            raise TimeoutError("ADP_SESSION_BOOTSTRAP_VERIFICATION_TIMEOUT")
+            print(json.dumps({
+                "verification_seen": verification_seen,
+                "verification_completed": False,
+                "visible_control_count": last_control_count,
+                "storage_state_exported": False,
+                "raw_values_exposed": False,
+            }, sort_keys=True))
+            reason = "FORM_NOT_READY" if verification_seen else "VERIFICATION_TIMEOUT"
+            raise TimeoutError(f"ADP_SESSION_BOOTSTRAP_{reason}")
         finally:
             context.close()
             browser.close()

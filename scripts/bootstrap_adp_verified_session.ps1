@@ -2,7 +2,9 @@ param(
   [string]$Repo = 'cagataybuyuk/europe-job-scan',
   [string]$Environment = 'gd004-safe-fill-upload-canary',
   [string]$ApplicationUrl = 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=eae41664-19fb-4412-96f8-43f15d52332b&ccId=19000101_000001&jobId=960970&source=LR&lang=en_US',
-  [int]$TimeoutSeconds = 900
+  [int]$TimeoutSeconds = 900,
+  [string]$ExpectedNavigationSurfaceFingerprint = '567e7890f5a01f151dbeeb23851ad7cf5fb8100a32c3e0386227d17cd507d313',
+  [int]$EntryOrdinal = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,6 +47,7 @@ $token = [Guid]::NewGuid().ToString('N')
 $tempRoot = [IO.Path]::GetTempPath()
 $statePath = Join-Path $tempRoot ("ejs-adp-storage-$token.json")
 $reportPath = Join-Path $tempRoot ("ejs-adp-bootstrap-report-$token.json")
+$reuseReportPath = Join-Path $tempRoot ("ejs-adp-reuse-report-$token.json")
 
 try {
   $python = Resolve-EjsPython3
@@ -65,6 +68,18 @@ try {
 
   if (-not (Test-Path -LiteralPath $statePath)) {
     throw 'ADP verified-session bootstrap did not create storage state.'
+  }
+
+  # A disappearing verification screen is not proof of a reusable session.
+  # This uses the existing reviewed read-only inspector: at most one Apply click.
+  Write-Host 'Testing the candidate session in a fresh local browser before updating the secret.'
+  & $python.Source @pythonPrefixArgs -m ejs.services.adp_verified_session_inspector --url $ApplicationUrl --expected-navigation-surface-fingerprint $ExpectedNavigationSurfaceFingerprint --entry-ordinal $EntryOrdinal --storage-state-json $statePath --output $reuseReportPath --playwright-managed
+  if ($LASTEXITCODE -ne 0) {
+    throw 'ADP session was not reusable in a fresh local browser. Existing GitHub secret was not changed. See the inspector error_code above.'
+  }
+  $reuseReport = Get-Content -Raw -LiteralPath $reuseReportPath | ConvertFrom-Json
+  if ($reuseReport.inspector_status -ne 'inspected' -or $reuseReport.session_reused -ne $true) {
+    throw 'ADP local session reuse was not proven. Existing GitHub secret was not changed.'
   }
 
   $stateJson = [IO.File]::ReadAllText($statePath)
@@ -99,4 +114,5 @@ try {
   $parsed = $null
   Remove-EjsTempFile -Path $statePath -Sensitive
   Remove-EjsTempFile -Path $reportPath
+  Remove-EjsTempFile -Path $reuseReportPath
 }

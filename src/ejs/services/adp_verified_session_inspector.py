@@ -206,6 +206,12 @@ def run_inspector(
                 timeout_ms=request.timeout_ms,
                 render_wait_ms=request.render_wait_ms,
             )
+            if post.get("captcha_observed") is True or post.get("auth_observed") is True:
+                return {
+                    **base,
+                    "inspector_status": "blocked",
+                    "error_code": "ADP_VERIFIED_SESSION_POST_APPLY_BOUNDARY_OBSERVED",
+                }
             surface = _surface_descriptor(page, post)
             if surface["verification_code_surface_present"]:
                 return {
@@ -249,13 +255,15 @@ def main() -> int:
     parser.add_argument("--entry-ordinal", type=int, required=True)
     parser.add_argument("--storage-state-json", required=True, dest="storage_state_json_path")
     parser.add_argument("--output", default="adp-verified-session-inspector.json")
+    parser.add_argument("--playwright-managed", action="store_true",
+                        help="Use installed Playwright Chromium (including on Windows)")
     args = parser.parse_args()
     report = run_inspector(AdpVerifiedSessionInspectorRequest(
         application_url=args.application_url,
         expected_navigation_surface_fingerprint=args.expected_navigation_surface_fingerprint,
         entry_ordinal=args.entry_ordinal,
         storage_state_json_path=args.storage_state_json_path,
-    ))
+    ), config=BrowserRuntimeConfig(use_playwright_managed=True) if args.playwright_managed else None)
     Path(args.output).write_text(
         json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",

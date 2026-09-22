@@ -46,6 +46,67 @@ if ($VerifiedSessionHelperText -match 'Get-Command python -CommandType Applicati
 }
 Write-Host 'PASS: ADP verified-session helper resolves a real Python 3 launcher fail-closed'
 
+# Execute the actual helper body with a fake native Python boundary. A failed
+# local replay must never call the secret writer; all temporary paths are cleaned.
+& {
+  $HelperAst = [System.Management.Automation.Language.Parser]::ParseInput($VerifiedSessionHelperText, [ref]$null, [ref]$null)
+  $TryStatement = $HelperAst.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.TryStatementAst] } | Select-Object -Last 1
+  $HelperBody = [scriptblock]::Create($TryStatement.Extent.Text)
+  function Resolve-EjsPython3 {
+    return [pscustomobject]@{ Source = 'Invoke-FakeAdpPython'; PrefixArgs = @(); DisplayName = 'fake python' }
+  }
+  function Invoke-FakeAdpPython {
+    $global:LASTEXITCODE = 0
+    if ($args -contains '-c') { return }
+    if ($args -contains 'ejs.services.adp_verified_session_bootstrap') {
+      if ($script:AdpTestMode -eq 'bootstrap-failure') { $global:LASTEXITCODE = 2; return }
+      [IO.File]::WriteAllText($statePath, '{"cookies":[],"origins":[]}')
+      [IO.File]::WriteAllText($reportPath, '{"visible_control_count":3}')
+      return
+    }
+    if ($args -contains 'ejs.services.adp_verified_session_inspector') {
+      if ($args -notcontains '--playwright-managed') { throw 'Local replay must use Playwright-managed fallback' }
+      if ($script:AdpTestMode -eq 'replay-failure') { $global:LASTEXITCODE = 2; return }
+      $ReportJson = if ($script:AdpTestMode -eq 'false-success') {
+        '{"inspector_status":"blocked","session_reused":false}'
+      } else { '{"inspector_status":"inspected","session_reused":true}' }
+      [IO.File]::WriteAllText($reuseReportPath, $ReportJson)
+      return
+    }
+    throw 'Unexpected Python command'
+  }
+  function Invoke-GhSecretSetUtf8 { $script:AdpTestSecretWrites += 1 }
+  function Remove-EjsTempFile { param($Path, [switch]$Sensitive) Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+  $Repo = 'test/repo'
+  $Environment = 'test'
+  $ApplicationUrl = 'https://workforcenow.adp.com/test'
+  $ExpectedNavigationSurfaceFingerprint = 'a' * 64
+  $EntryOrdinal = 0
+  $TimeoutSeconds = 60
+  foreach ($Mode in @('bootstrap-failure', 'replay-failure', 'false-success', 'success')) {
+    $script:AdpTestMode = $Mode
+    $script:AdpTestSecretWrites = 0
+    $Prefix = Join-Path ([IO.Path]::GetTempPath()) ('ejs-adp-test-' + [Guid]::NewGuid().ToString('N'))
+    $statePath = $Prefix + '-state.json'
+    $reportPath = $Prefix + '-bootstrap.json'
+    $reuseReportPath = $Prefix + '-reuse.json'
+    $Caught = $false
+    try { & $HelperBody } catch {
+      $Caught = $true
+      if ($Mode -eq 'success') { throw }
+      if ($_.Exception.Message -notmatch 'bootstrap failed|not reusable|not proven') { throw }
+    }
+    if ($Mode -ne 'success' -and -not $Caught) { throw "Failed open in $Mode" }
+    $ExpectedWrites = if ($Mode -eq 'success') { 1 } else { 0 }
+    if ($script:AdpTestSecretWrites -ne $ExpectedWrites) { throw "Incorrect secret write count for $Mode" }
+    foreach ($Path in @($statePath, $reportPath, $reuseReportPath)) {
+      if (Test-Path -LiteralPath $Path) { throw "Temporary file not cleaned in $Mode" }
+    }
+  }
+  $global:LASTEXITCODE = 0
+}
+Write-Host 'PASS: local ADP replay gates secret provisioning and cleans temporary files'
+
 foreach ($RelativePath in @(
   '../../scripts/set_adp_base_profile.ps1',
   '../../scripts/set_adp_profile_v2_extension.ps1',
