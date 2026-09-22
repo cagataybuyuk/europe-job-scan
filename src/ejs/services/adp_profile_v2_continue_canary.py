@@ -174,6 +174,15 @@ def phone_readback_shape(actual: str, expected_national: str, country_iso2: str)
     }
 
 
+def phone_readback_semantic_match(actual: str, expected_national: str, country_iso2: str) -> tuple[bool, str]:
+    shape = phone_readback_shape(actual, expected_national, country_iso2)
+    if shape["exact_digit_match"]:
+        return True, "national_digits"
+    if str(country_iso2).upper() == "TR" and shape["country_calling_code_prefixed"]:
+        return True, "tr_calling_code_prefixed"
+    return False, "mismatch"
+
+
 class PhoneReadbackMismatch(PermissionError):
     def __init__(self, shape: dict):
         super().__init__("ADP_PROFILE_V2_PHONE_READBACK_MISMATCH")
@@ -283,7 +292,12 @@ def _write_phone_fields(page, profile: ResolvedAdpProfile, counters: dict) -> di
         phone.fill(profile.phone_national_number)
         counters["form_value_write_successes"] += 1
     phone_after = phone.input_value()
-    if phone_after != profile.phone_national_number:
+    readback_match, readback_mode = phone_readback_semantic_match(
+        phone_after,
+        profile.phone_national_number,
+        profile.phone_country_iso2,
+    )
+    if not readback_match:
         raise PhoneReadbackMismatch(
             phone_readback_shape(
                 phone_after,
@@ -300,6 +314,7 @@ def _write_phone_fields(page, profile: ResolvedAdpProfile, counters: dict) -> di
         "phone_value_hash": value_hash(profile.phone_national_number),
         "phone_digit_count": len(profile.phone_national_number),
         "phone_readback_match": True,
+        "phone_readback_mode": readback_mode,
     }
 
 
