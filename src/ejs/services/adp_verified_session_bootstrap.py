@@ -17,7 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from ejs.services.adp_live_inspector import validate_adp_live_url
 
-BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v2"
+BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v3"
 OTP_CONTROL_ID = "oneTimePassWord"
 IDENTITY_CONTROL_IDS = ("guestFirstName", "guestLastName", "guestEmail")
 DEFAULT_TIMEOUT_SECONDS = 900
@@ -30,6 +30,7 @@ class AdpVerifiedSessionBootstrapRequest:
     application_url: str
     storage_state_out: str
     report_out: str
+    session_storage_out: str = ""
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
 
 
@@ -110,6 +111,36 @@ def _sanitized_post_verification_report(page, verification_seen: bool) -> dict:
     }
 
 
+def _capture_session_storage(page) -> tuple[dict[str, str], dict]:
+    """Capture tab-scoped state locally without exposing keys or values in diagnostics."""
+    raw = page.evaluate(
+        """() => {
+          const out = {};
+          for (let i = 0; i < window.sessionStorage.length; i += 1) {
+            const key = window.sessionStorage.key(i);
+            if (key !== null) out[key] = window.sessionStorage.getItem(key) ?? "";
+          }
+          return out;
+        }"""
+    )
+    if not isinstance(raw, dict) or len(raw) > 200:
+        raise RuntimeError("ADP_SESSION_BOOTSTRAP_SESSION_STORAGE_INVALID")
+    normalized: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise RuntimeError("ADP_SESSION_BOOTSTRAP_SESSION_STORAGE_INVALID")
+        normalized[key] = value
+    payload = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+    byte_count = len(payload.encode("utf-8"))
+    if byte_count > 47_000:
+        raise RuntimeError("ADP_SESSION_BOOTSTRAP_SESSION_STORAGE_TOO_LARGE")
+    return normalized, {
+        "session_storage_entry_count": len(normalized),
+        "session_storage_byte_count": byte_count,
+        "session_storage_values_exposed": False,
+    }
+
+
 def _form_surface_signature(report: dict) -> tuple:
     """A readiness signal, not a reviewed application manifest or write grant."""
     controls = report["visible_controls"]
@@ -138,8 +169,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
 
     storage_path = Path(request.storage_state_out)
     report_path = Path(request.report_out)
+    session_storage_path = Path(request.session_storage_out) if request.session_storage_out else None
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    if session_storage_path is not None:
+        session_storage_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
@@ -202,6 +236,18 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                         and last_otp_seen is not None
                         and now - last_otp_seen >= MIN_POST_VERIFICATION_SECONDS
                     ):
+                        session_storage = {}
+                        session_storage_evidence = {
+                            "session_storage_entry_count": 0,
+                            "session_storage_byte_count": 0,
+                            "session_storage_values_exposed": False,
+                        }
+                        if session_storage_path is not None:
+                            session_storage, session_storage_evidence = _capture_session_storage(page)
+                            session_storage_path.write_text(
+                                json.dumps(session_storage, ensure_ascii=False, sort_keys=True) + "\n",
+                                encoding="utf-8",
+                            )
                         context.storage_state(path=str(storage_path))
                         report.update({
                             "verification_seen": True,
@@ -209,6 +255,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                             "post_verification_surface_stable": True,
                             "visible_form_control_count": len(signature),
                             "storage_state_exported": True,
+                            "session_storage_exported": session_storage_path is not None,
+                            **session_storage_evidence,
                             "session_reuse_proven": False,
                         })
                         report_path.write_text(
@@ -244,12 +292,14 @@ def main() -> int:
     parser.add_argument("--url", required=True, dest="application_url")
     parser.add_argument("--storage-state-out", required=True)
     parser.add_argument("--report-out", required=True)
+    parser.add_argument("--session-storage-out", default="")
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
         application_url=args.application_url,
         storage_state_out=args.storage_state_out,
         report_out=args.report_out,
+        session_storage_out=args.session_storage_out,
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
@@ -257,6 +307,9 @@ def main() -> int:
         "verification_completed": report.get("verification_completed") is True,
         "visible_control_count": report.get("visible_control_count", 0),
         "storage_state_exported": report.get("storage_state_exported") is True,
+        "session_storage_exported": report.get("session_storage_exported") is True,
+        "session_storage_entry_count": report.get("session_storage_entry_count", 0),
+        "session_storage_values_exposed": False,
         "raw_values_exposed": report.get("raw_values_exposed") is True,
     }, sort_keys=True))
     return 0
