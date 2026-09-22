@@ -45,6 +45,10 @@ jobs:
           assert '.check(' not in src
           assert '.uncheck(' not in src
           assert 'PREFERENCES_LABEL = "To manage your preferences, click here"' in src
+          assert 'PREFERENCES_BUTTON_ID = "onetrust-pc-btn-handler"' in src
+          assert '"Set your preferences"' in src
+          assert '"To manage your preferences, click here"' in src
+          assert 'reviewed_preferences_button(page)' in src
           assert 'safe_fill_allowed": False' in src
           assert 'final_submit_allowed": False' in src
           wf = Path('.github/workflows/gd004-adp-cookie-preferences-canary.yml').read_text(encoding='utf-8')
