@@ -71,7 +71,8 @@ function Assert-EjsAdpSecretNameAllowed {
 
   $allowedSecretNames = @(
     'EJS_ADP_CANARY_PROFILE_JSON',
-    'EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON'
+    'EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON',
+    'EJS_ADP_VERIFIED_STORAGE_STATE_JSON'
   )
   if ($allowedSecretNames -notcontains $SecretName) {
     throw 'Secret name is not in the reviewed ADP allowlist.'
