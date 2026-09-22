@@ -6,6 +6,7 @@ from ejs.services.adp_profile_v2_continue_canary import (
     AdpProfileV2ContinueCanaryRequest,
     phone_contract_surface_descriptor,
     phone_contract_surface_fingerprint,
+    phone_readback_semantic_match,
     phone_readback_shape,
     validate_request,
 )
@@ -85,6 +86,26 @@ class AdpProfileV2ContinueCanaryTests(unittest.TestCase):
             phone_contract_surface_fingerprint(changed),
         )
 
+
+    def test_phone_readback_semantic_match_accepts_tr_calling_code_normalization(self):
+        matched, mode = phone_readback_semantic_match("+90 544 444 44 44", "5444444444", "TR")
+        self.assertTrue(matched)
+        self.assertEqual(mode, "tr_calling_code_prefixed")
+
+    def test_phone_readback_semantic_match_accepts_national_digits_with_formatting(self):
+        matched, mode = phone_readback_semantic_match("544 444 44 44", "5444444444", "TR")
+        self.assertTrue(matched)
+        self.assertEqual(mode, "national_digits")
+
+    def test_phone_readback_semantic_match_rejects_trunk_zero_or_other_drift(self):
+        self.assertEqual(
+            phone_readback_semantic_match("05444444444", "5444444444", "TR"),
+            (False, "mismatch"),
+        )
+        self.assertEqual(
+            phone_readback_semantic_match("+91 5444444444", "5444444444", "TR"),
+            (False, "mismatch"),
+        )
 
     def test_phone_readback_shape_detects_country_code_prefix_without_exposing_value(self):
         shape = phone_readback_shape("+90 5XX XXX XX XX".replace("X", "4"), "5444444444", "TR")
