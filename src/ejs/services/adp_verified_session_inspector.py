@@ -11,6 +11,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+from urllib.parse import urlsplit
 
 from ejs.services.adp_live_inspector import validate_adp_live_url, visible_application_controls
 from ejs.services.adp_navigation_canary import (
@@ -24,7 +25,7 @@ from ejs.services.adp_continue_diagnostic_canary import VERIFICATION_CODE_CONTRO
 from ejs.services.adp_continue_canary import action_surface_descriptor
 from ejs.services.browser_worker import BrowserRuntimeConfig
 
-INSPECTOR_VERSION = "adp-verified-session-inspector-v2"
+INSPECTOR_VERSION = "adp-verified-session-inspector-v3"
 IDENTITY_CONTROL_IDS = {"guestFirstName", "guestLastName", "guestEmail"}
 COOKIE_POLL_MS = 250
 COOKIE_CLEAR_STABLE_MS = 1_000
@@ -36,6 +37,7 @@ class AdpVerifiedSessionInspectorRequest:
     expected_navigation_surface_fingerprint: str
     entry_ordinal: int
     storage_state_json_path: str
+    session_storage_json_path: str = ""
     timeout_ms: int = 20_000
     render_wait_ms: int = 10_000
 
@@ -130,6 +132,48 @@ def validate_storage_state(path: str) -> dict:
     }
 
 
+def _load_session_storage(path: str) -> tuple[dict[str, str], dict]:
+    if not path:
+        return {}, {
+            "session_storage_loaded": False,
+            "session_storage_entry_count": 0,
+            "session_storage_byte_count": 0,
+            "raw_session_storage_exposed": False,
+        }
+    payload = Path(path).read_text(encoding="utf-8")
+    byte_count = len(payload.encode("utf-8"))
+    if byte_count > 47_000:
+        raise ValueError("ADP_VERIFIED_SESSION_SESSION_STORAGE_TOO_LARGE")
+    raw = json.loads(payload)
+    if not isinstance(raw, dict) or len(raw) > 200:
+        raise ValueError("ADP_VERIFIED_SESSION_SESSION_STORAGE_INVALID")
+    normalized: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError("ADP_VERIFIED_SESSION_SESSION_STORAGE_INVALID")
+        normalized[key] = value
+    return normalized, {
+        "session_storage_loaded": True,
+        "session_storage_entry_count": len(normalized),
+        "session_storage_byte_count": byte_count,
+        "raw_session_storage_exposed": False,
+    }
+
+
+def _session_storage_init_script(application_url: str, storage: dict[str, str]) -> str:
+    hostname = urlsplit(application_url).hostname or ""
+    hostname_json = json.dumps(hostname, ensure_ascii=False)
+    storage_json = json.dumps(storage, ensure_ascii=False, sort_keys=True)
+    return (
+        "(() => {"
+        f"if (window.location.hostname !== {hostname_json}) return;"
+        f"const restored = {storage_json};"
+        "for (const [key, value] of Object.entries(restored)) "
+        "window.sessionStorage.setItem(key, value);"
+        "})();"
+    )
+
+
 def _surface_descriptor(page, snapshot: dict) -> dict:
     controls = visible_application_controls(snapshot.get("form", {}))
     visible = [
@@ -168,6 +212,7 @@ def run_inspector(
 ) -> dict:
     validate_request(request)
     storage_evidence = validate_storage_state(request.storage_state_json_path)
+    session_storage, session_storage_evidence = _load_session_storage(request.session_storage_json_path)
     base = {
         "inspector_version": INSPECTOR_VERSION,
         "verified_session_inspector_only": True,
@@ -176,6 +221,7 @@ def run_inspector(
         "entry_ordinal": request.entry_ordinal,
         "storage_state_loaded": True,
         "storage_evidence": storage_evidence,
+        "session_storage_evidence": session_storage_evidence,
         "navigation_click_attempts": 0,
         "navigation_click_successes": 0,
         "form_value_write_attempts": 0,
@@ -211,6 +257,10 @@ def run_inspector(
                 ignore_https_errors=cfg.ignore_https_errors,
                 accept_downloads=False,
             )
+            if session_storage:
+                context.add_init_script(
+                    script=_session_storage_init_script(request.application_url, session_storage)
+                )
             page = context.new_page()
             page.set_default_timeout(request.timeout_ms)
             page.set_default_navigation_timeout(request.timeout_ms)
@@ -330,6 +380,7 @@ def main() -> int:
     parser.add_argument("--expected-navigation-surface-fingerprint", required=True)
     parser.add_argument("--entry-ordinal", type=int, required=True)
     parser.add_argument("--storage-state-json", required=True, dest="storage_state_json_path")
+    parser.add_argument("--session-storage-json", default="", dest="session_storage_json_path")
     parser.add_argument("--output", default="adp-verified-session-inspector.json")
     parser.add_argument("--playwright-managed", action="store_true",
                         help="Use installed Playwright Chromium (including on Windows)")
@@ -339,6 +390,7 @@ def main() -> int:
         expected_navigation_surface_fingerprint=args.expected_navigation_surface_fingerprint,
         entry_ordinal=args.entry_ordinal,
         storage_state_json_path=args.storage_state_json_path,
+        session_storage_json_path=args.session_storage_json_path,
     ), config=BrowserRuntimeConfig(use_playwright_managed=True) if args.playwright_managed else None)
     Path(args.output).write_text(
         json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
@@ -353,6 +405,7 @@ def main() -> int:
         "file_upload_attempts": report.get("file_upload_attempts", 0),
         "submit_attempts": report.get("submit_attempts", 0),
         "storage_evidence": report.get("storage_evidence"),
+        "session_storage_evidence": report.get("session_storage_evidence"),
         "cookie_gate": report.get("cookie_gate"),
     }, sort_keys=True))
     return 0 if report.get("inspector_status") == "inspected" else 2
