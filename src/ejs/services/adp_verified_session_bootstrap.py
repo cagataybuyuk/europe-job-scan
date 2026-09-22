@@ -30,8 +30,8 @@ class AdpVerifiedSessionBootstrapRequest:
     application_url: str
     storage_state_out: str
     report_out: str
-    session_storage_out: str = ""
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
+    session_storage_out: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
