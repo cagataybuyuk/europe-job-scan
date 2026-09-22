@@ -27,6 +27,7 @@ URL = (
     "recruitment.html?cid=test&ccId=19000101_000001&jobId=960970"
 )
 FP = "a" * 64
+CLEAR_COOKIE_SURFACE = {"observation_succeeded": True, "banner_visible": False, "preference_center_visible": False}
 
 
 def surface(*controls):
@@ -64,7 +65,7 @@ class AdpVerifiedSessionTests(unittest.TestCase):
                 browser.new_context.return_value = context
                 playwright.chromium.launch.return_value = browser
                 with patch("playwright.sync_api.sync_playwright") as sync, \
-                        patch.object(inspector, "preference_surface_descriptor", return_value={}), \
+                        patch.object(inspector, "_cookie_visibility", return_value=CLEAR_COOKIE_SURFACE), \
                         patch.object(inspector, "_snapshot", side_effect=[{}, {boundary: True}]), \
                         patch.object(inspector, "navigation_surface_fingerprint", return_value=FP), \
                         patch.object(inspector, "_approved_entry", return_value={}), \
@@ -81,6 +82,121 @@ class AdpVerifiedSessionTests(unittest.TestCase):
                 self.assertEqual(result["form_value_write_attempts"], 0)
                 self.assertEqual(result["credential_entry_attempts"], 0)
                 self.assertEqual(result["submit_attempts"], 0)
+
+    def run_cookie_timeline(self, visibility_at, *, late_after_render=False):
+        clock = [0]
+        rendered = [False]
+        page, context, browser, playwright = (MagicMock() for _ in range(4))
+        page.url = URL
+        page.wait_for_timeout.side_effect = lambda ms: clock.__setitem__(0, clock[0] + ms)
+        context.new_page.return_value = page
+        context.pages = [page]
+        browser.new_context.return_value = context
+        playwright.chromium.launch.return_value = browser
+
+        def observe(_):
+            if late_after_render and rendered[0]:
+                return {**CLEAR_COOKIE_SURFACE, "banner_visible": True}
+            return visibility_at(clock[0])
+
+        def snapshot(*args, **kwargs):
+            rendered[0] = True
+            return {}
+
+        clicks = []
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.json"
+            state.write_text('{"cookies":[],"origins":[]}', encoding="utf-8")
+            with patch("playwright.sync_api.sync_playwright") as sync, \
+                    patch.object(inspector, "_cookie_visibility", side_effect=observe), \
+                    patch.object(inspector, "_snapshot", side_effect=snapshot) as snapshots, \
+                    patch.object(inspector, "navigation_surface_fingerprint", return_value=FP), \
+                    patch.object(inspector, "_approved_entry", return_value={}), \
+                    patch.object(inspector, "_resolve_document_locator") as entry, \
+                    patch.object(inspector, "_surface_descriptor", return_value={
+                        "verification_code_surface_present": False,
+                        "guest_identity_surface_present": False,
+                        "visible_application_control_count": 1,
+                    }):
+                sync.return_value.__enter__.return_value = playwright
+                entry.return_value.click.side_effect = lambda **kwargs: clicks.append(clock[0])
+                result = inspector.run_inspector(
+                    AdpVerifiedSessionInspectorRequest(URL, FP, 0, str(state), render_wait_ms=2_000),
+                    config=BrowserRuntimeConfig(use_playwright_managed=True),
+                )
+        self.assertEqual(result["form_value_write_attempts"], 0)
+        self.assertEqual(result["credential_entry_attempts"], 0)
+        self.assertEqual(result["file_upload_attempts"], 0)
+        self.assertEqual(result["submit_attempts"], 0)
+        self.assertEqual(result["cookie_gate"]["cookie_click_attempts"], 0)
+        return result, clicks, snapshots.call_count
+
+    def test_transient_cookie_banner_settles_before_apply(self):
+        result, clicks, snapshots = self.run_cookie_timeline(
+            lambda ms: {**CLEAR_COOKIE_SURFACE, "banner_visible": ms < 500},
+        )
+        self.assertEqual(result["inspector_status"], "inspected")
+        self.assertEqual(clicks, [2_000])
+        self.assertEqual(snapshots, 2)
+        self.assertTrue(result["cookie_gate"]["initial"]["banner_visible"])
+        self.assertFalse(result["cookie_gate"]["final"]["banner_visible"])
+        self.assertGreaterEqual(result["cookie_gate"]["clear_stable_ms"], 1_000)
+
+    def test_persistent_banner_or_preference_center_blocks_without_apply(self):
+        for container in ("banner_visible", "preference_center_visible"):
+            with self.subTest(container=container):
+                result, clicks, snapshots = self.run_cookie_timeline(
+                    lambda ms: {**CLEAR_COOKIE_SURFACE, container: True},
+                )
+                self.assertEqual(result["error_code"], "ADP_VERIFIED_SESSION_COOKIE_STATE_NOT_REUSED")
+                self.assertEqual(clicks, [])
+                self.assertEqual(snapshots, 0)
+                self.assertEqual(result["navigation_click_attempts"], 0)
+
+    def test_initially_absent_delayed_banner_blocks_without_apply(self):
+        result, clicks, _ = self.run_cookie_timeline(
+            lambda ms: {**CLEAR_COOKIE_SURFACE, "banner_visible": ms >= 1_000},
+        )
+        self.assertEqual(result["inspector_status"], "blocked")
+        self.assertEqual(clicks, [])
+        self.assertFalse(result["cookie_gate"]["initial"]["banner_visible"])
+        self.assertTrue(result["cookie_gate"]["final"]["banner_visible"])
+
+    def test_banner_appearing_during_snapshot_blocks_apply(self):
+        result, clicks, snapshots = self.run_cookie_timeline(lambda ms: CLEAR_COOKIE_SURFACE, late_after_render=True)
+        self.assertEqual(result["inspector_status"], "blocked")
+        self.assertEqual(clicks, [])
+        self.assertEqual(snapshots, 1)
+        self.assertTrue(result["cookie_gate"]["pre_apply"]["banner_visible"])
+        self.assertFalse(result["cookie_gate"]["surface_clear"])
+
+    def test_unreadable_cookie_surface_is_not_treated_as_clear(self):
+        unknown = {"observation_succeeded": False, "banner_visible": None, "preference_center_visible": None}
+        result, clicks, _ = self.run_cookie_timeline(lambda ms: unknown)
+        self.assertEqual(result["inspector_status"], "blocked")
+        self.assertEqual(clicks, [])
+        self.assertGreater(result["cookie_gate"]["observation_error_count"], 0)
+
+    def test_clear_surface_requires_a_full_stable_second(self):
+        result, clicks, _ = self.run_cookie_timeline(
+            lambda ms: {**CLEAR_COOKIE_SURFACE, "banner_visible": ms < 1_750},
+        )
+        self.assertEqual(result["inspector_status"], "blocked")
+        self.assertFalse(result["cookie_gate"]["final"]["banner_visible"])
+        self.assertEqual(clicks, [])
+
+    def test_cookie_visibility_errors_are_sanitized(self):
+        page = MagicMock()
+        page.locator.side_effect = RuntimeError("sensitive-error-value")
+        result = inspector._cookie_visibility(page)
+        self.assertFalse(result["observation_succeeded"])
+        self.assertIsNone(result["banner_visible"])
+        self.assertNotIn("sensitive-error-value", repr(result))
+
+    def test_inspector_rejects_unbounded_cookie_observation_window(self):
+        for ms in (0, 999, 15_001):
+            with self.subTest(ms=ms), self.assertRaisesRegex(ValueError, "INVALID_INSPECTOR_RENDER_WAIT"):
+                validate_inspector_request(AdpVerifiedSessionInspectorRequest(URL, FP, 0, "state.json", render_wait_ms=ms))
 
     def run_timeline(self, stages, reports, *, expected_error=None):
         """Drive the actual bootstrap loop with a deterministic browser clock."""

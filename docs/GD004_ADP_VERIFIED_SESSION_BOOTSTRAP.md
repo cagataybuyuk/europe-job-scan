@@ -47,6 +47,35 @@ Verify; no CV upload or final Submit is required. Expected outcomes:
 The fingerprint default is specific to the reviewed job. A different target needs
 its own reviewed fingerprint and ordinal; do not relax the fingerprint gate.
 
+### Follow-up: cookie visibility during fresh local replay
+
+The corrected local bootstrap subsequently observed 21 visible controls and
+exported candidate state. Its fresh local replay stopped with
+`ADP_VERIFIED_SESSION_COOKIE_STATE_NOT_REUSED`, before any Apply click. The existing
+secret was not changed. This result does not establish loss of the verified guest
+identity: the cookie gate prevented the authentication reuse test from running.
+
+Inspector v1 checked OneTrust visibility immediately at `domcontentloaded`.
+That timing could mistake a transient banner for persistent consent loss; the
+available log cannot distinguish the two. Inspector v2 observes the full bounded
+render window (10 seconds by default), requires both reviewed OneTrust containers
+to remain absent for at least the final second, and checks them again after the
+render snapshot before Apply. Persistent, delayed or unreadable cookie UI still
+blocks, with zero cookie clicks. No cookies are rewritten and no preference is
+accepted or rejected automatically.
+
+The console now includes only storage counts and `cookie_gate` evidence: initial,
+final and pre-Apply visibility, the observation window, clear duration, observation
+error count and zero cookie clicks. No cookie values, labels or storage content
+are exposed. A banner disappearing during this window supports a timing issue;
+a persistent banner still needs investigation of consent persistence before
+drawing conclusions about identity reuse.
+
+For the next manual bootstrap, if OneTrust is shown, use the previously reviewed
+Preferences -> Unselect All -> Save Changes path before Apply. Merely closing a
+banner is not evidence that the consent choice was persisted. Enter OTP only in
+the ADP browser and do not upload or submit anything.
+
 ## Live evidence
 
 Run `35720538458` completed the reviewed profile-v2 flow successfully through:

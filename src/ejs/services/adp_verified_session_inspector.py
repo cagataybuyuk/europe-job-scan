@@ -12,7 +12,6 @@ import json
 from pathlib import Path
 import sys
 
-from ejs.services.adp_cookie_preferences_canary import preference_surface_descriptor
 from ejs.services.adp_live_inspector import validate_adp_live_url, visible_application_controls
 from ejs.services.adp_navigation_canary import (
     FINGERPRINT_RE,
@@ -25,8 +24,10 @@ from ejs.services.adp_continue_diagnostic_canary import VERIFICATION_CODE_CONTRO
 from ejs.services.adp_continue_canary import action_surface_descriptor
 from ejs.services.browser_worker import BrowserRuntimeConfig
 
-INSPECTOR_VERSION = "adp-verified-session-inspector-v1"
+INSPECTOR_VERSION = "adp-verified-session-inspector-v2"
 IDENTITY_CONTROL_IDS = {"guestFirstName", "guestLastName", "guestEmail"}
+COOKIE_POLL_MS = 250
+COOKIE_CLEAR_STABLE_MS = 1_000
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,69 @@ def validate_request(request: AdpVerifiedSessionInspectorRequest) -> None:
         raise ValueError("ADP_VERIFIED_SESSION_STORAGE_STATE_REQUIRED")
     if request.timeout_ms < 1_000 or request.timeout_ms > 60_000:
         raise ValueError("INVALID_INSPECTOR_TIMEOUT")
+    if request.render_wait_ms < 1_000 or request.render_wait_ms > 15_000:
+        raise ValueError("INVALID_INSPECTOR_RENDER_WAIT")
+
+
+def _cookie_visibility(page) -> dict:
+    """Observe exact reviewed OneTrust containers; no labels or cookie values."""
+    try:
+        visible = {}
+        for key, selector in (
+            ("banner_visible", "#onetrust-banner-sdk"),
+            ("preference_center_visible", "#onetrust-pc-sdk"),
+        ):
+            locator = page.locator(selector)
+            visible[key] = any(locator.nth(i).is_visible() for i in range(locator.count()))
+        return {"observation_succeeded": True, **visible}
+    except Exception:
+        return {
+            "observation_succeeded": False,
+            "banner_visible": None,
+            "preference_center_visible": None,
+        }
+
+
+def _cookie_surface_clear(surface: dict) -> bool:
+    return (
+        surface.get("observation_succeeded") is True
+        and surface.get("banner_visible") is False
+        and surface.get("preference_center_visible") is False
+    )
+
+
+def _observe_cookie_settling(page, budget_ms: int) -> dict:
+    # Observe the entire bounded window, even if absent initially: OneTrust may
+    # be injected later, or briefly render before restored consent is applied.
+    initial = _cookie_visibility(page)
+    current = initial
+    elapsed = 0
+    clear_ms = 0
+    failures = int(not initial["observation_succeeded"])
+    visible_seen = initial["banner_visible"] is True or initial["preference_center_visible"] is True
+    while elapsed < budget_ms:
+        interval = min(COOKIE_POLL_MS, budget_ms - elapsed)
+        page.wait_for_timeout(interval)
+        following = _cookie_visibility(page)
+        if _cookie_surface_clear(current) and _cookie_surface_clear(following):
+            clear_ms += interval
+        else:
+            clear_ms = 0
+        elapsed += interval
+        failures += int(not following["observation_succeeded"])
+        visible_seen = visible_seen or following["banner_visible"] is True or following["preference_center_visible"] is True
+        current = following
+    return {
+        "initial": initial,
+        "final": current,
+        "observation_window_ms": elapsed,
+        "clear_stable_ms": clear_ms,
+        "visible_during_observation": visible_seen,
+        "observation_error_count": failures,
+        "surface_clear": _cookie_surface_clear(current) and clear_ms >= COOKIE_CLEAR_STABLE_MS,
+        "cookie_click_attempts": 0,
+        "raw_values_exposed": False,
+    }
 
 
 def validate_storage_state(path: str) -> dict:
@@ -152,8 +216,9 @@ def run_inspector(
             page.set_default_navigation_timeout(request.timeout_ms)
             page.goto(request.application_url, wait_until="domcontentloaded", timeout=request.timeout_ms)
 
-            cookie_surface = preference_surface_descriptor(page)
-            if cookie_surface.get("banner_visible") is True or cookie_surface.get("preference_center_visible") is True:
+            cookie_gate = _observe_cookie_settling(page, request.render_wait_ms)
+            base["cookie_gate"] = cookie_gate
+            if not cookie_gate["surface_clear"]:
                 return {
                     **base,
                     "inspector_status": "blocked",
@@ -166,6 +231,17 @@ def run_inspector(
                 timeout_ms=request.timeout_ms,
                 render_wait_ms=request.render_wait_ms,
             )
+            # Rendering can outlast the observation window. Recheck immediately
+            # before the reviewed navigation; never click through a late banner.
+            pre_apply_cookie_surface = _cookie_visibility(page)
+            cookie_gate["pre_apply"] = pre_apply_cookie_surface
+            if not _cookie_surface_clear(pre_apply_cookie_surface):
+                cookie_gate["surface_clear"] = False
+                return {
+                    **base,
+                    "inspector_status": "blocked",
+                    "error_code": "ADP_VERIFIED_SESSION_COOKIE_STATE_NOT_REUSED",
+                }
             if pre.get("captcha_observed") is True or pre.get("auth_observed") is True:
                 return {
                     **base,
@@ -276,6 +352,8 @@ def main() -> int:
         "credential_entry_attempts": report.get("credential_entry_attempts", 0),
         "file_upload_attempts": report.get("file_upload_attempts", 0),
         "submit_attempts": report.get("submit_attempts", 0),
+        "storage_evidence": report.get("storage_evidence"),
+        "cookie_gate": report.get("cookie_gate"),
     }, sort_keys=True))
     return 0 if report.get("inspector_status") == "inspected" else 2
 
