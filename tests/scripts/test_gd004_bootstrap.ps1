@@ -9,6 +9,7 @@ if ($Errors.Count) { throw 'Bootstrap syntax errors' }
 $AdpHelperRelativePaths = @(
   '../../scripts/set_adp_base_profile.ps1',
   '../../scripts/set_adp_profile_v2_extension.ps1',
+  '../../scripts/bootstrap_adp_verified_session.ps1',
   '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 )
 foreach ($RelativePath in $AdpHelperRelativePaths) {
@@ -29,7 +30,8 @@ Write-Host 'PASS: ADP user-facing helpers parse on Windows PowerShell 5.1'
 
 foreach ($RelativePath in @(
   '../../scripts/set_adp_base_profile.ps1',
-  '../../scripts/set_adp_profile_v2_extension.ps1'
+  '../../scripts/set_adp_profile_v2_extension.ps1',
+  '../../scripts/bootstrap_adp_verified_session.ps1'
 )) {
   $HelperText = Get-Content -Raw (Join-Path $PSScriptRoot $RelativePath)
   if ($HelperText -match '--body') { throw "$RelativePath must not pass JSON through --body" }
@@ -41,7 +43,8 @@ $Utf8HelperPath = Join-Path $PSScriptRoot '../../scripts/lib/invoke_native_utf8_
 
 foreach ($AllowedSecretName in @(
   'EJS_ADP_CANARY_PROFILE_JSON',
-  'EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON'
+  'EJS_ADP_CANARY_PROFILE_V2_EXTENSION_JSON',
+  'EJS_ADP_VERIFIED_STORAGE_STATE_JSON'
 )) {
   Assert-EjsAdpSecretNameAllowed -SecretName $AllowedSecretName
 }
