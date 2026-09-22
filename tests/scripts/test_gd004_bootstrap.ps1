@@ -61,12 +61,27 @@ Write-Host 'PASS: ADP verified-session helper resolves a real Python 3 launcher 
     if ($args -contains 'ejs.services.adp_verified_session_bootstrap') {
       if ($script:AdpTestMode -eq 'bootstrap-failure') { $global:LASTEXITCODE = 2; return }
       [IO.File]::WriteAllText($statePath, '{"cookies":[],"origins":[]}')
-      [IO.File]::WriteAllText($reportPath, '{"visible_control_count":3}')
+      if ($script:AdpTestMode -eq 'session-replay-required') {
+        [IO.File]::WriteAllText($sessionStoragePath, '{"adp-session":"opaque-value"}')
+        [IO.File]::WriteAllText($reportPath, '{"visible_control_count":3,"session_storage_entry_count":1}')
+      } else {
+        [IO.File]::WriteAllText($reportPath, '{"visible_control_count":3}')
+      }
       return
     }
     if ($args -contains 'ejs.services.adp_verified_session_inspector') {
       if ($args -notcontains '--playwright-managed') { throw 'Local replay must use Playwright-managed fallback' }
       if ($script:AdpTestMode -eq 'replay-failure') { $global:LASTEXITCODE = 2; return }
+      if ($script:AdpTestMode -eq 'session-replay-required') {
+        if ($args -contains '--session-storage-json') {
+          [IO.File]::WriteAllText($sessionReuseReportPath, '{"inspector_status":"inspected","session_reused":true}')
+          $global:LASTEXITCODE = 0
+        } else {
+          [IO.File]::WriteAllText($reuseReportPath, '{"inspector_status":"blocked","error_code":"ADP_VERIFIED_SESSION_NOT_RECOGNIZED_IDENTITY_SURFACE","session_reused":false}')
+          $global:LASTEXITCODE = 2
+        }
+        return
+      }
       $ReportJson = if ($script:AdpTestMode -eq 'false-success') {
         '{"inspector_status":"blocked","session_reused":false}'
       } else { '{"inspector_status":"inspected","session_reused":true}' }
@@ -83,7 +98,7 @@ Write-Host 'PASS: ADP verified-session helper resolves a real Python 3 launcher 
   $ExpectedNavigationSurfaceFingerprint = 'a' * 64
   $EntryOrdinal = 0
   $TimeoutSeconds = 60
-  foreach ($Mode in @('bootstrap-failure', 'replay-failure', 'false-success', 'success')) {
+  foreach ($Mode in @('bootstrap-failure', 'replay-failure', 'false-success', 'session-replay-required', 'success')) {
     $script:AdpTestMode = $Mode
     $script:AdpTestSecretWrites = 0
     $Prefix = Join-Path ([IO.Path]::GetTempPath()) ('ejs-adp-test-' + [Guid]::NewGuid().ToString('N'))
@@ -94,7 +109,7 @@ Write-Host 'PASS: ADP verified-session helper resolves a real Python 3 launcher 
     try { & $HelperBody } catch {
       $Caught = $true
       if ($Mode -eq 'success') { throw }
-      if ($_.Exception.Message -notmatch 'bootstrap failed|not reusable|not proven') { throw }
+      if ($_.Exception.Message -notmatch 'bootstrap failed|not reusable|not proven|sessionStorage') { throw }
     }
     if ($Mode -ne 'success' -and -not $Caught) { throw "Failed open in $Mode" }
     $ExpectedWrites = if ($Mode -eq 'success') { 1 } else { 0 }
