@@ -51,7 +51,6 @@ def _open_reviewed_adp_target(page, application_url: str) -> dict:
         try:
             page.goto(application_url, wait_until="commit", timeout=45_000)
             validate_adp_live_url(str(page.url))
-            page.wait_for_timeout(1_000)
             return {
                 "navigation_attempts": attempt,
                 "navigation_commit_observed": True,
@@ -69,7 +68,6 @@ def _open_reviewed_adp_target(page, application_url: str) -> dict:
                     pass
                 else:
                     if str(page.url) not in {"", "about:blank"}:
-                        page.wait_for_timeout(1_000)
                         return {
                             "navigation_attempts": attempt,
                             "navigation_commit_observed": False,
