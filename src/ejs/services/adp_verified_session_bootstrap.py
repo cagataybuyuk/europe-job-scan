@@ -852,6 +852,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                 if isinstance(live_handoff, dict)
                                 else False
                             ),
+                            "live_handoff_strongest_reusable_scope": (
+                                str(live_handoff.get("strongest_reusable_scope", ""))
+                                if isinstance(live_handoff, dict)
+                                else ""
+                            ),
                         })
                         report_path.write_text(
                             json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
@@ -911,6 +916,7 @@ def main() -> int:
         "storage_state_exported": report.get("storage_state_exported") is True,
         "canonical_postlogin_url_exported": report.get("canonical_postlogin_url_exported") is True,
         "live_handoff_reuse_proven": report.get("live_handoff_reuse_proven") is True,
+        "live_handoff_strongest_reusable_scope": report.get("live_handoff_strongest_reusable_scope", ""),
         "storage_indexed_db_database_count": report.get("storage_indexed_db_database_count", 0),
         "storage_indexed_db_origin_count": report.get("storage_indexed_db_origin_count", 0),
         "onetrust_consent_cookie_present": report.get("onetrust_consent_cookie_present") is True,
