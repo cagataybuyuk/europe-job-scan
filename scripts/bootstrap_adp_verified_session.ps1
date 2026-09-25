@@ -137,7 +137,9 @@ try {
     throw 'ADP local session reuse was not proven. Existing GitHub secret was not changed.'
   }
 
-  if ($reuseReport.PSObject.Properties.Name -contains 'direct_reuse_url_evidence' -and
+  if ($reuseReport.PSObject.Properties.Name -contains 'reuse_route' -and
+      $reuseReport.reuse_route -eq 'authenticated_postlogin_direct' -and
+      $reuseReport.PSObject.Properties.Name -contains 'direct_reuse_url_evidence' -and
       $null -ne $reuseReport.direct_reuse_url_evidence -and
       $reuseReport.direct_reuse_url_evidence.direct_reuse_url_source -eq 'captured_post_verification') {
     throw 'ADP local replay succeeded using the captured canonical postLogin URL. Existing GitHub secret was not changed. Implement protected canonical reuse URL transport before GitHub-hosted reuse.'
