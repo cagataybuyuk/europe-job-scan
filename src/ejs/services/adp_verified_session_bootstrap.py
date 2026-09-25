@@ -239,6 +239,41 @@ def _capture_session_storage(page) -> tuple[dict[str, str], dict]:
     }
 
 
+def _export_storage_state(context, path: Path) -> dict:
+    """Export cookies/localStorage plus IndexedDB without exposing raw values."""
+    try:
+        state = context.storage_state(path=str(path), indexed_db=True)
+    except TypeError as exc:
+        raise RuntimeError("PLAYWRIGHT_INDEXED_DB_STORAGE_STATE_UNAVAILABLE") from exc
+    if not isinstance(state, dict):
+        raise RuntimeError("ADP_SESSION_BOOTSTRAP_STORAGE_STATE_INVALID")
+    cookies = state.get("cookies", [])
+    origins = state.get("origins", [])
+    if not isinstance(cookies, list) or not isinstance(origins, list):
+        raise RuntimeError("ADP_SESSION_BOOTSTRAP_STORAGE_STATE_INVALID")
+    local_storage_count = 0
+    indexed_db_database_count = 0
+    indexed_db_origin_count = 0
+    for origin in origins:
+        if not isinstance(origin, dict):
+            continue
+        local_storage = origin.get("localStorage", [])
+        if isinstance(local_storage, list):
+            local_storage_count += len(local_storage)
+        indexed_db = origin.get("indexedDB", [])
+        if isinstance(indexed_db, list) and indexed_db:
+            indexed_db_origin_count += 1
+            indexed_db_database_count += len(indexed_db)
+    return {
+        "storage_cookie_count": len(cookies),
+        "storage_origin_count": len(origins),
+        "storage_local_storage_entry_count": local_storage_count,
+        "storage_indexed_db_origin_count": indexed_db_origin_count,
+        "storage_indexed_db_database_count": indexed_db_database_count,
+        "storage_raw_values_exposed": False,
+    }
+
+
 def _form_surface_signature(report: dict) -> tuple:
     """A readiness signal, not a reviewed application manifest or write grant."""
     controls = report["visible_controls"]
@@ -366,7 +401,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                 json.dumps(session_storage, ensure_ascii=False, sort_keys=True) + "\n",
                                 encoding="utf-8",
                             )
-                        context.storage_state(path=str(storage_path))
+                        storage_evidence = _export_storage_state(context, storage_path)
                         report.update({
                             "verification_seen": verification_seen,
                             "verification_completed": verification_seen,
@@ -375,6 +410,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                             "post_verification_surface_stable": True,
                             "visible_form_control_count": len(signature),
                             "storage_state_exported": True,
+                            **storage_evidence,
                             "session_storage_exported": session_storage_path is not None,
                             **session_storage_evidence,
                             "session_reuse_proven": False,
@@ -428,6 +464,8 @@ def main() -> int:
         "authenticated_form_observed": report.get("authenticated_form_observed") is True,
         "visible_control_count": report.get("visible_control_count", 0),
         "storage_state_exported": report.get("storage_state_exported") is True,
+        "storage_indexed_db_database_count": report.get("storage_indexed_db_database_count", 0),
+        "storage_indexed_db_origin_count": report.get("storage_indexed_db_origin_count", 0),
         "session_storage_exported": report.get("session_storage_exported") is True,
         "session_storage_entry_count": report.get("session_storage_entry_count", 0),
         "session_storage_values_exposed": False,
