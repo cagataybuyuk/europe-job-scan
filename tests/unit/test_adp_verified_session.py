@@ -346,6 +346,39 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         self.assertEqual(report["verification_basis"], "authenticated_postlogin_form")
         self.assertFalse(report["session_reuse_proven"])
 
+    def test_authenticated_modal_without_sidebar_exports_as_candidate(self):
+        steps = ("Personal Information", "Resume", "Questions", "Review Your Application", "Self-Attest & Submit")
+        exports, report = self.run_timeline(
+            [{"verification_code_visible": False, "identity_surface_visible": False}],
+            [surface({})],
+            page_url=URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html"),
+            visible_labels=steps,
+        )
+        self.assertEqual(exports, [10])
+        self.assertFalse(report["verification_seen"])
+        self.assertTrue(report["authenticated_application_steps_observed"])
+        self.assertTrue(report["authenticated_form_observed"])
+        self.assertEqual(report["verification_basis"], "authenticated_postlogin_form")
+
+    def test_authenticated_modal_requires_full_application_step_markers(self):
+        correct = URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html")
+        for labels in (
+            ("Personal Information",),
+            ("Personal Information", "Resume", "Questions", "Review Your Application"),
+            ("Resume", "Questions", "Review Your Application", "Self-Attest & Submit"),
+        ):
+            with self.subTest(labels=labels):
+                page = MagicMock()
+                page.url = correct
+                def text_locator(label, **kwargs):
+                    locator = MagicMock()
+                    locator.count.return_value = 1
+                    locator.nth.return_value.is_visible.return_value = label in labels
+                    return locator
+                page.get_by_text.side_effect = text_locator
+                result = bootstrap._authenticated_form_evidence(page, URL)
+                self.assertFalse(result["authenticated_form_observed"])
+
     def test_signed_in_job_details_do_not_export_even_with_unrelated_input(self):
         exports, _ = self.run_timeline(
             [{"verification_code_visible": False, "identity_surface_visible": False}],
