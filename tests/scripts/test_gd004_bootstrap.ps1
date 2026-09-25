@@ -10,6 +10,7 @@ $AdpHelperRelativePaths = @(
   '../../scripts/set_adp_base_profile.ps1',
   '../../scripts/set_adp_profile_v2_extension.ps1',
   '../../scripts/bootstrap_adp_verified_session.ps1',
+  '../../scripts/probe_adp_persistent_profile.ps1',
   '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 )
 foreach ($RelativePath in $AdpHelperRelativePaths) {
@@ -45,6 +46,21 @@ if ($VerifiedSessionHelperText -match 'Get-Command python -CommandType Applicati
   throw 'Verified-session helper must not hard-bind to the Windows Store python alias'
 }
 Write-Host 'PASS: ADP verified-session helper resolves a real Python 3 launcher fail-closed'
+
+$PersistentProbeHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_persistent_profile.ps1')
+foreach ($RequiredSnippet in @(
+  'ejs.services.adp_persistent_profile_probe',
+  '--user-data-dir $profilePath',
+  'No GitHub secret was changed'
+)) {
+  if ($PersistentProbeHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Persistent-profile helper is missing diagnostic contract: $RequiredSnippet"
+  }
+}
+if ($PersistentProbeHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Persistent-profile diagnostic must never provision GitHub secrets'
+}
+Write-Host 'PASS: ADP persistent-profile helper is diagnostic-only and secret-write-free'
 
 # Execute the actual helper body with a fake native Python boundary. A failed
 # local replay must never call the secret writer; all temporary paths are cleaned.
