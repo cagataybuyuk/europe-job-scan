@@ -125,9 +125,25 @@ def validate_storage_state(path: str) -> dict:
     origins = raw.get("origins")
     if not isinstance(cookies, list) or not isinstance(origins, list):
         raise ValueError("ADP_VERIFIED_SESSION_STORAGE_STATE_SHAPE_INVALID")
+    local_storage_entry_count = 0
+    indexed_db_origin_count = 0
+    indexed_db_database_count = 0
+    for origin in origins:
+        if not isinstance(origin, dict):
+            continue
+        local_storage = origin.get("localStorage", [])
+        if isinstance(local_storage, list):
+            local_storage_entry_count += len(local_storage)
+        indexed_db = origin.get("indexedDB", [])
+        if isinstance(indexed_db, list) and indexed_db:
+            indexed_db_origin_count += 1
+            indexed_db_database_count += len(indexed_db)
     return {
         "cookie_count": len(cookies),
         "origin_count": len(origins),
+        "local_storage_entry_count": local_storage_entry_count,
+        "indexed_db_origin_count": indexed_db_origin_count,
+        "indexed_db_database_count": indexed_db_database_count,
         "raw_storage_state_exposed": False,
     }
 
