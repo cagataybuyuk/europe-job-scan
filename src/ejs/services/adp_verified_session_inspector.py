@@ -11,7 +11,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from ejs.services.adp_live_inspector import validate_adp_live_url, visible_application_controls
 from ejs.services.adp_verified_session_bootstrap import (
@@ -48,6 +48,7 @@ class AdpVerifiedSessionInspectorRequest:
     timeout_ms: int = 20_000
     render_wait_ms: int = 10_000
     session_storage_json_path: str = ""
+    direct_reuse_url_path: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionInspectorRequest) -> None:
@@ -238,9 +239,72 @@ def _postlogin_url(application_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, REVIEWED_POSTLOGIN_PATH, parsed.query, ""))
 
 
-def _probe_authenticated_postlogin(page, application_url: str, budget_ms: int) -> dict:
+def _query_values(query: str) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for key, values in parse_qs(query, keep_blank_values=True).items():
+        result.setdefault(key.casefold(), []).extend(values)
+    return result
+
+
+def _load_direct_reuse_url(path: str, application_url: str) -> tuple[str, dict]:
+    if not path:
+        return _postlogin_url(application_url), {
+            "direct_reuse_url_loaded": False,
+            "direct_reuse_url_source": "derived",
+            "direct_reuse_url_target_bound": True,
+            "raw_direct_reuse_url_exposed": False,
+        }
+
+    raw = Path(path).read_text(encoding="utf-8").strip()
+    if not raw or len(raw.encode("utf-8")) > 8_192:
+        raise ValueError("ADP_VERIFIED_SESSION_DIRECT_REUSE_URL_INVALID")
+    validate_adp_live_url(raw)
+    actual = urlsplit(raw)
+    expected = urlsplit(application_url)
+    if (
+        actual.scheme != "https"
+        or actual.netloc != expected.netloc
+        or actual.path != REVIEWED_POSTLOGIN_PATH
+        or actual.fragment
+        or actual.username is not None
+        or actual.password is not None
+    ):
+        raise ValueError("ADP_VERIFIED_SESSION_DIRECT_REUSE_URL_TARGET_MISMATCH")
+
+    actual_query = _query_values(actual.query)
+    expected_query = _query_values(expected.query)
+    for key in ("cid", "ccid", "jobid"):
+        target_values = expected_query.get(key, [])
+        actual_values = actual_query.get(key, [])
+        target_unique = {value for value in target_values if value}
+        actual_unique = {value for value in actual_values if value}
+        if not (
+            len(target_unique) == 1
+            and len(actual_values) >= 1
+            and len(actual_unique) == 1
+            and actual_unique == target_unique
+            and all(bool(value) for value in actual_values)
+        ):
+            raise ValueError("ADP_VERIFIED_SESSION_DIRECT_REUSE_URL_TARGET_MISMATCH")
+
+    return raw, {
+        "direct_reuse_url_loaded": True,
+        "direct_reuse_url_source": "captured_post_verification",
+        "direct_reuse_url_target_bound": True,
+        "raw_direct_reuse_url_exposed": False,
+    }
+
+
+def _probe_authenticated_postlogin(
+    page,
+    application_url: str,
+    budget_ms: int,
+    *,
+    direct_reuse_url: str | None = None,
+) -> dict:
     """Prove auth reuse without clicking through an unrelated consent surface."""
-    page.goto(_postlogin_url(application_url), wait_until="domcontentloaded", timeout=max(1_000, budget_ms))
+    target_url = direct_reuse_url or _postlogin_url(application_url)
+    page.goto(target_url, wait_until="domcontentloaded", timeout=max(1_000, budget_ms))
     elapsed = 0
     stable_ms = 0
     last_key = None
@@ -340,6 +404,10 @@ def run_inspector(
     validate_request(request)
     storage_evidence = validate_storage_state(request.storage_state_json_path)
     session_storage, session_storage_evidence = _load_session_storage(request.session_storage_json_path)
+    direct_reuse_url, direct_reuse_url_evidence = _load_direct_reuse_url(
+        request.direct_reuse_url_path,
+        request.application_url,
+    )
     base = {
         "inspector_version": INSPECTOR_VERSION,
         "verified_session_inspector_only": True,
@@ -349,6 +417,7 @@ def run_inspector(
         "storage_state_loaded": True,
         "storage_evidence": storage_evidence,
         "session_storage_evidence": session_storage_evidence,
+        "direct_reuse_url_evidence": direct_reuse_url_evidence,
         "navigation_click_attempts": 0,
         "navigation_click_successes": 0,
         "form_value_write_attempts": 0,
@@ -396,6 +465,7 @@ def run_inspector(
                 page,
                 request.application_url,
                 request.render_wait_ms,
+                direct_reuse_url=direct_reuse_url,
             )
             base["direct_postlogin_probe"] = direct_reuse
             if direct_reuse["authenticated_postlogin_reused"]:
@@ -524,6 +594,7 @@ def main() -> int:
     parser.add_argument("--entry-ordinal", type=int, required=True)
     parser.add_argument("--storage-state-json", required=True, dest="storage_state_json_path")
     parser.add_argument("--session-storage-json", default="", dest="session_storage_json_path")
+    parser.add_argument("--direct-reuse-url-file", default="", dest="direct_reuse_url_path")
     parser.add_argument("--output", default="adp-verified-session-inspector.json")
     parser.add_argument("--playwright-managed", action="store_true",
                         help="Use installed Playwright Chromium (including on Windows)")
@@ -534,6 +605,7 @@ def main() -> int:
         entry_ordinal=args.entry_ordinal,
         storage_state_json_path=args.storage_state_json_path,
         session_storage_json_path=args.session_storage_json_path,
+        direct_reuse_url_path=args.direct_reuse_url_path,
     ), config=BrowserRuntimeConfig(use_playwright_managed=True) if args.playwright_managed else None)
     Path(args.output).write_text(
         json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
@@ -549,6 +621,7 @@ def main() -> int:
         "submit_attempts": report.get("submit_attempts", 0),
         "storage_evidence": report.get("storage_evidence"),
         "session_storage_evidence": report.get("session_storage_evidence"),
+        "direct_reuse_url_evidence": report.get("direct_reuse_url_evidence"),
         "direct_postlogin_probe": report.get("direct_postlogin_probe"),
         "cookie_consent_boundary_present": report.get("cookie_consent_boundary_present"),
         "cookie_gate": report.get("cookie_gate"),
