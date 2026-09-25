@@ -557,6 +557,41 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         self.assertNotIn("960970", repr(evidence))
         self.assertNotIn("19000101_000001", repr(evidence))
 
+    def test_authenticated_form_diagnostics_normalizes_nested_step_label_whitespace(self):
+        correct = URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html")
+        page = MagicMock()
+        page.url = correct
+
+        labels = {
+            "Personal Information",
+            "Resume",
+            "Questions",
+            "Self-Attest & Submit",
+        }
+
+        def text_locator(label, **kwargs):
+            exact = kwargs.get("exact")
+            locator = MagicMock()
+            if label == "Review Your Application" and exact is True:
+                locator.count.return_value = 0
+                return locator
+            if label == "Review Your Application" and exact is False:
+                locator.count.return_value = 1
+                locator.nth.return_value.is_visible.return_value = True
+                locator.nth.return_value.inner_text.return_value = "Review   Your\nApplication"
+                return locator
+            locator.count.return_value = int(label in labels)
+            locator.nth.return_value.is_visible.return_value = label in labels
+            locator.nth.return_value.inner_text.return_value = label
+            return locator
+
+        page.get_by_text.side_effect = text_locator
+        evidence = _authenticated_form_diagnostics(page, URL)
+
+        self.assertTrue(evidence["review_application_visible"])
+        self.assertTrue(evidence["authenticated_application_steps_observed"])
+        self.assertTrue(evidence["authenticated_form_observed"])
+
     def test_authenticated_modal_without_sidebar_exports_as_candidate(self):
         steps = ("Personal Information", "Resume", "Questions", "Review Your Application", "Self-Attest & Submit")
         exports, report = self.run_timeline(
