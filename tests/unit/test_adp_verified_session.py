@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ejs.services.adp_verified_session_bootstrap import (
     AdpVerifiedSessionBootstrapRequest,
+    _authenticated_form_diagnostics,
     _capture_session_storage,
     _export_storage_state,
     _form_surface_signature,
@@ -487,6 +488,44 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         self.assertTrue(report["authenticated_form_observed"])
         self.assertEqual(report["verification_basis"], "authenticated_postlogin_form")
         self.assertFalse(report["session_reuse_proven"])
+
+    def test_authenticated_form_diagnostics_explain_modal_markers_without_values(self):
+        page = MagicMock()
+        page.url = URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html")
+        labels = {
+            "Personal Information",
+            "Resume",
+            "Questions",
+            "Review Your Application",
+            "Self-Attest & Submit",
+        }
+        def text_locator(label, **kwargs):
+            locator = MagicMock()
+            locator.count.return_value = int(label in labels)
+            locator.nth.return_value.is_visible.return_value = label in labels
+            return locator
+        page.get_by_text.side_effect = text_locator
+
+        evidence = _authenticated_form_diagnostics(page, URL)
+
+        self.assertTrue(evidence["reviewed_origin_valid"])
+        self.assertTrue(evidence["postlogin_path_match"])
+        self.assertTrue(evidence["cid_match"])
+        self.assertTrue(evidence["ccid_match"])
+        self.assertTrue(evidence["jobid_match"])
+        self.assertTrue(evidence["personal_information_visible"])
+        self.assertTrue(evidence["resume_visible"])
+        self.assertTrue(evidence["questions_visible"])
+        self.assertTrue(evidence["review_application_visible"])
+        self.assertTrue(evidence["self_attest_submit_visible"])
+        self.assertFalse(evidence["sign_out_visible"])
+        self.assertFalse(evidence["my_applications_visible"])
+        self.assertTrue(evidence["authenticated_application_steps_observed"])
+        self.assertTrue(evidence["authenticated_form_observed"])
+        self.assertTrue(evidence["observation_succeeded"])
+        self.assertFalse(evidence["raw_values_exposed"])
+        self.assertNotIn("960970", repr(evidence))
+        self.assertNotIn("19000101_000001", repr(evidence))
 
     def test_authenticated_modal_without_sidebar_exports_as_candidate(self):
         steps = ("Personal Information", "Resume", "Questions", "Review Your Application", "Self-Attest & Submit")
