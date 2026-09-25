@@ -12,6 +12,7 @@ on:
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
       - 'scripts/probe_adp_same_page_manifest.ps1'
+      - 'scripts/probe_adp_same_page_safe_fill.ps1'
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
@@ -31,6 +32,7 @@ on:
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
       - 'scripts/probe_adp_same_page_manifest.ps1'
+      - 'scripts/probe_adp_same_page_safe_fill.ps1'
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
@@ -69,6 +71,7 @@ jobs:
           persistent_helper = Path('scripts/probe_adp_persistent_profile.ps1').read_text(encoding='utf-8')
           live_handoff_helper = Path('scripts/probe_adp_live_handoff.ps1').read_text(encoding='utf-8')
           same_page_helper = Path('scripts/probe_adp_same_page_manifest.ps1').read_text(encoding='utf-8')
+          same_page_safe_fill_helper = Path('scripts/probe_adp_same_page_safe_fill.ps1').read_text(encoding='utf-8')
           assert 'headless=False' in bootstrap
           assert 'Do not paste the code into this terminal' in bootstrap
           assert 'storage_state(path=' in bootstrap
@@ -114,6 +117,14 @@ jobs:
           assert 'file_upload_attempts": 0' in same_page_safe_fill
           assert 'submit_attempts": 0' in same_page_safe_fill
           assert 'final_submit_allowed": False' in same_page_safe_fill
+          assert 'Invoke-GhSecretSetUtf8' not in same_page_safe_fill_helper
+          assert 'gh secret' not in same_page_safe_fill_helper
+          assert '--same-page-safe-fill-profile' in same_page_safe_fill_helper
+          assert '--same-page-safe-fill-expected-manifest-fingerprint' in same_page_safe_fill_helper
+          assert '--same-page-safe-fill-report-out' in same_page_safe_fill_helper
+          assert 'set_input_files' not in same_page_safe_fill_helper
+          assert '.click(' not in same_page_safe_fill_helper
+          assert 'select_option' not in same_page_safe_fill_helper
           assert 'EJS_FILE_UPLOAD: "false"' in workflow
           assert 'EJS_FINAL_SUBMIT: "false"' in workflow
           assert 'EJS_KILL_SWITCH: "true"' in workflow
