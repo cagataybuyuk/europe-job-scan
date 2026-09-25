@@ -19,6 +19,10 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from ejs.services.adp_live_inspector import validate_adp_live_url
 from ejs.services.adp_same_page_manifest import extract_same_page_manifest
+from ejs.services.adp_same_page_safe_fill import (
+    AdpSamePageSafeFillRequest,
+    run_on_verified_page as run_same_page_safe_fill,
+)
 
 BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v5"
 OTP_CONTROL_ID = "oneTimePassWord"
@@ -40,6 +44,9 @@ class AdpVerifiedSessionBootstrapRequest:
     user_data_dir: str = ""
     live_handoff_report_out: str = ""
     same_page_manifest_out: str = ""
+    same_page_safe_fill_profile_path: str = ""
+    same_page_safe_fill_expected_manifest_fingerprint: str = ""
+    same_page_safe_fill_report_out: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
@@ -50,6 +57,13 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
         raise ValueError("ADP_SESSION_BOOTSTRAP_REQUIRES_REPORT_OUT")
     if request.timeout_seconds < 60 or request.timeout_seconds > 1800:
         raise ValueError("INVALID_ADP_SESSION_BOOTSTRAP_TIMEOUT")
+    safe_fill_parts = (
+        bool(request.same_page_safe_fill_profile_path),
+        bool(request.same_page_safe_fill_expected_manifest_fingerprint),
+        bool(request.same_page_safe_fill_report_out),
+    )
+    if any(safe_fill_parts) and not all(safe_fill_parts):
+        raise ValueError("ADP_SAME_PAGE_SAFE_FILL_REQUIRES_COMPLETE_CONFIGURATION")
 
 
 def _open_reviewed_adp_target(page, application_url: str) -> dict:
@@ -607,6 +621,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
     postlogin_url_path = Path(request.postlogin_url_out) if request.postlogin_url_out else None
     live_handoff_report_path = Path(request.live_handoff_report_out) if request.live_handoff_report_out else None
     same_page_manifest_path = Path(request.same_page_manifest_out) if request.same_page_manifest_out else None
+    same_page_safe_fill_report_path = (
+        Path(request.same_page_safe_fill_report_out)
+        if request.same_page_safe_fill_report_out
+        else None
+    )
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     if session_storage_path is not None:
@@ -617,6 +636,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         live_handoff_report_path.parent.mkdir(parents=True, exist_ok=True)
     if same_page_manifest_path is not None:
         same_page_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_safe_fill_report_path is not None:
+        same_page_safe_fill_report_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
         browser = None
@@ -846,6 +867,45 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                 }
                             }, sort_keys=True))
 
+                        same_page_safe_fill = None
+                        if same_page_safe_fill_report_path is not None:
+                            same_page_safe_fill = run_same_page_safe_fill(
+                                page,
+                                AdpSamePageSafeFillRequest(
+                                    application_url=request.application_url,
+                                    expected_manifest_fingerprint=(
+                                        request.same_page_safe_fill_expected_manifest_fingerprint
+                                    ),
+                                    profile_json_path=request.same_page_safe_fill_profile_path,
+                                ),
+                            )
+                            same_page_safe_fill_report_path.write_text(
+                                json.dumps(
+                                    same_page_safe_fill,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_safe_fill": {
+                                    "executor_version": same_page_safe_fill.get("executor_version", ""),
+                                    "safe_fill_status": same_page_safe_fill.get("safe_fill_status", ""),
+                                    "form_value_write_attempts": same_page_safe_fill.get("form_value_write_attempts", 0),
+                                    "form_value_write_successes": same_page_safe_fill.get("form_value_write_successes", 0),
+                                    "email_readback_match": (
+                                        same_page_safe_fill.get("email_readback_only", {}).get("readback_match") is True
+                                    ),
+                                    "phone_write_attempts": same_page_safe_fill.get("phone_write_attempts", 0),
+                                    "address_write_attempts": same_page_safe_fill.get("address_write_attempts", 0),
+                                    "next_click_attempts": same_page_safe_fill.get("next_click_attempts", 0),
+                                    "file_upload_attempts": same_page_safe_fill.get("file_upload_attempts", 0),
+                                    "submit_attempts": same_page_safe_fill.get("submit_attempts", 0),
+                                    "raw_values_exposed": False,
+                                }
+                            }, sort_keys=True))
+
                         live_handoff = None
                         if live_handoff_report_path is not None:
                             live_handoff = _live_handoff_probe(
@@ -900,6 +960,17 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                 if isinstance(same_page_manifest, dict)
                                 else 0
                             ),
+                            "same_page_safe_fill_executed": isinstance(same_page_safe_fill, dict),
+                            "same_page_safe_fill_write_attempts": (
+                                int(same_page_safe_fill.get("form_value_write_attempts", 0))
+                                if isinstance(same_page_safe_fill, dict)
+                                else 0
+                            ),
+                            "same_page_safe_fill_write_successes": (
+                                int(same_page_safe_fill.get("form_value_write_successes", 0))
+                                if isinstance(same_page_safe_fill, dict)
+                                else 0
+                            ),
                             "live_handoff_reuse_proven": (
                                 live_handoff.get("live_handoff_reuse_proven") is True
                                 if isinstance(live_handoff, dict)
@@ -949,6 +1020,9 @@ def main() -> int:
     parser.add_argument("--user-data-dir", default="")
     parser.add_argument("--live-handoff-report-out", default="")
     parser.add_argument("--same-page-manifest-out", default="")
+    parser.add_argument("--same-page-safe-fill-profile", default="")
+    parser.add_argument("--same-page-safe-fill-expected-manifest-fingerprint", default="")
+    parser.add_argument("--same-page-safe-fill-report-out", default="")
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
@@ -960,6 +1034,11 @@ def main() -> int:
         user_data_dir=args.user_data_dir,
         live_handoff_report_out=args.live_handoff_report_out,
         same_page_manifest_out=args.same_page_manifest_out,
+        same_page_safe_fill_profile_path=args.same_page_safe_fill_profile,
+        same_page_safe_fill_expected_manifest_fingerprint=(
+            args.same_page_safe_fill_expected_manifest_fingerprint
+        ),
+        same_page_safe_fill_report_out=args.same_page_safe_fill_report_out,
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
@@ -974,6 +1053,9 @@ def main() -> int:
         "same_page_manifest_fingerprint": report.get("same_page_manifest_fingerprint", ""),
         "same_page_manifest_visible_control_count": report.get("same_page_manifest_visible_control_count", 0),
         "same_page_manifest_file_control_count": report.get("same_page_manifest_file_control_count", 0),
+        "same_page_safe_fill_executed": report.get("same_page_safe_fill_executed") is True,
+        "same_page_safe_fill_write_attempts": report.get("same_page_safe_fill_write_attempts", 0),
+        "same_page_safe_fill_write_successes": report.get("same_page_safe_fill_write_successes", 0),
         "live_handoff_reuse_proven": report.get("live_handoff_reuse_proven") is True,
         "live_handoff_strongest_reusable_scope": report.get("live_handoff_strongest_reusable_scope", ""),
         "storage_indexed_db_database_count": report.get("storage_indexed_db_database_count", 0),
