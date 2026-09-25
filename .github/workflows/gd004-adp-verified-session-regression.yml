@@ -5,7 +5,9 @@ on:
     paths:
       - 'src/ejs/services/adp_verified_session_bootstrap.py'
       - 'src/ejs/services/adp_verified_session_inspector.py'
+      - 'src/ejs/services/adp_persistent_profile_probe.py'
       - 'scripts/bootstrap_adp_verified_session.ps1'
+      - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
@@ -16,7 +18,9 @@ on:
     paths:
       - 'src/ejs/services/adp_verified_session_bootstrap.py'
       - 'src/ejs/services/adp_verified_session_inspector.py'
+      - 'src/ejs/services/adp_persistent_profile_probe.py'
       - 'scripts/bootstrap_adp_verified_session.ps1'
+      - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
@@ -42,8 +46,10 @@ jobs:
           from pathlib import Path
           bootstrap = Path('src/ejs/services/adp_verified_session_bootstrap.py').read_text(encoding='utf-8')
           inspector = Path('src/ejs/services/adp_verified_session_inspector.py').read_text(encoding='utf-8')
+          persistent_probe = Path('src/ejs/services/adp_persistent_profile_probe.py').read_text(encoding='utf-8')
           workflow = Path('.github/workflows/gd004-adp-verified-session-inspector.yml').read_text(encoding='utf-8')
           helper = Path('scripts/bootstrap_adp_verified_session.ps1').read_text(encoding='utf-8')
+          persistent_helper = Path('scripts/probe_adp_persistent_profile.ps1').read_text(encoding='utf-8')
           assert 'headless=False' in bootstrap
           assert 'Do not paste the code into this terminal' in bootstrap
           assert 'storage_state(path=' in bootstrap
@@ -57,6 +63,15 @@ jobs:
           assert '.fill(' not in inspector
           assert '.select_option(' not in inspector
           assert inspector.count('.click(') == 1, inspector.count('.click(')
+          assert '.click(' not in persistent_probe
+          assert '.fill(' not in persistent_probe
+          assert '.select_option(' not in persistent_probe
+          assert 'form_value_write_attempts": 0' in persistent_probe
+          assert 'credential_entry_attempts": 0' in persistent_probe
+          assert 'file_upload_attempts": 0' in persistent_probe
+          assert 'submit_attempts": 0' in persistent_probe
+          assert 'Invoke-GhSecretSetUtf8' not in persistent_helper
+          assert 'gh secret' not in persistent_helper
           assert 'EJS_FILE_UPLOAD: "false"' in workflow
           assert 'EJS_FINAL_SUBMIT: "false"' in workflow
           assert 'EJS_KILL_SWITCH: "true"' in workflow
