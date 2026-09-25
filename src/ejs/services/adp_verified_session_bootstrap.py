@@ -37,6 +37,7 @@ class AdpVerifiedSessionBootstrapRequest:
     session_storage_out: str = ""
     postlogin_url_out: str = ""
     user_data_dir: str = ""
+    live_handoff_report_out: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
@@ -372,6 +373,113 @@ def _export_storage_state(context, path: Path) -> dict:
     }
 
 
+def _live_handoff_probe(
+    playwright,
+    application_url: str,
+    storage_state_path: Path,
+    session_storage: dict[str, str],
+    canonical_postlogin_url: str,
+    *,
+    budget_ms: int = 10_000,
+) -> dict:
+    """Probe a second fresh browser while the verified source browser stays open."""
+    parsed = urlsplit(application_url)
+    hostname = parsed.hostname or ""
+    init_script = (
+        "(() => {"
+        f"if (window.location.hostname !== {json.dumps(hostname, ensure_ascii=False)}) return;"
+        f"const restored = {json.dumps(session_storage, ensure_ascii=False, sort_keys=True)};"
+        "for (const [key, value] of Object.entries(restored)) "
+        "window.sessionStorage.setItem(key, value);"
+        "})();"
+    )
+    browser = playwright.chromium.launch(headless=False)
+    context = browser.new_context(
+        accept_downloads=False,
+        storage_state=str(storage_state_path),
+    )
+    try:
+        if session_storage:
+            context.add_init_script(script=init_script)
+        page = context.new_page()
+        page.set_default_timeout(max(1_000, budget_ms))
+        page.set_default_navigation_timeout(max(1_000, budget_ms))
+        page.goto(
+            canonical_postlogin_url,
+            wait_until="domcontentloaded",
+            timeout=max(1_000, budget_ms),
+        )
+
+        elapsed = 0
+        stable_ms = 0
+        last_key = None
+        while elapsed <= budget_ms:
+            try:
+                stage = bootstrap_stage(page)
+                authenticated = _authenticated_form_evidence(page, application_url)
+                report = _sanitized_post_verification_report(page, verification_seen=False)
+                signature = _form_surface_signature(report)
+            except Exception:
+                stage = {
+                    "verification_code_visible": False,
+                    "identity_surface_visible": False,
+                }
+                authenticated = {"authenticated_form_observed": False}
+                signature = ()
+
+            valid = (
+                authenticated.get("authenticated_form_observed") is True
+                and stage.get("verification_code_visible") is not True
+                and stage.get("identity_surface_visible") is not True
+                and bool(signature)
+            )
+            key = (str(page.url), signature)
+            if valid:
+                if key == last_key:
+                    stable_ms += 250
+                else:
+                    stable_ms = 0
+                    last_key = key
+                if stable_ms >= 1_000:
+                    return {
+                        "live_handoff_reuse_proven": True,
+                        "visible_form_control_count": len(signature),
+                        "session_storage_entry_count": len(session_storage),
+                        "final_reviewed_origin": (urlsplit(str(page.url)).hostname or "") == hostname,
+                        "navigation_click_attempts": 0,
+                        "form_value_write_attempts": 0,
+                        "credential_entry_attempts": 0,
+                        "file_upload_attempts": 0,
+                        "submit_attempts": 0,
+                        "raw_values_exposed": False,
+                    }
+            else:
+                stable_ms = 0
+                last_key = None
+
+            if elapsed >= budget_ms:
+                break
+            interval = min(250, budget_ms - elapsed)
+            page.wait_for_timeout(interval)
+            elapsed += interval
+
+        return {
+            "live_handoff_reuse_proven": False,
+            "visible_form_control_count": 0,
+            "session_storage_entry_count": len(session_storage),
+            "final_reviewed_origin": (urlsplit(str(page.url)).hostname or "") == hostname,
+            "navigation_click_attempts": 0,
+            "form_value_write_attempts": 0,
+            "credential_entry_attempts": 0,
+            "file_upload_attempts": 0,
+            "submit_attempts": 0,
+            "raw_values_exposed": False,
+        }
+    finally:
+        context.close()
+        browser.close()
+
+
 def _form_surface_signature(report: dict) -> tuple:
     """A readiness signal, not a reviewed application manifest or write grant."""
     controls = report["visible_controls"]
@@ -402,12 +510,15 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
     report_path = Path(request.report_out)
     session_storage_path = Path(request.session_storage_out) if request.session_storage_out else None
     postlogin_url_path = Path(request.postlogin_url_out) if request.postlogin_url_out else None
+    live_handoff_report_path = Path(request.live_handoff_report_out) if request.live_handoff_report_out else None
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     if session_storage_path is not None:
         session_storage_path.parent.mkdir(parents=True, exist_ok=True)
     if postlogin_url_path is not None:
         postlogin_url_path.parent.mkdir(parents=True, exist_ok=True)
+    if live_handoff_report_path is not None:
+        live_handoff_report_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
         browser = None
@@ -604,6 +715,30 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                             canonical_url_exported = True
 
                         storage_evidence = _export_storage_state(context, storage_path)
+
+                        live_handoff = None
+                        if live_handoff_report_path is not None:
+                            live_handoff = _live_handoff_probe(
+                                p,
+                                request.application_url,
+                                storage_path,
+                                session_storage,
+                                str(page.url),
+                            )
+                            live_handoff_report_path.write_text(
+                                json.dumps(
+                                    live_handoff,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps(
+                                {"live_handoff_probe": live_handoff},
+                                sort_keys=True,
+                            ))
+
                         report.update({
                             "verification_seen": verification_seen,
                             "verification_completed": verification_seen,
@@ -617,6 +752,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                             "session_storage_exported": session_storage_path is not None,
                             **session_storage_evidence,
                             "session_reuse_proven": False,
+                            "live_handoff_reuse_proven": (
+                                live_handoff.get("live_handoff_reuse_proven") is True
+                                if isinstance(live_handoff, dict)
+                                else False
+                            ),
                         })
                         report_path.write_text(
                             json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
@@ -654,6 +794,7 @@ def main() -> int:
     parser.add_argument("--session-storage-out", default="")
     parser.add_argument("--postlogin-url-out", default="")
     parser.add_argument("--user-data-dir", default="")
+    parser.add_argument("--live-handoff-report-out", default="")
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
@@ -663,6 +804,7 @@ def main() -> int:
         session_storage_out=args.session_storage_out,
         postlogin_url_out=args.postlogin_url_out,
         user_data_dir=args.user_data_dir,
+        live_handoff_report_out=args.live_handoff_report_out,
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
@@ -673,6 +815,7 @@ def main() -> int:
         "visible_control_count": report.get("visible_control_count", 0),
         "storage_state_exported": report.get("storage_state_exported") is True,
         "canonical_postlogin_url_exported": report.get("canonical_postlogin_url_exported") is True,
+        "live_handoff_reuse_proven": report.get("live_handoff_reuse_proven") is True,
         "storage_indexed_db_database_count": report.get("storage_indexed_db_database_count", 0),
         "storage_indexed_db_origin_count": report.get("storage_indexed_db_origin_count", 0),
         "onetrust_consent_cookie_present": report.get("onetrust_consent_cookie_present") is True,
