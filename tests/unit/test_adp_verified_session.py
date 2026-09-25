@@ -53,7 +53,10 @@ class AdpVerifiedSessionTests(unittest.TestCase):
     def test_indexed_db_storage_export_is_sanitized_and_required(self):
         context = MagicMock()
         state = {
-            "cookies": [{"name": "OptanonConsent", "value": "secret", "domain": ".adp.com", "path": "/"}],
+            "cookies": [
+                {"name": "OptanonConsent", "value": "secret", "domain": ".adp.com", "path": "/"},
+                {"name": "OptanonAlertBoxClosed", "value": "secret-closed", "domain": ".adp.com", "path": "/"},
+            ],
             "origins": [{
                 "origin": "https://workforcenow.adp.com",
                 "localStorage": [{"name": "k", "value": "secret-local"}],
@@ -66,16 +69,24 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         context.storage_state.assert_called_once()
         args, kwargs = context.storage_state.call_args
         self.assertTrue(kwargs["indexed_db"])
-        self.assertEqual(evidence["storage_cookie_count"], 1)
+        self.assertEqual(evidence["storage_cookie_count"], 2)
         self.assertEqual(evidence["storage_local_storage_entry_count"], 1)
         self.assertEqual(evidence["storage_indexed_db_origin_count"], 1)
         self.assertEqual(evidence["storage_indexed_db_database_count"], 1)
+        self.assertTrue(evidence["onetrust_consent_cookie_present"])
+        self.assertTrue(evidence["onetrust_alert_closed_cookie_present"])
+        self.assertEqual(evidence["onetrust_consent_cookie_root_path_count"], 1)
+        self.assertEqual(evidence["onetrust_alert_closed_cookie_root_path_count"], 1)
+        self.assertFalse(evidence["cookie_values_exposed"])
         self.assertFalse(evidence["storage_raw_values_exposed"])
         self.assertNotIn("secret", repr(evidence))
 
     def test_validate_storage_state_reports_indexed_db_counts_without_values(self):
         state = {
-            "cookies": [{"name": "OptanonConsent", "value": "secret", "domain": ".adp.com", "path": "/"}],
+            "cookies": [
+                {"name": "OptanonConsent", "value": "secret", "domain": ".adp.com", "path": "/"},
+                {"name": "OptanonAlertBoxClosed", "value": "secret-closed", "domain": ".adp.com", "path": "/"},
+            ],
             "origins": [{
                 "origin": "https://workforcenow.adp.com",
                 "localStorage": [{"name": "k", "value": "secret-local"}],
@@ -86,10 +97,13 @@ class AdpVerifiedSessionTests(unittest.TestCase):
             path = Path(tmp) / "state.json"
             path.write_text(json.dumps(state), encoding="utf-8")
             evidence = validate_storage_state(str(path))
-        self.assertEqual(evidence["cookie_count"], 1)
+        self.assertEqual(evidence["cookie_count"], 2)
         self.assertEqual(evidence["local_storage_entry_count"], 1)
         self.assertEqual(evidence["indexed_db_origin_count"], 1)
         self.assertEqual(evidence["indexed_db_database_count"], 1)
+        self.assertTrue(evidence["onetrust_consent_cookie_present"])
+        self.assertTrue(evidence["onetrust_alert_closed_cookie_present"])
+        self.assertFalse(evidence["cookie_values_exposed"])
         self.assertFalse(evidence["raw_storage_state_exposed"])
         self.assertNotIn("secret", repr(evidence))
 
