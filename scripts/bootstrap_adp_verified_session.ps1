@@ -48,11 +48,11 @@ $tempRoot = [IO.Path]::GetTempPath()
 $statePath = Join-Path $tempRoot ("ejs-adp-storage-$token.json")
 $reportPath = Join-Path $tempRoot ("ejs-adp-bootstrap-report-$token.json")
 $reuseReportPath = Join-Path $tempRoot ("ejs-adp-reuse-report-$token.json")
-$postLoginUrlPath = Join-Path $tempRoot ("ejs-adp-postlogin-$token.txt")
 
 try {
   $sessionStoragePath = "$statePath.session-storage.json"
   $sessionReuseReportPath = "$reuseReportPath.session-storage.json"
+  $postLoginUrlPath = "$statePath.postlogin-url.txt"
   $python = Resolve-EjsPython3
   $pythonPrefixArgs = @($python.PrefixArgs)
   Write-Host "Using Python launcher: $($python.DisplayName)"
