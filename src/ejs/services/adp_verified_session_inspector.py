@@ -11,9 +11,16 @@ import argparse
 import json
 from pathlib import Path
 import sys
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
-from ejs.services.adp_cookie_preferences_canary import preference_surface_descriptor
 from ejs.services.adp_live_inspector import validate_adp_live_url, visible_application_controls
+from ejs.services.adp_verified_session_bootstrap import (
+    REVIEWED_POSTLOGIN_PATH,
+    _authenticated_form_evidence,
+    _form_surface_signature,
+    _sanitized_post_verification_report,
+    bootstrap_stage,
+)
 from ejs.services.adp_navigation_canary import (
     FINGERPRINT_RE,
     _approved_entry,
@@ -25,8 +32,11 @@ from ejs.services.adp_continue_diagnostic_canary import VERIFICATION_CODE_CONTRO
 from ejs.services.adp_continue_canary import action_surface_descriptor
 from ejs.services.browser_worker import BrowserRuntimeConfig
 
-INSPECTOR_VERSION = "adp-verified-session-inspector-v1"
+INSPECTOR_VERSION = "adp-verified-session-inspector-v3"
 IDENTITY_CONTROL_IDS = {"guestFirstName", "guestLastName", "guestEmail"}
+COOKIE_POLL_MS = 250
+COOKIE_CLEAR_STABLE_MS = 1_000
+DIRECT_REUSE_STABLE_MS = 1_000
 
 
 @dataclass(frozen=True)
@@ -37,6 +47,8 @@ class AdpVerifiedSessionInspectorRequest:
     storage_state_json_path: str
     timeout_ms: int = 20_000
     render_wait_ms: int = 10_000
+    session_storage_json_path: str = ""
+    direct_reuse_url_path: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionInspectorRequest) -> None:
@@ -49,6 +61,103 @@ def validate_request(request: AdpVerifiedSessionInspectorRequest) -> None:
         raise ValueError("ADP_VERIFIED_SESSION_STORAGE_STATE_REQUIRED")
     if request.timeout_ms < 1_000 or request.timeout_ms > 60_000:
         raise ValueError("INVALID_INSPECTOR_TIMEOUT")
+    if request.render_wait_ms < 1_000 or request.render_wait_ms > 15_000:
+        raise ValueError("INVALID_INSPECTOR_RENDER_WAIT")
+
+
+def _cookie_visibility(page) -> dict:
+    """Observe exact reviewed OneTrust containers; no labels or cookie values."""
+    try:
+        visible = {}
+        for key, selector in (
+            ("banner_visible", "#onetrust-banner-sdk"),
+            ("preference_center_visible", "#onetrust-pc-sdk"),
+        ):
+            locator = page.locator(selector)
+            visible[key] = any(locator.nth(i).is_visible() for i in range(locator.count()))
+        return {"observation_succeeded": True, **visible}
+    except Exception:
+        return {
+            "observation_succeeded": False,
+            "banner_visible": None,
+            "preference_center_visible": None,
+        }
+
+
+def _cookie_surface_clear(surface: dict) -> bool:
+    return (
+        surface.get("observation_succeeded") is True
+        and surface.get("banner_visible") is False
+        and surface.get("preference_center_visible") is False
+    )
+
+
+def _observe_cookie_settling(page, budget_ms: int) -> dict:
+    # Observe the entire bounded window, even if absent initially: OneTrust may
+    # be injected later, or briefly render before restored consent is applied.
+    initial = _cookie_visibility(page)
+    current = initial
+    elapsed = 0
+    clear_ms = 0
+    failures = int(not initial["observation_succeeded"])
+    visible_seen = initial["banner_visible"] is True or initial["preference_center_visible"] is True
+    while elapsed < budget_ms:
+        interval = min(COOKIE_POLL_MS, budget_ms - elapsed)
+        page.wait_for_timeout(interval)
+        following = _cookie_visibility(page)
+        if _cookie_surface_clear(current) and _cookie_surface_clear(following):
+            clear_ms += interval
+        else:
+            clear_ms = 0
+        elapsed += interval
+        failures += int(not following["observation_succeeded"])
+        visible_seen = visible_seen or following["banner_visible"] is True or following["preference_center_visible"] is True
+        current = following
+    return {
+        "initial": initial,
+        "final": current,
+        "observation_window_ms": elapsed,
+        "clear_stable_ms": clear_ms,
+        "visible_during_observation": visible_seen,
+        "observation_error_count": failures,
+        "surface_clear": _cookie_surface_clear(current) and clear_ms >= COOKIE_CLEAR_STABLE_MS,
+        "cookie_click_attempts": 0,
+        "raw_values_exposed": False,
+    }
+
+
+def _sanitized_cookie_metadata(cookies: list[dict]) -> dict:
+    consent = []
+    alert_closed = []
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name", ""))
+        if name == "OptanonConsent":
+            consent.append(cookie)
+        elif name == "OptanonAlertBoxClosed":
+            alert_closed.append(cookie)
+
+    def scopes(items: list[dict]) -> dict:
+        return {
+            "count": len(items),
+            "domain_count": len({str(item.get("domain", "")) for item in items}),
+            "root_path_count": sum(1 for item in items if str(item.get("path", "")) == "/"),
+        }
+
+    consent_scope = scopes(consent)
+    alert_scope = scopes(alert_closed)
+    return {
+        "onetrust_consent_cookie_present": bool(consent),
+        "onetrust_consent_cookie_count": consent_scope["count"],
+        "onetrust_consent_cookie_domain_count": consent_scope["domain_count"],
+        "onetrust_consent_cookie_root_path_count": consent_scope["root_path_count"],
+        "onetrust_alert_closed_cookie_present": bool(alert_closed),
+        "onetrust_alert_closed_cookie_count": alert_scope["count"],
+        "onetrust_alert_closed_cookie_domain_count": alert_scope["domain_count"],
+        "onetrust_alert_closed_cookie_root_path_count": alert_scope["root_path_count"],
+        "cookie_values_exposed": False,
+    }
 
 
 def validate_storage_state(path: str) -> dict:
@@ -59,10 +168,200 @@ def validate_storage_state(path: str) -> dict:
     origins = raw.get("origins")
     if not isinstance(cookies, list) or not isinstance(origins, list):
         raise ValueError("ADP_VERIFIED_SESSION_STORAGE_STATE_SHAPE_INVALID")
+    local_storage_entry_count = 0
+    indexed_db_origin_count = 0
+    indexed_db_database_count = 0
+    for origin in origins:
+        if not isinstance(origin, dict):
+            continue
+        local_storage = origin.get("localStorage", [])
+        if isinstance(local_storage, list):
+            local_storage_entry_count += len(local_storage)
+        indexed_db = origin.get("indexedDB", [])
+        if isinstance(indexed_db, list) and indexed_db:
+            indexed_db_origin_count += 1
+            indexed_db_database_count += len(indexed_db)
     return {
         "cookie_count": len(cookies),
         "origin_count": len(origins),
+        "local_storage_entry_count": local_storage_entry_count,
+        "indexed_db_origin_count": indexed_db_origin_count,
+        "indexed_db_database_count": indexed_db_database_count,
+        **_sanitized_cookie_metadata(cookies),
         "raw_storage_state_exposed": False,
+    }
+
+
+def _load_session_storage(path: str) -> tuple[dict[str, str], dict]:
+    if not path:
+        return {}, {
+            "session_storage_loaded": False,
+            "session_storage_entry_count": 0,
+            "session_storage_byte_count": 0,
+            "raw_session_storage_exposed": False,
+        }
+    payload = Path(path).read_text(encoding="utf-8")
+    byte_count = len(payload.encode("utf-8"))
+    if byte_count > 47_000:
+        raise ValueError("ADP_VERIFIED_SESSION_SESSION_STORAGE_TOO_LARGE")
+    raw = json.loads(payload)
+    if not isinstance(raw, dict) or len(raw) > 200:
+        raise ValueError("ADP_VERIFIED_SESSION_SESSION_STORAGE_INVALID")
+    normalized: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError("ADP_VERIFIED_SESSION_SESSION_STORAGE_INVALID")
+        normalized[key] = value
+    return normalized, {
+        "session_storage_loaded": True,
+        "session_storage_entry_count": len(normalized),
+        "session_storage_byte_count": byte_count,
+        "raw_session_storage_exposed": False,
+    }
+
+
+def _session_storage_init_script(application_url: str, storage: dict[str, str]) -> str:
+    hostname = urlsplit(application_url).hostname or ""
+    hostname_json = json.dumps(hostname, ensure_ascii=False)
+    storage_json = json.dumps(storage, ensure_ascii=False, sort_keys=True)
+    return (
+        "(() => {"
+        f"if (window.location.hostname !== {hostname_json}) return;"
+        f"const restored = {storage_json};"
+        "for (const [key, value] of Object.entries(restored)) "
+        "window.sessionStorage.setItem(key, value);"
+        "})();"
+    )
+
+
+def _postlogin_url(application_url: str) -> str:
+    parsed = urlsplit(application_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, REVIEWED_POSTLOGIN_PATH, parsed.query, ""))
+
+
+def _query_values(query: str) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for key, values in parse_qs(query, keep_blank_values=True).items():
+        result.setdefault(key.casefold(), []).extend(values)
+    return result
+
+
+def _load_direct_reuse_url(path: str, application_url: str) -> tuple[str, dict]:
+    if not path:
+        return _postlogin_url(application_url), {
+            "direct_reuse_url_loaded": False,
+            "direct_reuse_url_source": "derived",
+            "direct_reuse_url_target_bound": True,
+            "raw_direct_reuse_url_exposed": False,
+        }
+
+    raw = Path(path).read_text(encoding="utf-8").strip()
+    if not raw or len(raw.encode("utf-8")) > 8_192:
+        raise ValueError("ADP_VERIFIED_SESSION_DIRECT_REUSE_URL_INVALID")
+    validate_adp_live_url(raw)
+    actual = urlsplit(raw)
+    expected = urlsplit(application_url)
+    if (
+        actual.scheme != "https"
+        or actual.netloc != expected.netloc
+        or actual.path != REVIEWED_POSTLOGIN_PATH
+        or actual.fragment
+        or actual.username is not None
+        or actual.password is not None
+    ):
+        raise ValueError("ADP_VERIFIED_SESSION_DIRECT_REUSE_URL_TARGET_MISMATCH")
+
+    actual_query = _query_values(actual.query)
+    expected_query = _query_values(expected.query)
+    for key in ("cid", "ccid", "jobid"):
+        target_values = expected_query.get(key, [])
+        actual_values = actual_query.get(key, [])
+        target_unique = {value for value in target_values if value}
+        actual_unique = {value for value in actual_values if value}
+        if not (
+            len(target_unique) == 1
+            and len(actual_values) >= 1
+            and len(actual_unique) == 1
+            and actual_unique == target_unique
+            and all(bool(value) for value in actual_values)
+        ):
+            raise ValueError("ADP_VERIFIED_SESSION_DIRECT_REUSE_URL_TARGET_MISMATCH")
+
+    return raw, {
+        "direct_reuse_url_loaded": True,
+        "direct_reuse_url_source": "captured_post_verification",
+        "direct_reuse_url_target_bound": True,
+        "raw_direct_reuse_url_exposed": False,
+    }
+
+
+def _probe_authenticated_postlogin(
+    page,
+    application_url: str,
+    budget_ms: int,
+    *,
+    direct_reuse_url: str | None = None,
+) -> dict:
+    """Prove auth reuse without clicking through an unrelated consent surface."""
+    target_url = direct_reuse_url or _postlogin_url(application_url)
+    page.goto(target_url, wait_until="domcontentloaded", timeout=max(1_000, budget_ms))
+    elapsed = 0
+    stable_ms = 0
+    last_key = None
+    last_cookie_surface = _cookie_visibility(page)
+    while elapsed <= budget_ms:
+        try:
+            stage = bootstrap_stage(page)
+            authenticated = _authenticated_form_evidence(page, application_url)
+            report = _sanitized_post_verification_report(page, verification_seen=False)
+            signature = _form_surface_signature(report)
+            cookie_surface = _cookie_visibility(page)
+            last_cookie_surface = cookie_surface
+        except Exception:
+            stage = {"verification_code_visible": False, "identity_surface_visible": False}
+            authenticated = {"authenticated_form_observed": False}
+            signature = ()
+            cookie_surface = last_cookie_surface
+
+        valid = (
+            authenticated.get("authenticated_form_observed") is True
+            and stage.get("verification_code_visible") is not True
+            and stage.get("identity_surface_visible") is not True
+            and bool(signature)
+        )
+        key = (str(page.url), signature)
+        if valid:
+            if key == last_key:
+                stable_ms += 250
+            else:
+                stable_ms = 0
+                last_key = key
+            if stable_ms >= DIRECT_REUSE_STABLE_MS:
+                return {
+                    "authenticated_postlogin_reused": True,
+                    "visible_form_control_count": len(signature),
+                    "cookie_surface": cookie_surface,
+                    "cookie_consent_boundary_present": not _cookie_surface_clear(cookie_surface),
+                    "navigation_click_attempts": 0,
+                    "raw_values_exposed": False,
+                }
+        else:
+            stable_ms = 0
+            last_key = None
+
+        if elapsed >= budget_ms:
+            break
+        interval = min(250, budget_ms - elapsed)
+        page.wait_for_timeout(interval)
+        elapsed += interval
+
+    return {
+        "authenticated_postlogin_reused": False,
+        "visible_form_control_count": 0,
+        "cookie_surface": last_cookie_surface,
+        "cookie_consent_boundary_present": not _cookie_surface_clear(last_cookie_surface),
+        "navigation_click_attempts": 0,
+        "raw_values_exposed": False,
     }
 
 
@@ -104,6 +403,11 @@ def run_inspector(
 ) -> dict:
     validate_request(request)
     storage_evidence = validate_storage_state(request.storage_state_json_path)
+    session_storage, session_storage_evidence = _load_session_storage(request.session_storage_json_path)
+    direct_reuse_url, direct_reuse_url_evidence = _load_direct_reuse_url(
+        request.direct_reuse_url_path,
+        request.application_url,
+    )
     base = {
         "inspector_version": INSPECTOR_VERSION,
         "verified_session_inspector_only": True,
@@ -112,6 +416,8 @@ def run_inspector(
         "entry_ordinal": request.entry_ordinal,
         "storage_state_loaded": True,
         "storage_evidence": storage_evidence,
+        "session_storage_evidence": session_storage_evidence,
+        "direct_reuse_url_evidence": direct_reuse_url_evidence,
         "navigation_click_attempts": 0,
         "navigation_click_successes": 0,
         "form_value_write_attempts": 0,
@@ -147,13 +453,35 @@ def run_inspector(
                 ignore_https_errors=cfg.ignore_https_errors,
                 accept_downloads=False,
             )
+            if session_storage:
+                context.add_init_script(
+                    script=_session_storage_init_script(request.application_url, session_storage)
+                )
             page = context.new_page()
             page.set_default_timeout(request.timeout_ms)
             page.set_default_navigation_timeout(request.timeout_ms)
-            page.goto(request.application_url, wait_until="domcontentloaded", timeout=request.timeout_ms)
 
-            cookie_surface = preference_surface_descriptor(page)
-            if cookie_surface.get("banner_visible") is True or cookie_surface.get("preference_center_visible") is True:
+            direct_reuse = _probe_authenticated_postlogin(
+                page,
+                request.application_url,
+                request.render_wait_ms,
+                direct_reuse_url=direct_reuse_url,
+            )
+            base["direct_postlogin_probe"] = direct_reuse
+            if direct_reuse["authenticated_postlogin_reused"]:
+                return {
+                    **base,
+                    "inspector_status": "inspected",
+                    "error_code": "",
+                    "session_reused": True,
+                    "reuse_route": "authenticated_postlogin_direct",
+                    "cookie_consent_boundary_present": direct_reuse["cookie_consent_boundary_present"],
+                }
+
+            page.goto(request.application_url, wait_until="domcontentloaded", timeout=request.timeout_ms)
+            cookie_gate = _observe_cookie_settling(page, request.render_wait_ms)
+            base["cookie_gate"] = cookie_gate
+            if not cookie_gate["surface_clear"]:
                 return {
                     **base,
                     "inspector_status": "blocked",
@@ -166,6 +494,17 @@ def run_inspector(
                 timeout_ms=request.timeout_ms,
                 render_wait_ms=request.render_wait_ms,
             )
+            # Rendering can outlast the observation window. Recheck immediately
+            # before the reviewed navigation; never click through a late banner.
+            pre_apply_cookie_surface = _cookie_visibility(page)
+            cookie_gate["pre_apply"] = pre_apply_cookie_surface
+            if not _cookie_surface_clear(pre_apply_cookie_surface):
+                cookie_gate["surface_clear"] = False
+                return {
+                    **base,
+                    "inspector_status": "blocked",
+                    "error_code": "ADP_VERIFIED_SESSION_COOKIE_STATE_NOT_REUSED",
+                }
             if pre.get("captcha_observed") is True or pre.get("auth_observed") is True:
                 return {
                     **base,
@@ -206,6 +545,12 @@ def run_inspector(
                 timeout_ms=request.timeout_ms,
                 render_wait_ms=request.render_wait_ms,
             )
+            if post.get("captcha_observed") is True or post.get("auth_observed") is True:
+                return {
+                    **base,
+                    "inspector_status": "blocked",
+                    "error_code": "ADP_VERIFIED_SESSION_POST_APPLY_BOUNDARY_OBSERVED",
+                }
             surface = _surface_descriptor(page, post)
             if surface["verification_code_surface_present"]:
                 return {
@@ -248,14 +593,20 @@ def main() -> int:
     parser.add_argument("--expected-navigation-surface-fingerprint", required=True)
     parser.add_argument("--entry-ordinal", type=int, required=True)
     parser.add_argument("--storage-state-json", required=True, dest="storage_state_json_path")
+    parser.add_argument("--session-storage-json", default="", dest="session_storage_json_path")
+    parser.add_argument("--direct-reuse-url-file", default="", dest="direct_reuse_url_path")
     parser.add_argument("--output", default="adp-verified-session-inspector.json")
+    parser.add_argument("--playwright-managed", action="store_true",
+                        help="Use installed Playwright Chromium (including on Windows)")
     args = parser.parse_args()
     report = run_inspector(AdpVerifiedSessionInspectorRequest(
         application_url=args.application_url,
         expected_navigation_surface_fingerprint=args.expected_navigation_surface_fingerprint,
         entry_ordinal=args.entry_ordinal,
         storage_state_json_path=args.storage_state_json_path,
-    ))
+        session_storage_json_path=args.session_storage_json_path,
+        direct_reuse_url_path=args.direct_reuse_url_path,
+    ), config=BrowserRuntimeConfig(use_playwright_managed=True) if args.playwright_managed else None)
     Path(args.output).write_text(
         json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
@@ -268,6 +619,12 @@ def main() -> int:
         "credential_entry_attempts": report.get("credential_entry_attempts", 0),
         "file_upload_attempts": report.get("file_upload_attempts", 0),
         "submit_attempts": report.get("submit_attempts", 0),
+        "storage_evidence": report.get("storage_evidence"),
+        "session_storage_evidence": report.get("session_storage_evidence"),
+        "direct_reuse_url_evidence": report.get("direct_reuse_url_evidence"),
+        "direct_postlogin_probe": report.get("direct_postlogin_probe"),
+        "cookie_consent_boundary_present": report.get("cookie_consent_boundary_present"),
+        "cookie_gate": report.get("cookie_gate"),
     }, sort_keys=True))
     return 0 if report.get("inspector_status") == "inspected" else 2
 
