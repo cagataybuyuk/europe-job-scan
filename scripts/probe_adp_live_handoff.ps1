@@ -58,7 +58,7 @@ try {
   Write-Host 'Complete the application-entry and verification flow manually.'
   Write-Host 'Enter the email verification code only in the ADP browser, never in this terminal.'
   Write-Host 'When Personal Information opens, do not edit fields and do not click Next.'
-  Write-Host 'After capture, a second fresh browser will open while the verified source browser remains alive.'
+  Write-Host 'After capture, reuse will be tested across same-context, same-browser-process, and separate-browser scopes while the verified source remains alive.'
 
   & $python.Source @pythonPrefixArgs -m ejs.services.adp_verified_session_bootstrap --url $ApplicationUrl --storage-state-out $statePath --report-out $reportPath --session-storage-out $sessionStoragePath --postlogin-url-out $postLoginUrlPath --live-handoff-report-out $handoffReportPath --timeout-seconds $TimeoutSeconds
   if ($LASTEXITCODE -ne 0) {
@@ -71,11 +71,18 @@ try {
 
   $handoff = Get-Content -Raw -LiteralPath $handoffReportPath | ConvertFrom-Json
   if ($handoff.live_handoff_reuse_proven -eq $true) {
-    Write-Host 'ADP live handoff reuse was proven while the verified source browser remained open.'
+    $scope = [string]$handoff.strongest_reusable_scope
+    Write-Host "ADP reuse was proven at scope: $scope"
     Write-Host 'No GitHub secret was changed.'
-    Write-Host 'This isolates browser/context close as the likely session-invalidating boundary.'
+    if ($scope -eq 'same_context') {
+      Write-Host 'ADP state appears confined to the verified browser context; fresh contexts and browser processes are not yet reusable.'
+    } elseif ($scope -eq 'same_browser_process') {
+      Write-Host 'ADP state appears reusable within the same Chromium process but not yet across a separate browser process.'
+    } elseif ($scope -eq 'separate_browser_process') {
+      Write-Host 'ADP state is reusable across a separate live browser process while the source remains open.'
+    }
   } else {
-    throw 'ADP live handoff reuse was not proven while the verified source browser remained open. No GitHub secret was changed.'
+    throw 'ADP reuse was not proven at same-context, same-browser-process, or separate-browser scope while the verified source remained open. No GitHub secret was changed.'
   }
 } finally {
   foreach ($Path in @($statePath, $reportPath, $sessionStoragePath, $postLoginUrlPath, $handoffReportPath)) {
