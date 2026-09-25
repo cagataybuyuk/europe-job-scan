@@ -7,8 +7,11 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-if ($ExpectedManifestFingerprint -notmatch '^[0-9a-f]{64}
-
+if ([string]::IsNullOrWhiteSpace($ExpectedManifestFingerprint) -or
+    $ExpectedManifestFingerprint.Length -ne 64 -or
+    $ExpectedManifestFingerprint -match '[^0-9a-f]') {
+  throw 'ExpectedManifestFingerprint is required and must be exactly 64 lowercase hex characters.'
+}
 function Resolve-EjsPython3 {
   $Candidates = @(
     @{ Name = 'py'; PrefixArgs = @('-3') },
