@@ -7,6 +7,7 @@ on:
       - 'src/ejs/services/adp_verified_session_inspector.py'
       - 'src/ejs/services/adp_persistent_profile_probe.py'
       - 'src/ejs/services/adp_same_page_manifest.py'
+      - 'src/ejs/services/adp_same_page_safe_fill.py'
       - 'scripts/bootstrap_adp_verified_session.ps1'
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
@@ -15,6 +16,7 @@ on:
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
       - 'tests/unit/test_adp_same_page_manifest.py'
+      - 'tests/unit/test_adp_same_page_safe_fill.py'
       - 'tests/scripts/test_gd004_bootstrap.ps1'
       - '.github/workflows/gd004-adp-verified-session-regression.yml'
   push:
@@ -24,6 +26,7 @@ on:
       - 'src/ejs/services/adp_verified_session_inspector.py'
       - 'src/ejs/services/adp_persistent_profile_probe.py'
       - 'src/ejs/services/adp_same_page_manifest.py'
+      - 'src/ejs/services/adp_same_page_safe_fill.py'
       - 'scripts/bootstrap_adp_verified_session.ps1'
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
@@ -32,6 +35,7 @@ on:
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
       - 'tests/unit/test_adp_same_page_manifest.py'
+      - 'tests/unit/test_adp_same_page_safe_fill.py'
       - 'tests/scripts/test_gd004_bootstrap.ps1'
 
 permissions:
@@ -50,6 +54,7 @@ jobs:
         run: |
           python -m unittest discover -s tests/unit -p 'test_adp_verified_session.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_manifest.py' -v
+          python -m unittest discover -s tests/unit -p 'test_adp_same_page_safe_fill.py' -v
       - name: Assert bootstrap and inspector authority boundaries
         run: |
           python - <<'PY'
@@ -58,6 +63,7 @@ jobs:
           inspector = Path('src/ejs/services/adp_verified_session_inspector.py').read_text(encoding='utf-8')
           persistent_probe = Path('src/ejs/services/adp_persistent_profile_probe.py').read_text(encoding='utf-8')
           same_page_manifest = Path('src/ejs/services/adp_same_page_manifest.py').read_text(encoding='utf-8')
+          same_page_safe_fill = Path('src/ejs/services/adp_same_page_safe_fill.py').read_text(encoding='utf-8')
           workflow = Path('.github/workflows/gd004-adp-verified-session-inspector.yml').read_text(encoding='utf-8')
           helper = Path('scripts/bootstrap_adp_verified_session.ps1').read_text(encoding='utf-8')
           persistent_helper = Path('scripts/probe_adp_persistent_profile.ps1').read_text(encoding='utf-8')
@@ -98,6 +104,16 @@ jobs:
           assert 'Invoke-GhSecretSetUtf8' not in same_page_helper
           assert 'gh secret' not in same_page_helper
           assert '--same-page-manifest-out' in same_page_helper
+          assert '.click(' not in same_page_safe_fill
+          assert '.select_option(' not in same_page_safe_fill
+          assert 'set_input_files' not in same_page_safe_fill
+          assert 'next_click_attempts": 0' in same_page_safe_fill
+          assert 'phone_write_attempts": 0' in same_page_safe_fill
+          assert 'address_write_attempts": 0' in same_page_safe_fill
+          assert 'consent_action_attempts": 0' in same_page_safe_fill
+          assert 'file_upload_attempts": 0' in same_page_safe_fill
+          assert 'submit_attempts": 0' in same_page_safe_fill
+          assert 'final_submit_allowed": False' in same_page_safe_fill
           assert 'EJS_FILE_UPLOAD: "false"' in workflow
           assert 'EJS_FINAL_SUBMIT: "false"' in workflow
           assert 'EJS_KILL_SWITCH: "true"' in workflow
