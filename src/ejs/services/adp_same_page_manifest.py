@@ -13,7 +13,8 @@ from urllib.parse import parse_qs, urlsplit
 from ejs.services.adp_live_inspector import validate_adp_live_url, visible_application_controls
 from ejs.services.adp_navigation_canary import _snapshot
 
-MANIFEST_VERSION = "adp-same-page-manifest-v1"
+MANIFEST_VERSION = "adp-same-page-manifest-v2"
+FINGERPRINT_VERSION = "adp-same-page-surface-fingerprint-v2"
 REVIEWED_POSTLOGIN_PATH = "/mascsr/applicant/mdf/recruitment/postLogin.html"
 STEP_LABELS = (
     ("personal_information", "Personal Information"),
@@ -125,10 +126,64 @@ def _action_manifest(action: dict) -> dict:
 
 
 def manifest_surface_descriptor(manifest: dict) -> dict:
+    """Return only stable structural evidence for fingerprinting.
+
+    observation_key is intentionally excluded because it contains DOM ordinals
+    that may change between equivalent ADP renders.
+    """
+    controls = []
+    for item in manifest.get("controls", []):
+        if not isinstance(item, dict):
+            continue
+        controls.append({
+            "scope": str(item.get("scope", "")),
+            "tag": str(item.get("tag", "")),
+            "type": str(item.get("type", "")),
+            "id": str(item.get("id", "")),
+            "name": str(item.get("name", "")),
+            "label": _normalize(str(item.get("label", ""))),
+            "role": str(item.get("role", "")),
+            "required": item.get("required") is True,
+            "host_required_hint": item.get("host_required_hint") is True,
+            "disabled": item.get("disabled") is True,
+            "accept": str(item.get("accept", "")),
+            "multiple": item.get("multiple") is True,
+        })
+    controls.sort(key=lambda item: (
+        item["scope"],
+        item["id"],
+        item["name"],
+        item["label"],
+        item["type"],
+        item["tag"],
+        item["required"],
+        item["disabled"],
+        item["accept"],
+        item["multiple"],
+    ))
+
+    actions = []
+    for item in manifest.get("actions", []):
+        if not isinstance(item, dict):
+            continue
+        actions.append({
+            "scope": str(item.get("scope", "")),
+            "label": _normalize(str(item.get("label", ""))),
+            "type": str(item.get("type", "")),
+            "disabled": item.get("disabled") is True,
+        })
+    actions.sort(key=lambda item: (
+        item["scope"],
+        item["label"],
+        item["type"],
+        item["disabled"],
+    ))
+
     return {
+        "fingerprint_version": FINGERPRINT_VERSION,
         "steps": manifest.get("steps", {}),
-        "controls": manifest.get("controls", []),
-        "actions": manifest.get("actions", []),
+        "controls": controls,
+        "actions": actions,
     }
 
 
@@ -208,6 +263,7 @@ def extract_same_page_manifest(
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
+        "surface_fingerprint_version": FINGERPRINT_VERSION,
         "same_page_verified_surface": True,
         "target_binding": binding,
         "steps": steps,
