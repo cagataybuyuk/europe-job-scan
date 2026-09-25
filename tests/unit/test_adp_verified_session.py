@@ -23,6 +23,7 @@ from ejs.services import adp_verified_session_inspector as inspector
 from ejs.services.browser_worker import BrowserRuntimeConfig
 from ejs.services.adp_verified_session_inspector import (
     AdpVerifiedSessionInspectorRequest,
+    _load_direct_reuse_url,
     _load_session_storage,
     _postlogin_url,
     _probe_authenticated_postlogin,
@@ -193,6 +194,35 @@ class AdpVerifiedSessionTests(unittest.TestCase):
                     "--playwright-managed"]):
                 self.assertEqual(inspector.main(), 2)
             self.assertTrue(run.call_args.kwargs["config"].use_playwright_managed)
+
+    def test_captured_direct_reuse_url_is_exact_target_bound_and_value_free(self):
+        captured = (
+            "https://workforcenow.adp.com/mascsr/applicant/mdf/recruitment/postLogin.html"
+            "?cid=test&ccId=19000101_000001&jobId=960970"
+            "&jobId=960970&requisitionId=opaque_1&params=jobId&OTP_login=true"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "postlogin.txt"
+            path.write_text(captured + "\n", encoding="utf-8")
+            loaded, evidence = _load_direct_reuse_url(str(path), URL)
+        self.assertEqual(loaded, captured)
+        self.assertTrue(evidence["direct_reuse_url_loaded"])
+        self.assertEqual(evidence["direct_reuse_url_source"], "captured_post_verification")
+        self.assertTrue(evidence["direct_reuse_url_target_bound"])
+        self.assertFalse(evidence["raw_direct_reuse_url_exposed"])
+        self.assertNotIn("requisitionId", repr(evidence))
+        self.assertNotIn("opaque_1", repr(evidence))
+
+    def test_captured_direct_reuse_url_rejects_conflicting_duplicate_target(self):
+        captured = (
+            "https://workforcenow.adp.com/mascsr/applicant/mdf/recruitment/postLogin.html"
+            "?cid=test&ccId=19000101_000001&jobId=960970&jobId=1"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "postlogin.txt"
+            path.write_text(captured, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "TARGET_MISMATCH"):
+                _load_direct_reuse_url(str(path), URL)
 
     def test_direct_postlogin_probe_proves_authenticated_form_without_clicks(self):
         page = MagicMock()
