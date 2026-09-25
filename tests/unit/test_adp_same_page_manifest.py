@@ -125,6 +125,58 @@ class AdpSamePageManifestTests(unittest.TestCase):
         self.assertNotIn("SHOULD_NOT_LEAK", repr(result))
         self.assertEqual(result["surface_fingerprint"], manifest_surface_fingerprint(result))
 
+    def test_fingerprint_ignores_observation_key_but_detects_structural_drift(self):
+        base = {
+            "steps": {
+                "personal_information": True,
+                "resume": True,
+                "questions": True,
+                "review_application": True,
+                "self_attest_submit": True,
+            },
+            "controls": [
+                {
+                    "observation_key": "document/input@10",
+                    "scope": "document",
+                    "tag": "input",
+                    "type": "text",
+                    "id": "personalInfomationFirstName",
+                    "name": "firstName",
+                    "label": "First Name*",
+                    "role": "",
+                    "required": True,
+                    "host_required_hint": False,
+                    "disabled": False,
+                    "accept": "",
+                    "multiple": False,
+                }
+            ],
+            "actions": [
+                {
+                    "observation_key": "document/button@20",
+                    "scope": "document",
+                    "label": "Next",
+                    "type": "button",
+                    "disabled": False,
+                }
+            ],
+        }
+        ordinal_only = json.loads(json.dumps(base))
+        ordinal_only["controls"][0]["observation_key"] = "document/input@77"
+        ordinal_only["actions"][0]["observation_key"] = "document/button@88"
+
+        structural = json.loads(json.dumps(base))
+        structural["controls"][0]["required"] = False
+
+        self.assertEqual(
+            manifest_surface_fingerprint(base),
+            manifest_surface_fingerprint(ordinal_only),
+        )
+        self.assertNotEqual(
+            manifest_surface_fingerprint(base),
+            manifest_surface_fingerprint(structural),
+        )
+
     def test_conflicting_duplicate_jobid_is_rejected(self):
         page = self.page_with_steps()
         page.url = POSTLOGIN + "&jobId=1"
