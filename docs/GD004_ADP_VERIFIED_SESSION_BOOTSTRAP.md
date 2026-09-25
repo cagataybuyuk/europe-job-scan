@@ -2,6 +2,41 @@
 
 Status: bootstrap and inspector implemented; live session reuse not yet proven
 
+## 2026-09-25 resumption: authenticated form without an observed OTP
+
+The September 22 handover reached the signed-in `postLogin.html` job-detail /
+pending-submission page with a `Complete Your Application` entry. No subsequent
+local sessionStorage replay result was supplied. Bootstrap v3 still required the
+OTP control to be observed during that particular run, so arriving directly at an
+authenticated form could time out without exporting a candidate.
+
+Bootstrap v4 adds an alternative **candidate-capture** path. It requires all of:
+
+- exact ADP origin and `/mascsr/applicant/mdf/recruitment/postLogin.html` path;
+- exact single-valued `cid`, `ccId` and `jobId` matching the reviewed input URL;
+- visible `Sign Out` and `My Applications` navigation;
+- visible `Personal Information` text and a non-empty actionable form signature;
+- no visible OTP or guest-identity surface;
+- the same target and form structure remaining eligible for at least 10 seconds.
+
+The signed-in job-detail page alone never satisfies this path. The helper prints
+a navigation hint there; the user may open the already-observed `Complete Your
+Application` entry manually, leave all fields unchanged, and stop before Next or
+Submit. There are no added automated clicks, writes or verification-code actions.
+If the reviewed UI markers/target no longer match, this alternative remains closed.
+
+For this path, `verification_seen=false` and `verification_completed=false` are
+intentional: the script does not claim to have observed an OTP transition. It
+reports `verification_basis=authenticated_postlogin_form` and
+`authenticated_form_observed=true`. Ordinary and optional sessionStorage replay
+gates remain unchanged. Candidate capture does not establish fresh-browser reuse,
+does not authorize form mutations, and does not by itself permit a secret update.
+
+Next action: run the updated PR #60 branch locally and supply the console outcome
+of ordinary replay and, if triggered, the sessionStorage diagnostic replay. If ADP
+itself requests verification in the new browser, the user must complete it there;
+this change neither guarantees persistent login nor bypasses verification.
+
 ## 2026-09-22 early-export correction
 
 Run `35726250341` loaded 11 cookies and one origin, clicked the reviewed Apply

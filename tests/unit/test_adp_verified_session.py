@@ -259,11 +259,18 @@ class AdpVerifiedSessionTests(unittest.TestCase):
             with self.subTest(ms=ms), self.assertRaisesRegex(ValueError, "INVALID_INSPECTOR_RENDER_WAIT"):
                 validate_inspector_request(AdpVerifiedSessionInspectorRequest(URL, FP, 0, "state.json", render_wait_ms=ms))
 
-    def run_timeline(self, stages, reports, *, expected_error=None):
+    def run_timeline(self, stages, reports, *, expected_error=None, page_url=URL, visible_labels=()):
         """Drive the actual bootstrap loop with a deterministic browser clock."""
         clock = [0]
         page = MagicMock()
-        page.url = URL
+        page.url = page_url
+        def text_locator(label, **kwargs):
+            labels = visible_labels(clock[0]) if callable(visible_labels) else visible_labels
+            locator = MagicMock()
+            locator.count.return_value = int(label in labels)
+            locator.nth.return_value.is_visible.return_value = label in labels
+            return locator
+        page.get_by_text.side_effect = text_locator
         page.is_closed.return_value = False
         page.wait_for_timeout.side_effect = lambda ms: clock.__setitem__(0, clock[0] + ms / 1000)
         context = MagicMock()
@@ -307,6 +314,78 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         context.close.assert_called_once()
         browser.close.assert_called_once()
         return exports, result
+
+    def test_authenticated_form_without_observed_otp_exports_as_candidate(self):
+        exports, report = self.run_timeline(
+            [{"verification_code_visible": False, "identity_surface_visible": False}],
+            [surface({})], page_url=URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html"),
+            visible_labels=("Sign Out", "My Applications", "Personal Information"),
+        )
+        self.assertEqual(exports, [10])
+        self.assertFalse(report["verification_seen"])
+        self.assertFalse(report["verification_completed"])
+        self.assertTrue(report["authenticated_form_observed"])
+        self.assertEqual(report["verification_basis"], "authenticated_postlogin_form")
+        self.assertFalse(report["session_reuse_proven"])
+
+    def test_signed_in_job_details_do_not_export_even_with_unrelated_input(self):
+        exports, _ = self.run_timeline(
+            [{"verification_code_visible": False, "identity_surface_visible": False}],
+            [surface({})], page_url=URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html"),
+            visible_labels=("Sign Out", "My Applications", "Complete Your Application"),
+            expected_error="FORM_NOT_READY",
+        )
+        self.assertEqual(exports, [])
+
+    def test_authenticated_markers_without_form_fields_do_not_export(self):
+        self.run_timeline(
+            [{"verification_code_visible": False, "identity_surface_visible": False}],
+            [surface({"tag": "button"})], page_url=URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html"),
+            visible_labels=("Sign Out", "My Applications", "Personal Information"),
+            expected_error="FORM_NOT_READY",
+        )
+
+    def test_authenticated_marker_disappearance_resets_wait(self):
+        exports, _ = self.run_timeline(
+            [{"verification_code_visible": False, "identity_surface_visible": False}],
+            [surface({})], page_url=URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html"),
+            visible_labels=lambda seconds: () if 8 <= seconds < 12 else ("Sign Out", "My Applications", "Personal Information"),
+        )
+        self.assertEqual(exports, [22])
+
+    def test_authenticated_route_requires_exact_target_and_visible_markers(self):
+        correct = URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html")
+        for url, labels in (
+            (correct.replace("cid=test", "cid=other"), ("Sign Out", "My Applications", "Personal Information")),
+            (correct.replace("jobId=960970", "jobId=1"), ("Sign Out", "My Applications", "Personal Information")),
+            (correct.replace("ccId=19000101_000001", "ccId=other"), ("Sign Out", "My Applications", "Personal Information")),
+            (correct + "&CID=other", ("Sign Out", "My Applications", "Personal Information")),
+            (correct.replace("workforcenow.adp.com", "example.test"), ("Sign Out", "My Applications", "Personal Information")),
+            (URL, ("Sign Out", "My Applications", "Personal Information")),
+            (correct, ("My Applications", "Personal Information")),
+            (correct, ("Sign Out", "Personal Information")),
+        ):
+            with self.subTest(url=url, labels=labels):
+                page = MagicMock()
+                page.url = url
+                def text_locator(label, **kwargs):
+                    locator = MagicMock()
+                    locator.count.return_value = 1
+                    locator.nth.return_value.is_visible.return_value = label in labels
+                    return locator
+                page.get_by_text.side_effect = text_locator
+                self.assertFalse(bootstrap._authenticated_form_evidence(page, URL)["authenticated_form_observed"])
+
+    def test_authenticated_form_does_not_override_current_identity_or_otp(self):
+        for stage in (
+            {"verification_code_visible": True, "identity_surface_visible": False},
+            {"verification_code_visible": False, "identity_surface_visible": True},
+        ):
+            with self.subTest(stage=stage):
+                self.run_timeline([stage], [surface({})],
+                    page_url=URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html"),
+                    visible_labels=("Sign Out", "My Applications", "Personal Information"),
+                    expected_error="FORM_NOT_READY|VERIFICATION_TIMEOUT")
 
     def test_blank_transition_waits_for_stable_form_before_export(self):
         otp = {"verification_code_visible": True, "identity_surface_visible": False}

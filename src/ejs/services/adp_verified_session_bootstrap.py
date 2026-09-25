@@ -4,6 +4,8 @@ This tool never reads or enters the verification code. The user drives the
 browser manually. Disappearing OTP/identity fields alone are not success: a
 stable, non-empty form surface must follow. Exported state is only a candidate;
 the PowerShell helper must prove fresh-browser reuse before provisioning it.
+An already authenticated, target-matched Personal Information surface can also
+yield candidate state without falsely claiming an observed OTP transition.
 """
 from __future__ import annotations
 
@@ -13,16 +15,17 @@ import json
 from pathlib import Path
 import sys
 import time
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from ejs.services.adp_live_inspector import validate_adp_live_url
 
-BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v3"
+BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v4"
 OTP_CONTROL_ID = "oneTimePassWord"
 IDENTITY_CONTROL_IDS = ("guestFirstName", "guestLastName", "guestEmail")
 DEFAULT_TIMEOUT_SECONDS = 900
 MIN_POST_VERIFICATION_SECONDS = 10
 MIN_STABLE_SURFACE_SECONDS = 5
+REVIEWED_POSTLOGIN_PATH = "/mascsr/applicant/mdf/recruitment/postLogin.html"
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,46 @@ def bootstrap_stage(page) -> dict:
         control_id: _visible(page, f"#{control_id}")
         for control_id in IDENTITY_CONTROL_IDS
     }
+
+
+def _authenticated_form_evidence(page, application_url: str) -> dict:
+    """Recognize the reviewed signed-in portal without claiming an observed OTP.
+
+    The route alone is insufficient. Bind it to the requested company/job and
+    require visible signed-in navigation plus Personal Information. No values,
+    cookies or session tokens are used as proof and no controls are activated.
+    """
+    evidence = {"authenticated_portal_observed": False, "authenticated_form_observed": False}
+    try:
+        validate_adp_live_url(str(page.url))
+        current = urlsplit(str(page.url))
+        expected = urlsplit(application_url)
+        if current.netloc != expected.netloc or current.path != REVIEWED_POSTLOGIN_PATH:
+            return evidence
+        def query_parameters(query: str) -> dict:
+            result = {}
+            for key, values in parse_qs(query, keep_blank_values=True).items():
+                result.setdefault(key.casefold(), []).extend(values)
+            return result
+
+        actual_query = query_parameters(current.query)
+        expected_query = query_parameters(expected.query)
+        for key in ("cid", "ccid", "jobid"):
+            target = expected_query.get(key, [])
+            if len(target) != 1 or not target[0] or actual_query.get(key) != target:
+                return evidence
+
+        def visible_label(label: str) -> bool:
+            locator = page.get_by_text(label, exact=True)
+            return any(locator.nth(i).is_visible() for i in range(locator.count()))
+
+        portal = visible_label("Sign Out") and visible_label("My Applications")
+        evidence["authenticated_portal_observed"] = portal
+        evidence["authenticated_form_observed"] = portal and visible_label("Personal Information")
+        return evidence
+    except Exception:
+        # An unreadable/changing page cannot establish an authenticated surface.
+        return {"authenticated_portal_observed": False, "authenticated_form_observed": False}
     return {
         "verification_code_visible": otp_visible,
         "identity_surface_visible": any(identity_visible.values()),
@@ -236,6 +279,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
             last_otp_seen = None
             last_control_count = 0
             transition_announced = False
+            portal_hint_announced = False
+            authenticated_portal_seen = False
             while time.monotonic() < deadline:
                 if page.is_closed():
                     raise RuntimeError("ADP_SESSION_BOOTSTRAP_BROWSER_CLOSED")
@@ -255,17 +300,28 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                     continue
                 now = time.monotonic()
                 last_control_count = report["visible_control_count"]
+                authenticated = {"authenticated_portal_observed": False, "authenticated_form_observed": False}
+                if not stage["verification_code_visible"] and not stage["identity_surface_visible"]:
+                    authenticated = _authenticated_form_evidence(page, request.application_url)
+                authenticated_portal_seen = authenticated_portal_seen or authenticated["authenticated_portal_observed"]
+                if authenticated["authenticated_portal_observed"] and not authenticated["authenticated_form_observed"] and not portal_hint_announced:
+                    print("Signed-in portal observed. Open Complete Your Application manually to show Personal Information; do not edit fields or click Next.")
+                    portal_hint_announced = True
                 if stage["verification_code_visible"]:
                     verification_seen = True
                     last_otp_seen = now
                     stable_since = None
                     last_signature = None
-                elif verification_seen and not stage["identity_surface_visible"]:
+                elif (verification_seen or authenticated["authenticated_form_observed"]) and not stage["identity_surface_visible"]:
                     if not transition_announced:
-                        print("Verification screen closed. Waiting for a stable form; keep the browser open.")
+                        if verification_seen:
+                            print("Verification screen closed. Waiting for a stable form; keep the browser open.")
+                        else:
+                            print("Authenticated Personal Information surface observed without an OTP observation. Waiting for a stable form; keep the browser open.")
                         transition_announced = True
                     signature = _form_surface_signature(report)
-                    surface_key = (str(page.url), signature)
+                    basis = "observed_otp_transition" if verification_seen else "authenticated_postlogin_form"
+                    surface_key = (str(page.url), signature, basis)
                     if not signature:
                         stable_since = None
                         last_signature = None
@@ -274,9 +330,10 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                         last_signature = surface_key
                     elif (
                         stable_since is not None
-                        and now - stable_since >= MIN_STABLE_SURFACE_SECONDS
-                        and last_otp_seen is not None
-                        and now - last_otp_seen >= MIN_POST_VERIFICATION_SECONDS
+                        and now - stable_since >= (MIN_STABLE_SURFACE_SECONDS if verification_seen else MIN_POST_VERIFICATION_SECONDS)
+                        and (not verification_seen or (
+                            last_otp_seen is not None and now - last_otp_seen >= MIN_POST_VERIFICATION_SECONDS
+                        ))
                     ):
                         session_storage = {}
                         session_storage_evidence = {
@@ -292,8 +349,10 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                             )
                         context.storage_state(path=str(storage_path))
                         report.update({
-                            "verification_seen": True,
-                            "verification_completed": True,
+                            "verification_seen": verification_seen,
+                            "verification_completed": verification_seen,
+                            "verification_basis": basis,
+                            **authenticated,
                             "post_verification_surface_stable": True,
                             "visible_form_control_count": len(signature),
                             "storage_state_exported": True,
@@ -305,10 +364,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                             json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                             encoding="utf-8",
                         )
-                        print(
-                            "Stable post-verification form observed. Candidate session exported locally; "
-                            "fresh-browser reuse must pass before secret provisioning."
-                        )
+                        label = "post-verification" if verification_seen else "authenticated Personal Information"
+                        print(f"Stable {label} form observed. Candidate session exported locally; fresh-browser reuse must pass before secret provisioning.")
                         return report
                 else:
                     stable_since = None
@@ -317,12 +374,13 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
 
             print(json.dumps({
                 "verification_seen": verification_seen,
+                "authenticated_portal_seen": authenticated_portal_seen,
                 "verification_completed": False,
                 "visible_control_count": last_control_count,
                 "storage_state_exported": False,
                 "raw_values_exposed": False,
             }, sort_keys=True))
-            reason = "FORM_NOT_READY" if verification_seen else "VERIFICATION_TIMEOUT"
+            reason = "FORM_NOT_READY" if verification_seen or authenticated_portal_seen else "VERIFICATION_TIMEOUT"
             raise TimeoutError(f"ADP_SESSION_BOOTSTRAP_{reason}")
         finally:
             context.close()
@@ -347,6 +405,8 @@ def main() -> int:
     print(json.dumps({
         "verification_seen": report.get("verification_seen") is True,
         "verification_completed": report.get("verification_completed") is True,
+        "verification_basis": report.get("verification_basis", ""),
+        "authenticated_form_observed": report.get("authenticated_form_observed") is True,
         "visible_control_count": report.get("visible_control_count", 0),
         "storage_state_exported": report.get("storage_state_exported") is True,
         "session_storage_exported": report.get("session_storage_exported") is True,
