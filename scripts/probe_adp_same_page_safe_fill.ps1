@@ -1,7 +1,8 @@
 param(
   [string]$ApplicationUrl = 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=eae41664-19fb-4412-96f8-43f15d52332b&ccId=19000101_000001&jobId=955507&source=LR&lang=en_US',
   [Parameter(Mandatory = $true)]
-  [ValidatePattern('^[0-9a-f]{64}
+  [ValidatePattern('^[0-9a-f]{64}$')]
+  [string]$ExpectedManifestFingerprint,
   [int]$TimeoutSeconds = 900
 )
 
