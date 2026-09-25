@@ -12,6 +12,7 @@ $AdpHelperRelativePaths = @(
   '../../scripts/bootstrap_adp_verified_session.ps1',
   '../../scripts/probe_adp_persistent_profile.ps1',
   '../../scripts/probe_adp_live_handoff.ps1',
+  '../../scripts/probe_adp_same_page_manifest.ps1',
   '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 )
 foreach ($RelativePath in $AdpHelperRelativePaths) {
@@ -77,6 +78,24 @@ if ($LiveHandoffHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
   throw 'Live-handoff diagnostic must never provision GitHub secrets'
 }
 Write-Host 'PASS: ADP live-handoff helper is diagnostic-only and secret-write-free'
+
+$SamePageManifestHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_manifest.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-manifest-out $manifestPath',
+  'No GitHub secret was changed',
+  'do not edit fields and do not click Next'
+)) {
+  if ($SamePageManifestHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Same-page manifest helper is missing diagnostic contract: $RequiredSnippet"
+  }
+}
+if ($SamePageManifestHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Same-page manifest diagnostic must never provision GitHub secrets'
+}
+if ($SamePageManifestHelperText -match '\.click\(|\.fill\(|set_input_files|select_option') {
+  throw 'Same-page manifest helper must not contain browser mutation calls'
+}
+Write-Host 'PASS: ADP same-page manifest helper is read-only and secret-write-free'
 
 # Execute the actual helper body with a fake native Python boundary. A failed
 # local replay must never call the secret writer; all temporary paths are cleaned.
