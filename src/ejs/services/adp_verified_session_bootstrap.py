@@ -373,19 +373,12 @@ def _export_storage_state(context, path: Path) -> dict:
     }
 
 
-def _live_handoff_probe(
-    playwright,
+def _session_storage_restore_script(
     application_url: str,
-    storage_state_path: Path,
     session_storage: dict[str, str],
-    canonical_postlogin_url: str,
-    *,
-    budget_ms: int = 10_000,
-) -> dict:
-    """Probe a second fresh browser while the verified source browser stays open."""
-    parsed = urlsplit(application_url)
-    hostname = parsed.hostname or ""
-    init_script = (
+) -> str:
+    hostname = urlsplit(application_url).hostname or ""
+    return (
         "(() => {"
         f"if (window.location.hostname !== {json.dumps(hostname, ensure_ascii=False)}) return;"
         f"const restored = {json.dumps(session_storage, ensure_ascii=False, sort_keys=True)};"
@@ -393,91 +386,191 @@ def _live_handoff_probe(
         "window.sessionStorage.setItem(key, value);"
         "})();"
     )
-    browser = playwright.chromium.launch(headless=False)
-    context = browser.new_context(
+
+
+def _probe_authenticated_page(page, application_url: str, budget_ms: int) -> dict:
+    hostname = urlsplit(application_url).hostname or ""
+    elapsed = 0
+    stable_ms = 0
+    last_key = None
+    while elapsed <= budget_ms:
+        try:
+            stage = bootstrap_stage(page)
+            authenticated = _authenticated_form_evidence(page, application_url)
+            report = _sanitized_post_verification_report(page, verification_seen=False)
+            signature = _form_surface_signature(report)
+        except Exception:
+            stage = {
+                "verification_code_visible": False,
+                "identity_surface_visible": False,
+            }
+            authenticated = {"authenticated_form_observed": False}
+            signature = ()
+
+        valid = (
+            authenticated.get("authenticated_form_observed") is True
+            and stage.get("verification_code_visible") is not True
+            and stage.get("identity_surface_visible") is not True
+            and bool(signature)
+        )
+        key = (str(page.url), signature)
+        if valid:
+            if key == last_key:
+                stable_ms += 250
+            else:
+                stable_ms = 0
+                last_key = key
+            if stable_ms >= 1_000:
+                return {
+                    "reuse_proven": True,
+                    "visible_form_control_count": len(signature),
+                    "final_reviewed_origin": (urlsplit(str(page.url)).hostname or "") == hostname,
+                    "navigation_click_attempts": 0,
+                    "form_value_write_attempts": 0,
+                    "credential_entry_attempts": 0,
+                    "file_upload_attempts": 0,
+                    "submit_attempts": 0,
+                    "raw_values_exposed": False,
+                }
+        else:
+            stable_ms = 0
+            last_key = None
+
+        if elapsed >= budget_ms:
+            break
+        interval = min(250, budget_ms - elapsed)
+        page.wait_for_timeout(interval)
+        elapsed += interval
+
+    return {
+        "reuse_proven": False,
+        "visible_form_control_count": 0,
+        "final_reviewed_origin": (urlsplit(str(page.url)).hostname or "") == hostname,
+        "navigation_click_attempts": 0,
+        "form_value_write_attempts": 0,
+        "credential_entry_attempts": 0,
+        "file_upload_attempts": 0,
+        "submit_attempts": 0,
+        "raw_values_exposed": False,
+    }
+
+
+def _navigate_and_probe(
+    page,
+    application_url: str,
+    canonical_postlogin_url: str,
+    session_storage: dict[str, str],
+    budget_ms: int,
+) -> dict:
+    page.set_default_timeout(max(1_000, budget_ms))
+    page.set_default_navigation_timeout(max(1_000, budget_ms))
+    if session_storage:
+        page.add_init_script(
+            script=_session_storage_restore_script(application_url, session_storage)
+        )
+    page.goto(
+        canonical_postlogin_url,
+        wait_until="domcontentloaded",
+        timeout=max(1_000, budget_ms),
+    )
+    result = _probe_authenticated_page(page, application_url, budget_ms)
+    return {
+        **result,
+        "session_storage_entry_count": len(session_storage),
+    }
+
+
+def _live_handoff_probe(
+    playwright,
+    source_browser,
+    source_context,
+    application_url: str,
+    storage_state_path: Path,
+    session_storage: dict[str, str],
+    canonical_postlogin_url: str,
+    *,
+    budget_ms: int = 10_000,
+) -> dict:
+    """Compare reuse scopes while the verified source page stays alive."""
+    matrix = {}
+
+    same_context_page = source_context.new_page()
+    try:
+        matrix["same_context_new_page"] = _navigate_and_probe(
+            same_context_page,
+            application_url,
+            canonical_postlogin_url,
+            session_storage,
+            budget_ms,
+        )
+    finally:
+        same_context_page.close()
+
+    if source_browser is not None:
+        same_browser_context = source_browser.new_context(
+            accept_downloads=False,
+            storage_state=str(storage_state_path),
+        )
+        try:
+            same_browser_page = same_browser_context.new_page()
+            matrix["same_browser_new_context"] = _navigate_and_probe(
+                same_browser_page,
+                application_url,
+                canonical_postlogin_url,
+                session_storage,
+                budget_ms,
+            )
+        finally:
+            same_browser_context.close()
+    else:
+        matrix["same_browser_new_context"] = {
+            "reuse_proven": False,
+            "not_tested_reason": "persistent_source_context",
+            "raw_values_exposed": False,
+        }
+
+    separate_browser = playwright.chromium.launch(headless=False)
+    separate_context = separate_browser.new_context(
         accept_downloads=False,
         storage_state=str(storage_state_path),
     )
     try:
-        if session_storage:
-            context.add_init_script(script=init_script)
-        page = context.new_page()
-        page.set_default_timeout(max(1_000, budget_ms))
-        page.set_default_navigation_timeout(max(1_000, budget_ms))
-        page.goto(
+        separate_page = separate_context.new_page()
+        matrix["separate_browser_process"] = _navigate_and_probe(
+            separate_page,
+            application_url,
             canonical_postlogin_url,
-            wait_until="domcontentloaded",
-            timeout=max(1_000, budget_ms),
+            session_storage,
+            budget_ms,
         )
-
-        elapsed = 0
-        stable_ms = 0
-        last_key = None
-        while elapsed <= budget_ms:
-            try:
-                stage = bootstrap_stage(page)
-                authenticated = _authenticated_form_evidence(page, application_url)
-                report = _sanitized_post_verification_report(page, verification_seen=False)
-                signature = _form_surface_signature(report)
-            except Exception:
-                stage = {
-                    "verification_code_visible": False,
-                    "identity_surface_visible": False,
-                }
-                authenticated = {"authenticated_form_observed": False}
-                signature = ()
-
-            valid = (
-                authenticated.get("authenticated_form_observed") is True
-                and stage.get("verification_code_visible") is not True
-                and stage.get("identity_surface_visible") is not True
-                and bool(signature)
-            )
-            key = (str(page.url), signature)
-            if valid:
-                if key == last_key:
-                    stable_ms += 250
-                else:
-                    stable_ms = 0
-                    last_key = key
-                if stable_ms >= 1_000:
-                    return {
-                        "live_handoff_reuse_proven": True,
-                        "visible_form_control_count": len(signature),
-                        "session_storage_entry_count": len(session_storage),
-                        "final_reviewed_origin": (urlsplit(str(page.url)).hostname or "") == hostname,
-                        "navigation_click_attempts": 0,
-                        "form_value_write_attempts": 0,
-                        "credential_entry_attempts": 0,
-                        "file_upload_attempts": 0,
-                        "submit_attempts": 0,
-                        "raw_values_exposed": False,
-                    }
-            else:
-                stable_ms = 0
-                last_key = None
-
-            if elapsed >= budget_ms:
-                break
-            interval = min(250, budget_ms - elapsed)
-            page.wait_for_timeout(interval)
-            elapsed += interval
-
-        return {
-            "live_handoff_reuse_proven": False,
-            "visible_form_control_count": 0,
-            "session_storage_entry_count": len(session_storage),
-            "final_reviewed_origin": (urlsplit(str(page.url)).hostname or "") == hostname,
-            "navigation_click_attempts": 0,
-            "form_value_write_attempts": 0,
-            "credential_entry_attempts": 0,
-            "file_upload_attempts": 0,
-            "submit_attempts": 0,
-            "raw_values_exposed": False,
-        }
     finally:
-        context.close()
-        browser.close()
+        separate_context.close()
+        separate_browser.close()
+
+    if matrix["separate_browser_process"].get("reuse_proven") is True:
+        scope = "separate_browser_process"
+    elif matrix["same_browser_new_context"].get("reuse_proven") is True:
+        scope = "same_browser_process"
+    elif matrix["same_context_new_page"].get("reuse_proven") is True:
+        scope = "same_context"
+    else:
+        scope = "none"
+
+    return {
+        "live_handoff_reuse_proven": scope != "none",
+        "strongest_reusable_scope": scope,
+        "same_context_reuse_proven": matrix["same_context_new_page"].get("reuse_proven") is True,
+        "same_browser_process_reuse_proven": matrix["same_browser_new_context"].get("reuse_proven") is True,
+        "separate_browser_reuse_proven": matrix["separate_browser_process"].get("reuse_proven") is True,
+        "reuse_matrix": matrix,
+        "session_storage_entry_count": len(session_storage),
+        "navigation_click_attempts": 0,
+        "form_value_write_attempts": 0,
+        "credential_entry_attempts": 0,
+        "file_upload_attempts": 0,
+        "submit_attempts": 0,
+        "raw_values_exposed": False,
+    }
 
 
 def _form_surface_signature(report: dict) -> tuple:
@@ -720,6 +813,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                         if live_handoff_report_path is not None:
                             live_handoff = _live_handoff_probe(
                                 p,
+                                browser,
+                                context,
                                 request.application_url,
                                 storage_path,
                                 session_storage,
