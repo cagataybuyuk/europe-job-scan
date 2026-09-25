@@ -266,6 +266,14 @@ class AdpVerifiedSessionTests(unittest.TestCase):
                 browser.new_context.return_value = context
                 playwright.chromium.launch.return_value = browser
                 with patch("playwright.sync_api.sync_playwright") as sync, \
+                        patch.object(inspector, "_probe_authenticated_postlogin", return_value={
+                            "authenticated_postlogin_reused": False,
+                            "visible_form_control_count": 0,
+                            "cookie_surface": CLEAR_COOKIE_SURFACE,
+                            "cookie_consent_boundary_present": False,
+                            "navigation_click_attempts": 0,
+                            "raw_values_exposed": False,
+                        }), \
                         patch.object(inspector, "_cookie_visibility", return_value=CLEAR_COOKIE_SURFACE), \
                         patch.object(inspector, "_snapshot", side_effect=[{}, {boundary: True}]), \
                         patch.object(inspector, "navigation_surface_fingerprint", return_value=FP), \
@@ -309,6 +317,14 @@ class AdpVerifiedSessionTests(unittest.TestCase):
             state = Path(tmp) / "state.json"
             state.write_text('{"cookies":[],"origins":[]}', encoding="utf-8")
             with patch("playwright.sync_api.sync_playwright") as sync, \
+                    patch.object(inspector, "_probe_authenticated_postlogin", return_value={
+                        "authenticated_postlogin_reused": False,
+                        "visible_form_control_count": 0,
+                        "cookie_surface": CLEAR_COOKIE_SURFACE,
+                        "cookie_consent_boundary_present": False,
+                        "navigation_click_attempts": 0,
+                        "raw_values_exposed": False,
+                    }), \
                     patch.object(inspector, "_cookie_visibility", side_effect=observe), \
                     patch.object(inspector, "_snapshot", side_effect=snapshot) as snapshots, \
                     patch.object(inspector, "navigation_surface_fingerprint", return_value=FP), \
