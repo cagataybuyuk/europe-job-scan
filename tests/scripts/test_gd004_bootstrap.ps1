@@ -13,6 +13,7 @@ $AdpHelperRelativePaths = @(
   '../../scripts/probe_adp_persistent_profile.ps1',
   '../../scripts/probe_adp_live_handoff.ps1',
   '../../scripts/probe_adp_same_page_manifest.ps1',
+  '../../scripts/probe_adp_same_page_safe_fill.ps1',
   '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 )
 foreach ($RelativePath in $AdpHelperRelativePaths) {
@@ -96,6 +97,26 @@ if ($SamePageManifestHelperText -match '\.click\(|\.fill\(|set_input_files|selec
   throw 'Same-page manifest helper must not contain browser mutation calls'
 }
 Write-Host 'PASS: ADP same-page manifest helper is read-only and secret-write-free'
+
+$SamePageSafeFillHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_safe_fill.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-safe-fill-profile $profilePath',
+  '--same-page-safe-fill-expected-manifest-fingerprint $ExpectedManifestFingerprint',
+  '--same-page-safe-fill-report-out $safeFillReportPath',
+  'A non-empty browser value that differs from your input will block instead of being overwritten.',
+  'No navigation, phone/address, upload, or submit action was performed.'
+)) {
+  if ($SamePageSafeFillHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Same-page safe-fill helper is missing reviewed contract: $RequiredSnippet"
+  }
+}
+if ($SamePageSafeFillHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Same-page safe-fill helper must not provision GitHub secrets'
+}
+if ($SamePageSafeFillHelperText -match 'set_input_files|\.click\(|select_option') {
+  throw 'Same-page safe-fill helper must not contain navigation/upload/select browser calls'
+}
+Write-Host 'PASS: ADP same-page safe-fill helper stays inside reviewed local authority'
 
 # Execute the actual helper body with a fake native Python boundary. A failed
 # local replay must never call the secret writer; all temporary paths are cleaned.
