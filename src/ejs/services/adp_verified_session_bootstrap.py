@@ -110,7 +110,11 @@ def _authenticated_form_evidence(page, application_url: str) -> dict:
     require visible signed-in navigation plus Personal Information. No values,
     cookies or session tokens are used as proof and no controls are activated.
     """
-    evidence = {"authenticated_portal_observed": False, "authenticated_form_observed": False}
+    evidence = {
+        "authenticated_portal_observed": False,
+        "authenticated_application_steps_observed": False,
+        "authenticated_form_observed": False,
+    }
     try:
         validate_adp_live_url(str(page.url))
         current = urlsplit(str(page.url))
@@ -135,12 +139,27 @@ def _authenticated_form_evidence(page, application_url: str) -> dict:
             return any(locator.nth(i).is_visible() for i in range(locator.count()))
 
         portal = visible_label("Sign Out") and visible_label("My Applications")
+        application_steps = all(
+            visible_label(label)
+            for label in (
+                "Resume",
+                "Questions",
+                "Review Your Application",
+                "Self-Attest & Submit",
+            )
+        )
+        personal_information = visible_label("Personal Information")
         evidence["authenticated_portal_observed"] = portal
-        evidence["authenticated_form_observed"] = portal and visible_label("Personal Information")
+        evidence["authenticated_application_steps_observed"] = application_steps
+        evidence["authenticated_form_observed"] = personal_information and (portal or application_steps)
         return evidence
     except Exception:
         # An unreadable/changing page cannot establish an authenticated surface.
-        return {"authenticated_portal_observed": False, "authenticated_form_observed": False}
+        return {
+            "authenticated_portal_observed": False,
+            "authenticated_application_steps_observed": False,
+            "authenticated_form_observed": False,
+        }
 
 
 def _sanitized_post_verification_report(page, verification_seen: bool) -> dict:
