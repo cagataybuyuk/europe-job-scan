@@ -230,58 +230,94 @@ class AdpVerifiedSessionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "TARGET_MISMATCH"):
                 _load_direct_reuse_url(str(path), URL)
 
-    def test_live_handoff_probe_uses_fresh_browser_before_source_closes(self):
+    def test_live_handoff_probe_classifies_reuse_scope_without_write_authority(self):
         playwright = MagicMock()
-        browser = MagicMock()
-        context = MagicMock()
-        page = MagicMock()
-        playwright.chromium.launch.return_value = browser
-        browser.new_context.return_value = context
-        context.new_page.return_value = page
-        page.url = URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html")
-        page.wait_for_timeout.return_value = None
+        source_browser = MagicMock()
+        source_context = MagicMock()
+        same_context_page = MagicMock()
+        same_browser_context = MagicMock()
+        same_browser_page = MagicMock()
+        separate_browser = MagicMock()
+        separate_context = MagicMock()
+        separate_page = MagicMock()
+
+        source_context.new_page.return_value = same_context_page
+        source_browser.new_context.return_value = same_browser_context
+        same_browser_context.new_page.return_value = same_browser_page
+        playwright.chromium.launch.return_value = separate_browser
+        separate_browser.new_context.return_value = separate_context
+        separate_context.new_page.return_value = separate_page
+
+        outcomes = [
+            {
+                "reuse_proven": True,
+                "visible_form_control_count": 21,
+                "final_reviewed_origin": True,
+                "navigation_click_attempts": 0,
+                "form_value_write_attempts": 0,
+                "credential_entry_attempts": 0,
+                "file_upload_attempts": 0,
+                "submit_attempts": 0,
+                "raw_values_exposed": False,
+                "session_storage_entry_count": 1,
+            },
+            {
+                "reuse_proven": False,
+                "visible_form_control_count": 0,
+                "final_reviewed_origin": True,
+                "navigation_click_attempts": 0,
+                "form_value_write_attempts": 0,
+                "credential_entry_attempts": 0,
+                "file_upload_attempts": 0,
+                "submit_attempts": 0,
+                "raw_values_exposed": False,
+                "session_storage_entry_count": 1,
+            },
+            {
+                "reuse_proven": False,
+                "visible_form_control_count": 0,
+                "final_reviewed_origin": True,
+                "navigation_click_attempts": 0,
+                "form_value_write_attempts": 0,
+                "credential_entry_attempts": 0,
+                "file_upload_attempts": 0,
+                "submit_attempts": 0,
+                "raw_values_exposed": False,
+                "session_storage_entry_count": 1,
+            },
+        ]
 
         with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(bootstrap, "bootstrap_stage", return_value={
-                    "verification_code_visible": False,
-                    "identity_surface_visible": False,
-                }), \
-                patch.object(bootstrap, "_authenticated_form_evidence", return_value={
-                    "authenticated_form_observed": True,
-                }), \
-                patch.object(bootstrap, "_sanitized_post_verification_report", return_value=surface({})), \
-                patch.object(bootstrap, "_form_surface_signature", return_value=(("input", "text", "firstName", "firstName"),)):
+                patch.object(bootstrap, "_navigate_and_probe", side_effect=outcomes) as navigate:
             state = Path(tmp) / "state.json"
             state.write_text('{"cookies":[],"origins":[]}', encoding="utf-8")
             result = _live_handoff_probe(
                 playwright,
+                source_browser,
+                source_context,
                 URL,
                 state,
                 {"adp-session": "opaque"},
-                page.url,
+                URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html"),
                 budget_ms=2_000,
             )
 
-        playwright.chromium.launch.assert_called_once_with(headless=False)
-        browser.new_context.assert_called_once_with(
-            accept_downloads=False,
-            storage_state=str(state),
-        )
-        context.add_init_script.assert_called_once()
-        page.goto.assert_called_once_with(
-            page.url,
-            wait_until="domcontentloaded",
-            timeout=2_000,
-        )
+        self.assertEqual(navigate.call_count, 3)
         self.assertTrue(result["live_handoff_reuse_proven"])
-        self.assertEqual(result["visible_form_control_count"], 1)
+        self.assertTrue(result["same_context_reuse_proven"])
+        self.assertFalse(result["same_browser_process_reuse_proven"])
+        self.assertFalse(result["separate_browser_reuse_proven"])
+        self.assertEqual(result["strongest_reusable_scope"], "same_context")
         self.assertEqual(result["navigation_click_attempts"], 0)
         self.assertEqual(result["form_value_write_attempts"], 0)
         self.assertEqual(result["credential_entry_attempts"], 0)
         self.assertEqual(result["file_upload_attempts"], 0)
         self.assertEqual(result["submit_attempts"], 0)
-        context.close.assert_called_once()
-        browser.close.assert_called_once()
+        same_context_page.close.assert_called_once()
+        same_browser_context.close.assert_called_once()
+        separate_context.close.assert_called_once()
+        separate_browser.close.assert_called_once()
+
 
     def test_persistent_profile_probe_reopens_same_profile_without_write_authority(self):
         captured = (
