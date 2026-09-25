@@ -23,6 +23,8 @@ from ejs.services.browser_worker import BrowserRuntimeConfig
 from ejs.services.adp_verified_session_inspector import (
     AdpVerifiedSessionInspectorRequest,
     _load_session_storage,
+    _postlogin_url,
+    _probe_authenticated_postlogin,
     _session_storage_init_script,
     validate_request as validate_inspector_request,
     validate_storage_state,
@@ -190,6 +192,68 @@ class AdpVerifiedSessionTests(unittest.TestCase):
                     "--playwright-managed"]):
                 self.assertEqual(inspector.main(), 2)
             self.assertTrue(run.call_args.kwargs["config"].use_playwright_managed)
+
+    def test_direct_postlogin_probe_proves_authenticated_form_without_clicks(self):
+        page = MagicMock()
+        page.url = _postlogin_url(URL)
+        page.wait_for_timeout.return_value = None
+        with patch.object(inspector, "bootstrap_stage", return_value={
+                    "verification_code_visible": False,
+                    "identity_surface_visible": False,
+                }), \
+                patch.object(inspector, "_authenticated_form_evidence", return_value={
+                    "authenticated_form_observed": True,
+                }), \
+                patch.object(inspector, "_sanitized_post_verification_report", return_value=surface({})), \
+                patch.object(inspector, "_form_surface_signature", return_value=(("input", "text", "firstName", "firstName"),)), \
+                patch.object(inspector, "_cookie_visibility", return_value={
+                    "observation_succeeded": True,
+                    "banner_visible": True,
+                    "preference_center_visible": False,
+                }):
+            result = _probe_authenticated_postlogin(page, URL, 2_000)
+        page.goto.assert_called_once_with(_postlogin_url(URL), wait_until="domcontentloaded", timeout=2_000)
+        self.assertTrue(result["authenticated_postlogin_reused"])
+        self.assertTrue(result["cookie_consent_boundary_present"])
+        self.assertEqual(result["navigation_click_attempts"], 0)
+
+    def test_inspector_direct_postlogin_reuse_skips_cookie_gate_and_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.json"
+            state.write_text('{"cookies":[],"origins":[]}', encoding="utf-8")
+            page, context, browser, playwright = (MagicMock() for _ in range(4))
+            context.new_page.return_value = page
+            context.pages = [page]
+            browser.new_context.return_value = context
+            playwright.chromium.launch.return_value = browser
+            direct = {
+                "authenticated_postlogin_reused": True,
+                "visible_form_control_count": 3,
+                "cookie_surface": {
+                    "observation_succeeded": True,
+                    "banner_visible": True,
+                    "preference_center_visible": False,
+                },
+                "cookie_consent_boundary_present": True,
+                "navigation_click_attempts": 0,
+                "raw_values_exposed": False,
+            }
+            with patch("playwright.sync_api.sync_playwright") as sync, \
+                    patch.object(inspector, "_probe_authenticated_postlogin", return_value=direct), \
+                    patch.object(inspector, "_observe_cookie_settling") as cookie_gate, \
+                    patch.object(inspector, "_approved_entry") as approved:
+                sync.return_value.__enter__.return_value = playwright
+                result = inspector.run_inspector(
+                    AdpVerifiedSessionInspectorRequest(URL, FP, 0, str(state)),
+                    config=BrowserRuntimeConfig(use_playwright_managed=True),
+                )
+            self.assertEqual(result["inspector_status"], "inspected")
+            self.assertTrue(result["session_reused"])
+            self.assertEqual(result["reuse_route"], "authenticated_postlogin_direct")
+            self.assertTrue(result["cookie_consent_boundary_present"])
+            self.assertEqual(result["navigation_click_attempts"], 0)
+            cookie_gate.assert_not_called()
+            approved.assert_not_called()
 
     def test_post_apply_auth_or_captcha_blocks_reuse(self):
         for boundary in ("auth_observed", "captcha_observed"):
