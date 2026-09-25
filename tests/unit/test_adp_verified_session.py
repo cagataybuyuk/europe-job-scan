@@ -12,6 +12,7 @@ from ejs.services.adp_verified_session_bootstrap import (
     _form_surface_signature,
     _open_reviewed_adp_target,
     _visible,
+    bootstrap_stage,
     run_bootstrap,
     validate_request as validate_bootstrap_request,
 )
@@ -48,6 +49,23 @@ def surface(*controls):
 
 
 class AdpVerifiedSessionTests(unittest.TestCase):
+    def test_bootstrap_stage_returns_sanitized_visibility_contract(self):
+        page = MagicMock()
+        visibility = {
+            "#oneTimePassWord": True,
+            "#guestFirstName": False,
+            "#guestLastName": True,
+            "#guestEmail": False,
+        }
+        with patch.object(bootstrap, "_visible", side_effect=lambda _page, selector: visibility[selector]):
+            result = bootstrap_stage(page)
+        self.assertEqual(result, {
+            "verification_code_visible": True,
+            "identity_surface_visible": True,
+            "identity_controls_visible_count": 1,
+            "raw_values_exposed": False,
+        })
+
     def test_initial_navigation_waits_only_for_commit(self):
         page = MagicMock()
         page.url = URL
