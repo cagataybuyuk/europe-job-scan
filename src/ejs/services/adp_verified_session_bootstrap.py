@@ -158,8 +158,24 @@ def _authenticated_form_diagnostics(page, application_url: str) -> dict:
             evidence[f"{key}_match"] = query_matches[key]
 
         def visible_label(label: str) -> bool:
-            locator = page.get_by_text(label, exact=True)
-            return any(locator.nth(i).is_visible() for i in range(locator.count()))
+            exact = page.get_by_text(label, exact=True)
+            if any(exact.nth(i).is_visible() for i in range(exact.count())):
+                return True
+
+            # ADP can split a step label across nested elements/whitespace.
+            # Fall back only to visible nodes whose normalized inner text still
+            # exactly matches the reviewed label; broad substring matches do
+            # not establish authenticated-form evidence.
+            target = " ".join(label.split())
+            candidates = page.get_by_text(label, exact=False)
+            for index in range(candidates.count()):
+                item = candidates.nth(index)
+                if not item.is_visible():
+                    continue
+                normalized = " ".join(str(item.inner_text() or "").split())
+                if normalized == target:
+                    return True
+            return False
 
         labels = {
             "sign_out_visible": "Sign Out",
