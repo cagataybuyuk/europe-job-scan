@@ -48,6 +48,7 @@ $tempRoot = [IO.Path]::GetTempPath()
 $statePath = Join-Path $tempRoot ("ejs-adp-storage-$token.json")
 $reportPath = Join-Path $tempRoot ("ejs-adp-bootstrap-report-$token.json")
 $reuseReportPath = Join-Path $tempRoot ("ejs-adp-reuse-report-$token.json")
+$postLoginUrlPath = Join-Path $tempRoot ("ejs-adp-postlogin-$token.txt")
 
 try {
   $sessionStoragePath = "$statePath.session-storage.json"
@@ -63,7 +64,7 @@ try {
 
   Write-Host 'A browser window will open. Complete the ADP flow manually.'
   Write-Host 'Enter the email verification code only in the ADP browser, never in this terminal.'
-  & $python.Source @pythonPrefixArgs -m ejs.services.adp_verified_session_bootstrap --url $ApplicationUrl --storage-state-out $statePath --report-out $reportPath --session-storage-out $sessionStoragePath --timeout-seconds $TimeoutSeconds
+  & $python.Source @pythonPrefixArgs -m ejs.services.adp_verified_session_bootstrap --url $ApplicationUrl --storage-state-out $statePath --report-out $reportPath --session-storage-out $sessionStoragePath --postlogin-url-out $postLoginUrlPath --timeout-seconds $TimeoutSeconds
   if ($LASTEXITCODE -ne 0) {
     throw "ADP verified-session bootstrap failed with exit code $LASTEXITCODE."
   }
@@ -71,11 +72,14 @@ try {
   if (-not (Test-Path -LiteralPath $statePath)) {
     throw 'ADP verified-session bootstrap did not create storage state.'
   }
+  if (-not (Test-Path -LiteralPath $postLoginUrlPath)) {
+    throw 'ADP verified-session bootstrap did not create the canonical postLogin URL.'
+  }
 
   # A disappearing verification screen is not proof of a reusable session.
   # This uses the existing reviewed read-only inspector: at most one Apply click.
   Write-Host 'Testing the candidate session in a fresh local browser before updating the secret.'
-  & $python.Source @pythonPrefixArgs -m ejs.services.adp_verified_session_inspector --url $ApplicationUrl --expected-navigation-surface-fingerprint $ExpectedNavigationSurfaceFingerprint --entry-ordinal $EntryOrdinal --storage-state-json $statePath --output $reuseReportPath --playwright-managed
+  & $python.Source @pythonPrefixArgs -m ejs.services.adp_verified_session_inspector --url $ApplicationUrl --expected-navigation-surface-fingerprint $ExpectedNavigationSurfaceFingerprint --entry-ordinal $EntryOrdinal --storage-state-json $statePath --direct-reuse-url-file $postLoginUrlPath --output $reuseReportPath --playwright-managed
   $plainReplayExit = $LASTEXITCODE
   $reuseReport = if (Test-Path -LiteralPath $reuseReportPath) {
     Get-Content -Raw -LiteralPath $reuseReportPath | ConvertFrom-Json
@@ -109,7 +113,7 @@ try {
         'the verified identity was not recognized'
       }
       Write-Host "Plain fresh-browser replay showed that $diagnosticReason. Testing transient sessionStorage reuse without exposing its contents. Captured entries: $sessionEntryCount"
-      & $python.Source @pythonPrefixArgs -m ejs.services.adp_verified_session_inspector --url $ApplicationUrl --expected-navigation-surface-fingerprint $ExpectedNavigationSurfaceFingerprint --entry-ordinal $EntryOrdinal --storage-state-json $statePath --session-storage-json $sessionStoragePath --output $sessionReuseReportPath --playwright-managed
+      & $python.Source @pythonPrefixArgs -m ejs.services.adp_verified_session_inspector --url $ApplicationUrl --expected-navigation-surface-fingerprint $ExpectedNavigationSurfaceFingerprint --entry-ordinal $EntryOrdinal --storage-state-json $statePath --session-storage-json $sessionStoragePath --direct-reuse-url-file $postLoginUrlPath --output $sessionReuseReportPath --playwright-managed
       $sessionReplayExit = $LASTEXITCODE
       $sessionReuseReport = if (Test-Path -LiteralPath $sessionReuseReportPath) {
         Get-Content -Raw -LiteralPath $sessionReuseReportPath | ConvertFrom-Json
@@ -131,6 +135,12 @@ try {
 
   if ($null -eq $reuseReport -or $reuseReport.inspector_status -ne 'inspected' -or $reuseReport.session_reused -ne $true) {
     throw 'ADP local session reuse was not proven. Existing GitHub secret was not changed.'
+  }
+
+  if ($reuseReport.PSObject.Properties.Name -contains 'direct_reuse_url_evidence' -and
+      $null -ne $reuseReport.direct_reuse_url_evidence -and
+      $reuseReport.direct_reuse_url_evidence.direct_reuse_url_source -eq 'captured_post_verification') {
+    throw 'ADP local replay succeeded using the captured canonical postLogin URL. Existing GitHub secret was not changed. Implement protected canonical reuse URL transport before GitHub-hosted reuse.'
   }
 
   $stateJson = [IO.File]::ReadAllText($statePath)
@@ -165,6 +175,7 @@ try {
   $parsed = $null
   Remove-EjsTempFile -Path $statePath -Sensitive
   Remove-EjsTempFile -Path $sessionStoragePath -Sensitive
+  Remove-EjsTempFile -Path $postLoginUrlPath -Sensitive
   Remove-EjsTempFile -Path $reportPath
   Remove-EjsTempFile -Path $reuseReportPath
   Remove-EjsTempFile -Path $sessionReuseReportPath
