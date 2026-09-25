@@ -67,7 +67,7 @@ $LiveHandoffHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../script
 foreach ($RequiredSnippet in @(
   '--live-handoff-report-out $handoffReportPath',
   'No GitHub secret was changed',
-  'second fresh browser'
+  'same-context, same-browser-process, and separate-browser scopes'
 )) {
   if ($LiveHandoffHelperText -notlike ('*' + $RequiredSnippet + '*')) {
     throw "Live-handoff helper is missing diagnostic contract: $RequiredSnippet"
