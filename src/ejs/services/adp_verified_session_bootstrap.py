@@ -35,6 +35,7 @@ class AdpVerifiedSessionBootstrapRequest:
     report_out: str
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     session_storage_out: str = ""
+    postlogin_url_out: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
@@ -383,10 +384,13 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
     storage_path = Path(request.storage_state_out)
     report_path = Path(request.report_out)
     session_storage_path = Path(request.session_storage_out) if request.session_storage_out else None
+    postlogin_url_path = Path(request.postlogin_url_out) if request.postlogin_url_out else None
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     if session_storage_path is not None:
         session_storage_path.parent.mkdir(parents=True, exist_ok=True)
+    if postlogin_url_path is not None:
+        postlogin_url_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
@@ -553,6 +557,22 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                 json.dumps(session_storage, ensure_ascii=False, sort_keys=True) + "\n",
                                 encoding="utf-8",
                             )
+                        canonical_url_evidence = _authenticated_form_diagnostics(
+                            page,
+                            request.application_url,
+                        )
+                        canonical_url_exported = False
+                        if postlogin_url_path is not None:
+                            if not (
+                                canonical_url_evidence.get("postlogin_path_match") is True
+                                and canonical_url_evidence.get("cid_match") is True
+                                and canonical_url_evidence.get("ccid_match") is True
+                                and canonical_url_evidence.get("jobid_match") is True
+                            ):
+                                raise RuntimeError("ADP_SESSION_BOOTSTRAP_CANONICAL_POSTLOGIN_URL_INVALID")
+                            postlogin_url_path.write_text(str(page.url) + "\n", encoding="utf-8")
+                            canonical_url_exported = True
+
                         storage_evidence = _export_storage_state(context, storage_path)
                         report.update({
                             "verification_seen": verification_seen,
@@ -562,6 +582,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                             "post_verification_surface_stable": True,
                             "visible_form_control_count": len(signature),
                             "storage_state_exported": True,
+                            "canonical_postlogin_url_exported": canonical_url_exported,
                             **storage_evidence,
                             "session_storage_exported": session_storage_path is not None,
                             **session_storage_evidence,
@@ -600,6 +621,7 @@ def main() -> int:
     parser.add_argument("--storage-state-out", required=True)
     parser.add_argument("--report-out", required=True)
     parser.add_argument("--session-storage-out", default="")
+    parser.add_argument("--postlogin-url-out", default="")
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
@@ -607,6 +629,7 @@ def main() -> int:
         storage_state_out=args.storage_state_out,
         report_out=args.report_out,
         session_storage_out=args.session_storage_out,
+        postlogin_url_out=args.postlogin_url_out,
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
@@ -616,6 +639,7 @@ def main() -> int:
         "authenticated_form_observed": report.get("authenticated_form_observed") is True,
         "visible_control_count": report.get("visible_control_count", 0),
         "storage_state_exported": report.get("storage_state_exported") is True,
+        "canonical_postlogin_url_exported": report.get("canonical_postlogin_url_exported") is True,
         "storage_indexed_db_database_count": report.get("storage_indexed_db_database_count", 0),
         "storage_indexed_db_origin_count": report.get("storage_indexed_db_origin_count", 0),
         "onetrust_consent_cookie_present": report.get("onetrust_consent_cookie_present") is True,
