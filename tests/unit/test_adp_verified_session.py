@@ -585,6 +585,31 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         )
         self.assertEqual(exports, [22])
 
+    def test_authenticated_route_accepts_identical_duplicate_jobid_only(self):
+        correct = URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html")
+        labels = ("Personal Information", "Resume", "Questions", "Review Your Application", "Self-Attest & Submit")
+
+        def page_for(url):
+            page = MagicMock()
+            page.url = url
+            def text_locator(label, **kwargs):
+                locator = MagicMock()
+                locator.count.return_value = 1
+                locator.nth.return_value.is_visible.return_value = label in labels
+                return locator
+            page.get_by_text.side_effect = text_locator
+            return page
+
+        same_duplicate = correct + "&jobId=960970"
+        same = _authenticated_form_diagnostics(page_for(same_duplicate), URL)
+        self.assertTrue(same["jobid_match"])
+        self.assertTrue(same["authenticated_form_observed"])
+
+        conflicting_duplicate = correct + "&jobId=1"
+        conflict = _authenticated_form_diagnostics(page_for(conflicting_duplicate), URL)
+        self.assertFalse(conflict["jobid_match"])
+        self.assertFalse(conflict["authenticated_form_observed"])
+
     def test_authenticated_route_requires_exact_target_and_visible_markers(self):
         correct = URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html")
         for url, labels in (
