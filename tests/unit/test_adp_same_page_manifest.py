@@ -178,6 +178,49 @@ class AdpSamePageManifestTests(unittest.TestCase):
             manifest_surface_fingerprint(structural),
         )
 
+    def test_fingerprint_normalizes_generated_checkbox_ids_but_not_semantics(self):
+        base = {
+            "steps": {
+                "personal_information": True,
+                "resume": True,
+                "questions": True,
+                "review_application": True,
+                "self_attest_submit": True,
+            },
+            "controls": [
+                {
+                    "observation_key": "document/input@10",
+                    "scope": "document",
+                    "tag": "input",
+                    "type": "checkbox",
+                    "id": "checkbox_randomA",
+                    "name": "usePreferredName",
+                    "label": "Preferred or Chosen Name",
+                    "role": "",
+                    "required": False,
+                    "host_required_hint": False,
+                    "disabled": False,
+                    "accept": "",
+                    "multiple": False,
+                }
+            ],
+            "actions": [],
+        }
+        regenerated = json.loads(json.dumps(base))
+        regenerated["controls"][0]["id"] = "checkbox_randomB"
+
+        semantic_drift = json.loads(json.dumps(base))
+        semantic_drift["controls"][0]["name"] = "differentSemanticName"
+
+        self.assertEqual(
+            manifest_surface_fingerprint(base),
+            manifest_surface_fingerprint(regenerated),
+        )
+        self.assertNotEqual(
+            manifest_surface_fingerprint(base),
+            manifest_surface_fingerprint(semantic_drift),
+        )
+
     def test_conflicting_duplicate_jobid_is_rejected(self):
         page = self.page_with_steps()
         page.url = POSTLOGIN + "&jobId=1"
