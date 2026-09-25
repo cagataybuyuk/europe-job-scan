@@ -1,7 +1,7 @@
 param(
   [string]$Repo = 'cagataybuyuk/europe-job-scan',
   [string]$Environment = 'gd004-safe-fill-upload-canary',
-  [string]$ApplicationUrl = 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=eae41664-19fb-4412-96f8-43f15d52332b&ccId=19000101_000001&jobId=960970&source=LR&lang=en_US',
+  [string]$ApplicationUrl = 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=eae41664-19fb-4412-96f8-43f15d52332b&ccId=19000101_000001&jobId=955507&source=LR&lang=en_US',
   [int]$TimeoutSeconds = 900,
   [string]$ExpectedNavigationSurfaceFingerprint = '567e7890f5a01f151dbeeb23851ad7cf5fb8100a32c3e0386227d17cd507d313',
   [int]$EntryOrdinal = 0
@@ -96,10 +96,19 @@ try {
       $sessionEntryCount = [int]$bootstrapReport.session_storage_entry_count
     }
 
-    if ($plainErrorCode -eq 'ADP_VERIFIED_SESSION_NOT_RECOGNIZED_IDENTITY_SURFACE' -and
+    $sessionDiagnosticReplayCodes = @(
+      'ADP_VERIFIED_SESSION_NOT_RECOGNIZED_IDENTITY_SURFACE',
+      'ADP_VERIFIED_SESSION_COOKIE_STATE_NOT_REUSED'
+    )
+    if ($sessionDiagnosticReplayCodes -contains $plainErrorCode -and
         $sessionEntryCount -gt 0 -and
         (Test-Path -LiteralPath $sessionStoragePath)) {
-      Write-Host "Plain fresh-browser replay returned to guest identity. Testing transient sessionStorage reuse without exposing its contents. Captured entries: $sessionEntryCount"
+      $diagnosticReason = if ($plainErrorCode -eq 'ADP_VERIFIED_SESSION_COOKIE_STATE_NOT_REUSED') {
+        'cookie-state reuse was blocked'
+      } else {
+        'the verified identity was not recognized'
+      }
+      Write-Host "Plain fresh-browser replay showed that $diagnosticReason. Testing transient sessionStorage reuse without exposing its contents. Captured entries: $sessionEntryCount"
       & $python.Source @pythonPrefixArgs -m ejs.services.adp_verified_session_inspector --url $ApplicationUrl --expected-navigation-surface-fingerprint $ExpectedNavigationSurfaceFingerprint --entry-ordinal $EntryOrdinal --storage-state-json $statePath --session-storage-json $sessionStoragePath --output $sessionReuseReportPath --playwright-managed
       $sessionReplayExit = $LASTEXITCODE
       $sessionReuseReport = if (Test-Path -LiteralPath $sessionReuseReportPath) {
