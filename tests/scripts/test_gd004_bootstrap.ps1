@@ -11,6 +11,7 @@ $AdpHelperRelativePaths = @(
   '../../scripts/set_adp_profile_v2_extension.ps1',
   '../../scripts/bootstrap_adp_verified_session.ps1',
   '../../scripts/probe_adp_persistent_profile.ps1',
+  '../../scripts/probe_adp_live_handoff.ps1',
   '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 )
 foreach ($RelativePath in $AdpHelperRelativePaths) {
@@ -61,6 +62,21 @@ if ($PersistentProbeHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
   throw 'Persistent-profile diagnostic must never provision GitHub secrets'
 }
 Write-Host 'PASS: ADP persistent-profile helper is diagnostic-only and secret-write-free'
+
+$LiveHandoffHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_live_handoff.ps1')
+foreach ($RequiredSnippet in @(
+  '--live-handoff-report-out $handoffReportPath',
+  'No GitHub secret was changed',
+  'second fresh browser'
+)) {
+  if ($LiveHandoffHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Live-handoff helper is missing diagnostic contract: $RequiredSnippet"
+  }
+}
+if ($LiveHandoffHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Live-handoff diagnostic must never provision GitHub secrets'
+}
+Write-Host 'PASS: ADP live-handoff helper is diagnostic-only and secret-write-free'
 
 # Execute the actual helper body with a fake native Python boundary. A failed
 # local replay must never call the secret writer; all temporary paths are cleaned.
