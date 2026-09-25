@@ -13,8 +13,8 @@ from urllib.parse import parse_qs, urlsplit
 from ejs.services.adp_live_inspector import validate_adp_live_url, visible_application_controls
 from ejs.services.adp_navigation_canary import _snapshot
 
-MANIFEST_VERSION = "adp-same-page-manifest-v2"
-FINGERPRINT_VERSION = "adp-same-page-surface-fingerprint-v2"
+MANIFEST_VERSION = "adp-same-page-manifest-v3"
+FINGERPRINT_VERSION = "adp-same-page-surface-fingerprint-v3"
 REVIEWED_POSTLOGIN_PATH = "/mascsr/applicant/mdf/recruitment/postLogin.html"
 STEP_LABELS = (
     ("personal_information", "Personal Information"),
@@ -125,11 +125,27 @@ def _action_manifest(action: dict) -> dict:
     }
 
 
+def _stable_control_id(item: dict) -> str:
+    """Normalize only known generated ADP control ids.
+
+    ADP emits random checkbox_* ids between equivalent renders. The semantic
+    identity of those controls remains protected by type/name/label and the
+    rest of the structural descriptor. Stable ADP ids remain part of the
+    fingerprint.
+    """
+    element_id = str(item.get("id", ""))
+    control_type = str(item.get("type", "")).lower()
+    if control_type == "checkbox" and element_id.startswith("checkbox_"):
+        return ""
+    return element_id
+
+
 def manifest_surface_descriptor(manifest: dict) -> dict:
     """Return only stable structural evidence for fingerprinting.
 
     observation_key is intentionally excluded because it contains DOM ordinals
-    that may change between equivalent ADP renders.
+    that may change between equivalent ADP renders. Known generated checkbox_*
+    ids are normalized for the same reason; stable ids remain protected.
     """
     controls = []
     for item in manifest.get("controls", []):
@@ -139,7 +155,7 @@ def manifest_surface_descriptor(manifest: dict) -> dict:
             "scope": str(item.get("scope", "")),
             "tag": str(item.get("tag", "")),
             "type": str(item.get("type", "")),
-            "id": str(item.get("id", "")),
+            "id": _stable_control_id(item),
             "name": str(item.get("name", "")),
             "label": _normalize(str(item.get("label", ""))),
             "role": str(item.get("role", "")),
