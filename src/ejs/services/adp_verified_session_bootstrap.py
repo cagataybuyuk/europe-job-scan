@@ -95,6 +95,12 @@ def bootstrap_stage(page) -> dict:
         control_id: _visible(page, f"#{control_id}")
         for control_id in IDENTITY_CONTROL_IDS
     }
+    return {
+        "verification_code_visible": otp_visible,
+        "identity_surface_visible": any(identity_visible.values()),
+        "identity_controls_visible_count": sum(1 for value in identity_visible.values() if value),
+        "raw_values_exposed": False,
+    }
 
 
 def _authenticated_form_evidence(page, application_url: str) -> dict:
@@ -135,12 +141,6 @@ def _authenticated_form_evidence(page, application_url: str) -> dict:
     except Exception:
         # An unreadable/changing page cannot establish an authenticated surface.
         return {"authenticated_portal_observed": False, "authenticated_form_observed": False}
-    return {
-        "verification_code_visible": otp_visible,
-        "identity_surface_visible": any(identity_visible.values()),
-        "identity_controls_visible_count": sum(1 for value in identity_visible.values() if value),
-        "raw_values_exposed": False,
-    }
 
 
 def _sanitized_post_verification_report(page, verification_seen: bool) -> dict:
