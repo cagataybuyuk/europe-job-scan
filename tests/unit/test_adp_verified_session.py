@@ -20,6 +20,11 @@ from ejs.services.adp_verified_session_bootstrap import (
 )
 from ejs.services import adp_verified_session_bootstrap as bootstrap
 from ejs.services import adp_verified_session_inspector as inspector
+from ejs.services import adp_persistent_profile_probe as persistent_probe
+from ejs.services.adp_persistent_profile_probe import (
+    AdpPersistentProfileProbeRequest,
+    run_probe as run_persistent_profile_probe,
+)
 from ejs.services.browser_worker import BrowserRuntimeConfig
 from ejs.services.adp_verified_session_inspector import (
     AdpVerifiedSessionInspectorRequest,
@@ -223,6 +228,92 @@ class AdpVerifiedSessionTests(unittest.TestCase):
             path.write_text(captured, encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "TARGET_MISMATCH"):
                 _load_direct_reuse_url(str(path), URL)
+
+    def test_persistent_profile_probe_reopens_same_profile_without_write_authority(self):
+        captured = (
+            "https://workforcenow.adp.com/mascsr/applicant/mdf/recruitment/postLogin.html"
+            "?cid=test&ccId=19000101_000001&jobId=960970&jobId=960970"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile"
+            profile.mkdir()
+            direct = Path(tmp) / "postlogin.txt"
+            direct.write_text(captured, encoding="utf-8")
+
+            page, context, playwright = (MagicMock() for _ in range(3))
+            context.pages = [page]
+            playwright.chromium.launch_persistent_context.return_value = context
+            proof = {
+                "authenticated_postlogin_reused": True,
+                "visible_form_control_count": 21,
+                "cookie_surface": CLEAR_COOKIE_SURFACE,
+                "cookie_consent_boundary_present": False,
+                "navigation_click_attempts": 0,
+                "raw_values_exposed": False,
+            }
+
+            with patch("playwright.sync_api.sync_playwright") as sync, \
+                    patch.object(persistent_probe, "_probe_authenticated_postlogin", return_value=proof):
+                sync.return_value.__enter__.return_value = playwright
+                result = run_persistent_profile_probe(
+                    AdpPersistentProfileProbeRequest(
+                        application_url=URL,
+                        user_data_dir=str(profile),
+                        direct_reuse_url_path=str(direct),
+                    )
+                )
+
+            playwright.chromium.launch_persistent_context.assert_called_once_with(
+                str(profile),
+                headless=False,
+                accept_downloads=False,
+            )
+            self.assertTrue(result["profile_reuse_proven"])
+            self.assertEqual(result["probe_status"], "inspected")
+            self.assertEqual(result["navigation_click_attempts"], 0)
+            self.assertEqual(result["form_value_write_attempts"], 0)
+            self.assertEqual(result["credential_entry_attempts"], 0)
+            self.assertEqual(result["file_upload_attempts"], 0)
+            self.assertEqual(result["submit_attempts"], 0)
+            self.assertFalse(result["final_submit_allowed"])
+            context.close.assert_called_once()
+
+    def test_persistent_profile_probe_fails_closed_when_profile_does_not_reuse(self):
+        captured = (
+            "https://workforcenow.adp.com/mascsr/applicant/mdf/recruitment/postLogin.html"
+            "?cid=test&ccId=19000101_000001&jobId=960970"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile"
+            profile.mkdir()
+            direct = Path(tmp) / "postlogin.txt"
+            direct.write_text(captured, encoding="utf-8")
+
+            page, context, playwright = (MagicMock() for _ in range(3))
+            context.pages = [page]
+            playwright.chromium.launch_persistent_context.return_value = context
+            proof = {
+                "authenticated_postlogin_reused": False,
+                "visible_form_control_count": 0,
+                "cookie_surface": CLEAR_COOKIE_SURFACE,
+                "cookie_consent_boundary_present": False,
+                "navigation_click_attempts": 0,
+                "raw_values_exposed": False,
+            }
+            with patch("playwright.sync_api.sync_playwright") as sync, \
+                    patch.object(persistent_probe, "_probe_authenticated_postlogin", return_value=proof):
+                sync.return_value.__enter__.return_value = playwright
+                result = run_persistent_profile_probe(
+                    AdpPersistentProfileProbeRequest(
+                        application_url=URL,
+                        user_data_dir=str(profile),
+                        direct_reuse_url_path=str(direct),
+                    )
+                )
+            self.assertFalse(result["profile_reuse_proven"])
+            self.assertEqual(result["probe_status"], "blocked")
+            self.assertEqual(result["error_code"], "ADP_PERSISTENT_PROFILE_NOT_REUSED")
+            self.assertEqual(result["navigation_click_attempts"], 0)
 
     def test_direct_postlogin_probe_proves_authenticated_form_without_clicks(self):
         page = MagicMock()
