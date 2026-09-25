@@ -239,6 +239,41 @@ def _capture_session_storage(page) -> tuple[dict[str, str], dict]:
     }
 
 
+def _sanitized_cookie_metadata(cookies: list[dict]) -> dict:
+    """Report known OneTrust persistence markers without exposing cookie values."""
+    consent = []
+    alert_closed = []
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name", ""))
+        if name == "OptanonConsent":
+            consent.append(cookie)
+        elif name == "OptanonAlertBoxClosed":
+            alert_closed.append(cookie)
+
+    def scopes(items: list[dict]) -> dict:
+        return {
+            "count": len(items),
+            "domain_count": len({str(item.get("domain", "")) for item in items}),
+            "root_path_count": sum(1 for item in items if str(item.get("path", "")) == "/"),
+        }
+
+    consent_scope = scopes(consent)
+    alert_scope = scopes(alert_closed)
+    return {
+        "onetrust_consent_cookie_present": bool(consent),
+        "onetrust_consent_cookie_count": consent_scope["count"],
+        "onetrust_consent_cookie_domain_count": consent_scope["domain_count"],
+        "onetrust_consent_cookie_root_path_count": consent_scope["root_path_count"],
+        "onetrust_alert_closed_cookie_present": bool(alert_closed),
+        "onetrust_alert_closed_cookie_count": alert_scope["count"],
+        "onetrust_alert_closed_cookie_domain_count": alert_scope["domain_count"],
+        "onetrust_alert_closed_cookie_root_path_count": alert_scope["root_path_count"],
+        "cookie_values_exposed": False,
+    }
+
+
 def _export_storage_state(context, path: Path) -> dict:
     """Export cookies/localStorage plus IndexedDB without exposing raw values."""
     try:
@@ -270,6 +305,7 @@ def _export_storage_state(context, path: Path) -> dict:
         "storage_local_storage_entry_count": local_storage_count,
         "storage_indexed_db_origin_count": indexed_db_origin_count,
         "storage_indexed_db_database_count": indexed_db_database_count,
+        **_sanitized_cookie_metadata(cookies),
         "storage_raw_values_exposed": False,
     }
 
@@ -466,6 +502,8 @@ def main() -> int:
         "storage_state_exported": report.get("storage_state_exported") is True,
         "storage_indexed_db_database_count": report.get("storage_indexed_db_database_count", 0),
         "storage_indexed_db_origin_count": report.get("storage_indexed_db_origin_count", 0),
+        "onetrust_consent_cookie_present": report.get("onetrust_consent_cookie_present") is True,
+        "onetrust_alert_closed_cookie_present": report.get("onetrust_alert_closed_cookie_present") is True,
         "session_storage_exported": report.get("session_storage_exported") is True,
         "session_storage_entry_count": report.get("session_storage_entry_count", 0),
         "session_storage_values_exposed": False,
