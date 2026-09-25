@@ -36,6 +36,7 @@ class AdpVerifiedSessionBootstrapRequest:
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     session_storage_out: str = ""
     postlogin_url_out: str = ""
+    user_data_dir: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
@@ -409,10 +410,23 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         postlogin_url_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context(accept_downloads=False)
-        try:
+        browser = None
+        if request.user_data_dir:
+            context = p.chromium.launch_persistent_context(
+                request.user_data_dir,
+                headless=False,
+                accept_downloads=False,
+            )
+            pages = list(context.pages)
+            if len(pages) > 1:
+                context.close()
+                raise RuntimeError("ADP_SESSION_BOOTSTRAP_UNREVIEWED_NEW_PAGE")
+            page = pages[0] if pages else context.new_page()
+        else:
+            browser = p.chromium.launch(headless=False)
+            context = browser.new_context(accept_downloads=False)
             page = context.new_page()
+        try:
             navigation = _open_reviewed_adp_target(page, request.application_url)
             if navigation["navigation_attempts"] > 1 or navigation["navigation_timeout_tolerated"]:
                 print(json.dumps({
@@ -628,7 +642,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
             raise TimeoutError(f"ADP_SESSION_BOOTSTRAP_{reason}")
         finally:
             context.close()
-            browser.close()
+            if browser is not None:
+                browser.close()
 
 
 def main() -> int:
@@ -638,6 +653,7 @@ def main() -> int:
     parser.add_argument("--report-out", required=True)
     parser.add_argument("--session-storage-out", default="")
     parser.add_argument("--postlogin-url-out", default="")
+    parser.add_argument("--user-data-dir", default="")
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
@@ -646,6 +662,7 @@ def main() -> int:
         report_out=args.report_out,
         session_storage_out=args.session_storage_out,
         postlogin_url_out=args.postlogin_url_out,
+        user_data_dir=args.user_data_dir,
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
