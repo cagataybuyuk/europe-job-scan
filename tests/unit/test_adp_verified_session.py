@@ -9,6 +9,7 @@ from pathlib import Path
 from ejs.services.adp_verified_session_bootstrap import (
     AdpVerifiedSessionBootstrapRequest,
     _capture_session_storage,
+    _export_storage_state,
     _form_surface_signature,
     _open_reviewed_adp_target,
     _visible,
@@ -49,6 +50,49 @@ def surface(*controls):
 
 
 class AdpVerifiedSessionTests(unittest.TestCase):
+    def test_indexed_db_storage_export_is_sanitized_and_required(self):
+        context = MagicMock()
+        state = {
+            "cookies": [{"name": "OptanonConsent", "value": "secret", "domain": ".adp.com", "path": "/"}],
+            "origins": [{
+                "origin": "https://workforcenow.adp.com",
+                "localStorage": [{"name": "k", "value": "secret-local"}],
+                "indexedDB": [{"name": "db", "version": 1, "stores": []}],
+            }],
+        }
+        context.storage_state.return_value = state
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence = _export_storage_state(context, Path(tmp) / "state.json")
+        context.storage_state.assert_called_once()
+        args, kwargs = context.storage_state.call_args
+        self.assertTrue(kwargs["indexed_db"])
+        self.assertEqual(evidence["storage_cookie_count"], 1)
+        self.assertEqual(evidence["storage_local_storage_entry_count"], 1)
+        self.assertEqual(evidence["storage_indexed_db_origin_count"], 1)
+        self.assertEqual(evidence["storage_indexed_db_database_count"], 1)
+        self.assertFalse(evidence["storage_raw_values_exposed"])
+        self.assertNotIn("secret", repr(evidence))
+
+    def test_validate_storage_state_reports_indexed_db_counts_without_values(self):
+        state = {
+            "cookies": [{"name": "OptanonConsent", "value": "secret", "domain": ".adp.com", "path": "/"}],
+            "origins": [{
+                "origin": "https://workforcenow.adp.com",
+                "localStorage": [{"name": "k", "value": "secret-local"}],
+                "indexedDB": [{"name": "db", "version": 1, "stores": []}],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            path.write_text(json.dumps(state), encoding="utf-8")
+            evidence = validate_storage_state(str(path))
+        self.assertEqual(evidence["cookie_count"], 1)
+        self.assertEqual(evidence["local_storage_entry_count"], 1)
+        self.assertEqual(evidence["indexed_db_origin_count"], 1)
+        self.assertEqual(evidence["indexed_db_database_count"], 1)
+        self.assertFalse(evidence["raw_storage_state_exposed"])
+        self.assertNotIn("secret", repr(evidence))
+
     def test_bootstrap_stage_returns_sanitized_visibility_contract(self):
         page = MagicMock()
         visibility = {
@@ -300,9 +344,13 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         playwright.chromium.launch.return_value = browser
         exports = []
 
-        def export(path):
+        def export(path, indexed_db=False):
+            if indexed_db is not True:
+                raise AssertionError("IndexedDB must be included in verified-session export")
             exports.append(clock[0])
-            Path(path).write_text('{"cookies":[],"origins":[]}', encoding="utf-8")
+            payload = {"cookies": [], "origins": []}
+            Path(path).write_text(json.dumps(payload), encoding="utf-8")
+            return payload
 
         context.storage_state.side_effect = export
 
