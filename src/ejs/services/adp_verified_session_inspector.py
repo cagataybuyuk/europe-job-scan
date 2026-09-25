@@ -11,9 +11,16 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from ejs.services.adp_live_inspector import validate_adp_live_url, visible_application_controls
+from ejs.services.adp_verified_session_bootstrap import (
+    REVIEWED_POSTLOGIN_PATH,
+    _authenticated_form_evidence,
+    _form_surface_signature,
+    _sanitized_post_verification_report,
+    bootstrap_stage,
+)
 from ejs.services.adp_navigation_canary import (
     FINGERPRINT_RE,
     _approved_entry,
@@ -29,6 +36,7 @@ INSPECTOR_VERSION = "adp-verified-session-inspector-v3"
 IDENTITY_CONTROL_IDS = {"guestFirstName", "guestLastName", "guestEmail"}
 COOKIE_POLL_MS = 250
 COOKIE_CLEAR_STABLE_MS = 1_000
+DIRECT_REUSE_STABLE_MS = 1_000
 
 
 @dataclass(frozen=True)
@@ -225,6 +233,74 @@ def _session_storage_init_script(application_url: str, storage: dict[str, str]) 
     )
 
 
+def _postlogin_url(application_url: str) -> str:
+    parsed = urlsplit(application_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, REVIEWED_POSTLOGIN_PATH, parsed.query, ""))
+
+
+def _probe_authenticated_postlogin(page, application_url: str, budget_ms: int) -> dict:
+    """Prove auth reuse without clicking through an unrelated consent surface."""
+    page.goto(_postlogin_url(application_url), wait_until="domcontentloaded", timeout=max(1_000, budget_ms))
+    elapsed = 0
+    stable_ms = 0
+    last_key = None
+    last_cookie_surface = _cookie_visibility(page)
+    while elapsed <= budget_ms:
+        try:
+            stage = bootstrap_stage(page)
+            authenticated = _authenticated_form_evidence(page, application_url)
+            report = _sanitized_post_verification_report(page, verification_seen=False)
+            signature = _form_surface_signature(report)
+            cookie_surface = _cookie_visibility(page)
+            last_cookie_surface = cookie_surface
+        except Exception:
+            stage = {"verification_code_visible": False, "identity_surface_visible": False}
+            authenticated = {"authenticated_form_observed": False}
+            signature = ()
+            cookie_surface = last_cookie_surface
+
+        valid = (
+            authenticated.get("authenticated_form_observed") is True
+            and stage.get("verification_code_visible") is not True
+            and stage.get("identity_surface_visible") is not True
+            and bool(signature)
+        )
+        key = (str(page.url), signature)
+        if valid:
+            if key == last_key:
+                stable_ms += 250
+            else:
+                stable_ms = 0
+                last_key = key
+            if stable_ms >= DIRECT_REUSE_STABLE_MS:
+                return {
+                    "authenticated_postlogin_reused": True,
+                    "visible_form_control_count": len(signature),
+                    "cookie_surface": cookie_surface,
+                    "cookie_consent_boundary_present": not _cookie_surface_clear(cookie_surface),
+                    "navigation_click_attempts": 0,
+                    "raw_values_exposed": False,
+                }
+        else:
+            stable_ms = 0
+            last_key = None
+
+        if elapsed >= budget_ms:
+            break
+        interval = min(250, budget_ms - elapsed)
+        page.wait_for_timeout(interval)
+        elapsed += interval
+
+    return {
+        "authenticated_postlogin_reused": False,
+        "visible_form_control_count": 0,
+        "cookie_surface": last_cookie_surface,
+        "cookie_consent_boundary_present": not _cookie_surface_clear(last_cookie_surface),
+        "navigation_click_attempts": 0,
+        "raw_values_exposed": False,
+    }
+
+
 def _surface_descriptor(page, snapshot: dict) -> dict:
     controls = visible_application_controls(snapshot.get("form", {}))
     visible = [
@@ -315,8 +391,24 @@ def run_inspector(
             page = context.new_page()
             page.set_default_timeout(request.timeout_ms)
             page.set_default_navigation_timeout(request.timeout_ms)
-            page.goto(request.application_url, wait_until="domcontentloaded", timeout=request.timeout_ms)
 
+            direct_reuse = _probe_authenticated_postlogin(
+                page,
+                request.application_url,
+                request.render_wait_ms,
+            )
+            base["direct_postlogin_probe"] = direct_reuse
+            if direct_reuse["authenticated_postlogin_reused"]:
+                return {
+                    **base,
+                    "inspector_status": "inspected",
+                    "error_code": "",
+                    "session_reused": True,
+                    "reuse_route": "authenticated_postlogin_direct",
+                    "cookie_consent_boundary_present": direct_reuse["cookie_consent_boundary_present"],
+                }
+
+            page.goto(request.application_url, wait_until="domcontentloaded", timeout=request.timeout_ms)
             cookie_gate = _observe_cookie_settling(page, request.render_wait_ms)
             base["cookie_gate"] = cookie_gate
             if not cookie_gate["surface_clear"]:
@@ -457,6 +549,8 @@ def main() -> int:
         "submit_attempts": report.get("submit_attempts", 0),
         "storage_evidence": report.get("storage_evidence"),
         "session_storage_evidence": report.get("session_storage_evidence"),
+        "direct_postlogin_probe": report.get("direct_postlogin_probe"),
+        "cookie_consent_boundary_present": report.get("cookie_consent_boundary_present"),
         "cookie_gate": report.get("cookie_gate"),
     }, sort_keys=True))
     return 0 if report.get("inspector_status") == "inspected" else 2
