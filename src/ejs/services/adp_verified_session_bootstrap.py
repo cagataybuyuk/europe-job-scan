@@ -103,24 +103,36 @@ def bootstrap_stage(page) -> dict:
     }
 
 
-def _authenticated_form_evidence(page, application_url: str) -> dict:
-    """Recognize the reviewed signed-in portal without claiming an observed OTP.
-
-    The route alone is insufficient. Bind it to the requested company/job and
-    require visible signed-in navigation plus Personal Information. No values,
-    cookies or session tokens are used as proof and no controls are activated.
-    """
+def _authenticated_form_diagnostics(page, application_url: str) -> dict:
+    """Return value-free evidence explaining authenticated-form classification."""
     evidence = {
+        "reviewed_origin_valid": False,
+        "postlogin_path_match": False,
+        "cid_match": False,
+        "ccid_match": False,
+        "jobid_match": False,
+        "sign_out_visible": False,
+        "my_applications_visible": False,
+        "personal_information_visible": False,
+        "resume_visible": False,
+        "questions_visible": False,
+        "review_application_visible": False,
+        "self_attest_submit_visible": False,
         "authenticated_portal_observed": False,
         "authenticated_application_steps_observed": False,
         "authenticated_form_observed": False,
+        "observation_succeeded": False,
+        "raw_values_exposed": False,
     }
     try:
         validate_adp_live_url(str(page.url))
+        evidence["reviewed_origin_valid"] = True
         current = urlsplit(str(page.url))
         expected = urlsplit(application_url)
-        if current.netloc != expected.netloc or current.path != REVIEWED_POSTLOGIN_PATH:
-            return evidence
+        evidence["postlogin_path_match"] = (
+            current.netloc == expected.netloc and current.path == REVIEWED_POSTLOGIN_PATH
+        )
+
         def query_parameters(query: str) -> dict:
             result = {}
             for key, values in parse_qs(query, keep_blank_values=True).items():
@@ -129,37 +141,64 @@ def _authenticated_form_evidence(page, application_url: str) -> dict:
 
         actual_query = query_parameters(current.query)
         expected_query = query_parameters(expected.query)
+        query_matches = {}
         for key in ("cid", "ccid", "jobid"):
             target = expected_query.get(key, [])
-            if len(target) != 1 or not target[0] or actual_query.get(key) != target:
-                return evidence
+            query_matches[key] = (
+                len(target) == 1
+                and bool(target[0])
+                and actual_query.get(key) == target
+            )
+            evidence[f"{key}_match"] = query_matches[key]
 
         def visible_label(label: str) -> bool:
             locator = page.get_by_text(label, exact=True)
             return any(locator.nth(i).is_visible() for i in range(locator.count()))
 
-        portal = visible_label("Sign Out") and visible_label("My Applications")
+        labels = {
+            "sign_out_visible": "Sign Out",
+            "my_applications_visible": "My Applications",
+            "personal_information_visible": "Personal Information",
+            "resume_visible": "Resume",
+            "questions_visible": "Questions",
+            "review_application_visible": "Review Your Application",
+            "self_attest_submit_visible": "Self-Attest & Submit",
+        }
+        if evidence["postlogin_path_match"] and all(query_matches.values()):
+            for key, label in labels.items():
+                evidence[key] = visible_label(label)
+
+        portal = evidence["sign_out_visible"] and evidence["my_applications_visible"]
         application_steps = all(
-            visible_label(label)
-            for label in (
-                "Resume",
-                "Questions",
-                "Review Your Application",
-                "Self-Attest & Submit",
+            evidence[key]
+            for key in (
+                "resume_visible",
+                "questions_visible",
+                "review_application_visible",
+                "self_attest_submit_visible",
             )
         )
-        personal_information = visible_label("Personal Information")
         evidence["authenticated_portal_observed"] = portal
         evidence["authenticated_application_steps_observed"] = application_steps
-        evidence["authenticated_form_observed"] = personal_information and (portal or application_steps)
+        evidence["authenticated_form_observed"] = (
+            evidence["postlogin_path_match"]
+            and all(query_matches.values())
+            and evidence["personal_information_visible"]
+            and (portal or application_steps)
+        )
+        evidence["observation_succeeded"] = True
         return evidence
     except Exception:
-        # An unreadable/changing page cannot establish an authenticated surface.
-        return {
-            "authenticated_portal_observed": False,
-            "authenticated_application_steps_observed": False,
-            "authenticated_form_observed": False,
-        }
+        return evidence
+
+
+def _authenticated_form_evidence(page, application_url: str) -> dict:
+    diagnostics = _authenticated_form_diagnostics(page, application_url)
+    return {
+        "authenticated_portal_observed": diagnostics["authenticated_portal_observed"],
+        "authenticated_application_steps_observed": diagnostics["authenticated_application_steps_observed"],
+        "authenticated_form_observed": diagnostics["authenticated_form_observed"],
+    }
 
 
 def _sanitized_post_verification_report(page, verification_seen: bool) -> dict:
@@ -371,6 +410,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
             transition_announced = False
             portal_hint_announced = False
             authenticated_portal_seen = False
+            last_live_diagnostic = None
             while time.monotonic() < deadline:
                 if page.is_closed():
                     raise RuntimeError("ADP_SESSION_BOOTSTRAP_BROWSER_CLOSED")
@@ -382,17 +422,88 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                     raise RuntimeError("ADP_SESSION_BOOTSTRAP_UNREVIEWED_ORIGIN") from None
                 try:
                     stage = bootstrap_stage(page)
-                    report = _sanitized_post_verification_report(page, verification_seen)
+                    stage_observation_succeeded = True
                 except Exception:
+                    stage = {
+                        "verification_code_visible": False,
+                        "identity_surface_visible": False,
+                        "identity_controls_visible_count": 0,
+                        "raw_values_exposed": False,
+                    }
+                    stage_observation_succeeded = False
+
+                authenticated_diagnostics = {
+                    "authenticated_portal_observed": False,
+                    "authenticated_application_steps_observed": False,
+                    "authenticated_form_observed": False,
+                    "observation_succeeded": False,
+                    "raw_values_exposed": False,
+                }
+                if (
+                    stage_observation_succeeded
+                    and not stage["verification_code_visible"]
+                    and not stage["identity_surface_visible"]
+                ):
+                    authenticated_diagnostics = _authenticated_form_diagnostics(
+                        page,
+                        request.application_url,
+                    )
+                authenticated = {
+                    "authenticated_portal_observed": authenticated_diagnostics.get(
+                        "authenticated_portal_observed", False
+                    ),
+                    "authenticated_application_steps_observed": authenticated_diagnostics.get(
+                        "authenticated_application_steps_observed", False
+                    ),
+                    "authenticated_form_observed": authenticated_diagnostics.get(
+                        "authenticated_form_observed", False
+                    ),
+                }
+
+                try:
+                    report = _sanitized_post_verification_report(page, verification_seen)
+                    report_observation_succeeded = True
+                    report_error_type = ""
+                except Exception as exc:
+                    report = None
+                    report_observation_succeeded = False
+                    report_error_type = type(exc).__name__
+
+                now = time.monotonic()
+                live_diagnostic = {
+                    "stage_observation_succeeded": stage_observation_succeeded,
+                    "verification_code_visible": stage.get("verification_code_visible") is True,
+                    "identity_surface_visible": stage.get("identity_surface_visible") is True,
+                    **authenticated_diagnostics,
+                    "form_report_observation_succeeded": report_observation_succeeded,
+                    "form_report_error_type": report_error_type,
+                    "visible_control_count": (
+                        report.get("visible_control_count", 0) if report is not None else 0
+                    ),
+                    "raw_values_exposed": False,
+                }
+                if (
+                    live_diagnostic != last_live_diagnostic
+                    and (
+                        authenticated_diagnostics.get("postlogin_path_match") is True
+                        or authenticated_diagnostics.get("authenticated_form_observed") is True
+                        or not stage_observation_succeeded
+                        or not report_observation_succeeded
+                    )
+                ):
+                    print(json.dumps(
+                        {"authenticated_surface_diagnostic": live_diagnostic},
+                        sort_keys=True,
+                    ))
+                    last_live_diagnostic = live_diagnostic
+
+                if not stage_observation_succeeded or report is None:
                     stable_since = None
                     last_signature = None
                     page.wait_for_timeout(1_000)
                     continue
-                now = time.monotonic()
+
                 last_control_count = report["visible_control_count"]
-                authenticated = {"authenticated_portal_observed": False, "authenticated_form_observed": False}
-                if not stage["verification_code_visible"] and not stage["identity_surface_visible"]:
-                    authenticated = _authenticated_form_evidence(page, request.application_url)
                 authenticated_portal_seen = authenticated_portal_seen or authenticated["authenticated_portal_observed"]
                 if authenticated["authenticated_portal_observed"] and not authenticated["authenticated_form_observed"] and not portal_hint_announced:
                     print("Signed-in portal observed. Open Complete Your Application manually to show Personal Information; do not edit fields or click Next.")
