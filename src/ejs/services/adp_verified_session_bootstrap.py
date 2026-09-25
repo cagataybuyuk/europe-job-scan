@@ -18,8 +18,9 @@ import time
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from ejs.services.adp_live_inspector import validate_adp_live_url
+from ejs.services.adp_same_page_manifest import extract_same_page_manifest
 
-BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v4"
+BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v5"
 OTP_CONTROL_ID = "oneTimePassWord"
 IDENTITY_CONTROL_IDS = ("guestFirstName", "guestLastName", "guestEmail")
 DEFAULT_TIMEOUT_SECONDS = 900
@@ -38,6 +39,7 @@ class AdpVerifiedSessionBootstrapRequest:
     postlogin_url_out: str = ""
     user_data_dir: str = ""
     live_handoff_report_out: str = ""
+    same_page_manifest_out: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
@@ -604,6 +606,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
     session_storage_path = Path(request.session_storage_out) if request.session_storage_out else None
     postlogin_url_path = Path(request.postlogin_url_out) if request.postlogin_url_out else None
     live_handoff_report_path = Path(request.live_handoff_report_out) if request.live_handoff_report_out else None
+    same_page_manifest_path = Path(request.same_page_manifest_out) if request.same_page_manifest_out else None
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     if session_storage_path is not None:
@@ -612,6 +615,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         postlogin_url_path.parent.mkdir(parents=True, exist_ok=True)
     if live_handoff_report_path is not None:
         live_handoff_report_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_manifest_path is not None:
+        same_page_manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
         browser = None
@@ -809,6 +814,38 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
 
                         storage_evidence = _export_storage_state(context, storage_path)
 
+                        same_page_manifest = None
+                        if same_page_manifest_path is not None:
+                            same_page_manifest = extract_same_page_manifest(
+                                page,
+                                request.application_url,
+                                timeout_ms=20_000,
+                                render_wait_ms=5_000,
+                            )
+                            same_page_manifest_path.write_text(
+                                json.dumps(
+                                    same_page_manifest,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_manifest": {
+                                    "manifest_version": same_page_manifest.get("manifest_version", ""),
+                                    "surface_fingerprint": same_page_manifest.get("surface_fingerprint", ""),
+                                    "visible_control_count": same_page_manifest.get("visible_control_count", 0),
+                                    "visible_action_count": same_page_manifest.get("visible_action_count", 0),
+                                    "file_control_count": same_page_manifest.get("file_control_count", 0),
+                                    "password_control_count": same_page_manifest.get("password_control_count", 0),
+                                    "form_value_write_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "raw_values_exposed": False,
+                                }
+                            }, sort_keys=True))
+
                         live_handoff = None
                         if live_handoff_report_path is not None:
                             live_handoff = _live_handoff_probe(
@@ -847,6 +884,22 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                             "session_storage_exported": session_storage_path is not None,
                             **session_storage_evidence,
                             "session_reuse_proven": False,
+                            "same_page_manifest_exported": isinstance(same_page_manifest, dict),
+                            "same_page_manifest_fingerprint": (
+                                str(same_page_manifest.get("surface_fingerprint", ""))
+                                if isinstance(same_page_manifest, dict)
+                                else ""
+                            ),
+                            "same_page_manifest_visible_control_count": (
+                                int(same_page_manifest.get("visible_control_count", 0))
+                                if isinstance(same_page_manifest, dict)
+                                else 0
+                            ),
+                            "same_page_manifest_file_control_count": (
+                                int(same_page_manifest.get("file_control_count", 0))
+                                if isinstance(same_page_manifest, dict)
+                                else 0
+                            ),
                             "live_handoff_reuse_proven": (
                                 live_handoff.get("live_handoff_reuse_proven") is True
                                 if isinstance(live_handoff, dict)
@@ -895,6 +948,7 @@ def main() -> int:
     parser.add_argument("--postlogin-url-out", default="")
     parser.add_argument("--user-data-dir", default="")
     parser.add_argument("--live-handoff-report-out", default="")
+    parser.add_argument("--same-page-manifest-out", default="")
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
@@ -905,6 +959,7 @@ def main() -> int:
         postlogin_url_out=args.postlogin_url_out,
         user_data_dir=args.user_data_dir,
         live_handoff_report_out=args.live_handoff_report_out,
+        same_page_manifest_out=args.same_page_manifest_out,
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
@@ -915,6 +970,10 @@ def main() -> int:
         "visible_control_count": report.get("visible_control_count", 0),
         "storage_state_exported": report.get("storage_state_exported") is True,
         "canonical_postlogin_url_exported": report.get("canonical_postlogin_url_exported") is True,
+        "same_page_manifest_exported": report.get("same_page_manifest_exported") is True,
+        "same_page_manifest_fingerprint": report.get("same_page_manifest_fingerprint", ""),
+        "same_page_manifest_visible_control_count": report.get("same_page_manifest_visible_control_count", 0),
+        "same_page_manifest_file_control_count": report.get("same_page_manifest_file_control_count", 0),
         "live_handoff_reuse_proven": report.get("live_handoff_reuse_proven") is True,
         "live_handoff_strongest_reusable_scope": report.get("live_handoff_strongest_reusable_scope", ""),
         "storage_indexed_db_database_count": report.get("storage_indexed_db_database_count", 0),
