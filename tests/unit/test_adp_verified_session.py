@@ -12,6 +12,7 @@ from ejs.services.adp_verified_session_bootstrap import (
     _capture_session_storage,
     _export_storage_state,
     _form_surface_signature,
+    _live_handoff_probe,
     _open_reviewed_adp_target,
     _visible,
     bootstrap_stage,
@@ -228,6 +229,59 @@ class AdpVerifiedSessionTests(unittest.TestCase):
             path.write_text(captured, encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "TARGET_MISMATCH"):
                 _load_direct_reuse_url(str(path), URL)
+
+    def test_live_handoff_probe_uses_fresh_browser_before_source_closes(self):
+        playwright = MagicMock()
+        browser = MagicMock()
+        context = MagicMock()
+        page = MagicMock()
+        playwright.chromium.launch.return_value = browser
+        browser.new_context.return_value = context
+        context.new_page.return_value = page
+        page.url = URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html")
+        page.wait_for_timeout.return_value = None
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(bootstrap, "bootstrap_stage", return_value={
+                    "verification_code_visible": False,
+                    "identity_surface_visible": False,
+                }), \
+                patch.object(bootstrap, "_authenticated_form_evidence", return_value={
+                    "authenticated_form_observed": True,
+                }), \
+                patch.object(bootstrap, "_sanitized_post_verification_report", return_value=surface({})), \
+                patch.object(bootstrap, "_form_surface_signature", return_value=(("input", "text", "firstName", "firstName"),)):
+            state = Path(tmp) / "state.json"
+            state.write_text('{"cookies":[],"origins":[]}', encoding="utf-8")
+            result = _live_handoff_probe(
+                playwright,
+                URL,
+                state,
+                {"adp-session": "opaque"},
+                page.url,
+                budget_ms=2_000,
+            )
+
+        playwright.chromium.launch.assert_called_once_with(headless=False)
+        browser.new_context.assert_called_once_with(
+            accept_downloads=False,
+            storage_state=str(state),
+        )
+        context.add_init_script.assert_called_once()
+        page.goto.assert_called_once_with(
+            page.url,
+            wait_until="domcontentloaded",
+            timeout=2_000,
+        )
+        self.assertTrue(result["live_handoff_reuse_proven"])
+        self.assertEqual(result["visible_form_control_count"], 1)
+        self.assertEqual(result["navigation_click_attempts"], 0)
+        self.assertEqual(result["form_value_write_attempts"], 0)
+        self.assertEqual(result["credential_entry_attempts"], 0)
+        self.assertEqual(result["file_upload_attempts"], 0)
+        self.assertEqual(result["submit_attempts"], 0)
+        context.close.assert_called_once()
+        browser.close.assert_called_once()
 
     def test_persistent_profile_probe_reopens_same_profile_without_write_authority(self):
         captured = (
