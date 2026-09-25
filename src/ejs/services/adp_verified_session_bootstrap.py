@@ -143,11 +143,16 @@ def _authenticated_form_diagnostics(page, application_url: str) -> dict:
         expected_query = query_parameters(expected.query)
         query_matches = {}
         for key in ("cid", "ccid", "jobid"):
-            target = expected_query.get(key, [])
+            target_values = expected_query.get(key, [])
+            actual_values = actual_query.get(key, [])
+            target_unique = {value for value in target_values if value}
+            actual_unique = {value for value in actual_values if value}
             query_matches[key] = (
-                len(target) == 1
-                and bool(target[0])
-                and actual_query.get(key) == target
+                len(target_unique) == 1
+                and len(actual_values) >= 1
+                and len(actual_unique) == 1
+                and actual_unique == target_unique
+                and all(bool(value) for value in actual_values)
             )
             evidence[f"{key}_match"] = query_matches[key]
 
