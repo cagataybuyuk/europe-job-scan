@@ -104,6 +104,10 @@ jobs:
           assert 'file_upload_attempts": 0' in same_page_manifest
           assert 'submit_attempts": 0' in same_page_manifest
           assert 'candidate_values_exposed": False' in same_page_manifest
+          manifest_report_block = bootstrap.split('same_page_manifest = None', 1)[1].split(
+              'if same_page_safe_fill_report_path is not None:', 1
+          )[0]
+          assert 'same_page_safe_fill.get(' not in manifest_report_block
           assert 'Invoke-GhSecretSetUtf8' not in same_page_helper
           assert 'gh secret' not in same_page_helper
           assert '--same-page-manifest-out' in same_page_helper
