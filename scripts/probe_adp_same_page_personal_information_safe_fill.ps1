@@ -74,7 +74,7 @@ try {
   $first = Read-ExactLocalText 'First name' 'First name'
   $last = Read-ExactLocalText 'Last name' 'Last name'
   $email = Read-ExactLocalText 'Email' 'Email'
-  if ($email -notmatch '^[^ @]+@[^ @]+[.][^ @]+
+  if ($email -notmatch '^[^ @]+@[^ @]+[.][^ @]+$') {
     throw 'Email format is invalid.'
   }
 
@@ -83,10 +83,10 @@ try {
     throw 'Mobile phone country must be exactly two uppercase ASCII letters.'
   }
   $phone = Read-ExactLocalText 'Mobile national number - digits only, without country code' 'Mobile national number'
-  if ($phone -notmatch '^[0-9]{4,20}
+  if ($phone -notmatch '^[0-9]{4,20}$') {
     throw 'Mobile national number must contain 4-20 digits only.'
   }
-  if ($phoneCountry -eq 'TR' -and $phone -notmatch '^5[0-9]{9}
+  if ($phoneCountry -eq 'TR' -and $phone -notmatch '^5[0-9]{9}$') {
     throw 'For TR mobile, enter 10 digits starting with 5, without +90 and without a leading 0.'
   }
 
