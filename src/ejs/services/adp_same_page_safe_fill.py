@@ -12,9 +12,11 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import unicodedata
 
 from ejs.contracts.prefill import SafeFieldWriterAuthority, value_hash
 from ejs.services.adp_live_inspector import validate_adp_live_url
+from ejs.services.adp_validation_contract import turkish_ascii_candidate
 from ejs.services.adp_same_page_manifest import (
     extract_same_page_manifest,
     manifest_surface_fingerprint,
@@ -139,6 +141,20 @@ def _validate_identity_surface(manifest: dict) -> None:
         raise PermissionError("ADP_SAME_PAGE_SAFE_FILL_PHONE_AMBIGUITY_CONTRACT_DRIFT")
 
 
+def _comparison_class(observed: str, desired: str) -> str:
+    if observed == desired:
+        return "exact"
+    if unicodedata.normalize("NFC", observed) == unicodedata.normalize("NFC", desired):
+        return "nfc_equivalent"
+    if observed.casefold() == desired.casefold():
+        return "casefold_equivalent"
+    if observed.strip() == desired.strip():
+        return "trim_equivalent"
+    if turkish_ascii_candidate(observed) == turkish_ascii_candidate(desired):
+        return "turkish_ascii_equivalent"
+    return "other"
+
+
 def _fill_blank_or_verify(page, element_id: str, desired: str, canonical: str, counters: dict) -> dict:
     locator = page.locator(f"#{element_id}")
     if locator.count() != 1 or not locator.is_visible() or not locator.is_enabled():
@@ -146,7 +162,10 @@ def _fill_blank_or_verify(page, element_id: str, desired: str, canonical: str, c
 
     before = locator.input_value()
     if before and before != desired:
-        raise PermissionError(f"ADP_SAME_PAGE_SAFE_FILL_PROFILE_CONFLICT:{canonical}")
+        comparison = _comparison_class(before, desired)
+        raise PermissionError(
+            f"ADP_SAME_PAGE_SAFE_FILL_PROFILE_CONFLICT:{canonical}:{comparison}"
+        )
 
     executed = False
     if not before:
