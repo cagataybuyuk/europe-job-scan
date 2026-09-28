@@ -9,6 +9,7 @@ on:
       - 'src/ejs/services/adp_same_page_manifest.py'
       - 'src/ejs/services/adp_same_page_safe_fill.py'
       - 'src/ejs/services/adp_same_page_contact_address_contract.py'
+      - 'src/ejs/services/adp_personal_information_profile.py'
       - 'scripts/bootstrap_adp_verified_session.ps1'
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
@@ -21,6 +22,7 @@ on:
       - 'tests/unit/test_adp_same_page_manifest.py'
       - 'tests/unit/test_adp_same_page_safe_fill.py'
       - 'tests/unit/test_adp_same_page_contact_address_contract.py'
+      - 'tests/unit/test_adp_personal_information_profile.py'
       - 'tests/scripts/test_gd004_bootstrap.ps1'
       - '.github/workflows/gd004-adp-verified-session-regression.yml'
   push:
@@ -32,6 +34,7 @@ on:
       - 'src/ejs/services/adp_same_page_manifest.py'
       - 'src/ejs/services/adp_same_page_safe_fill.py'
       - 'src/ejs/services/adp_same_page_contact_address_contract.py'
+      - 'src/ejs/services/adp_personal_information_profile.py'
       - 'scripts/bootstrap_adp_verified_session.ps1'
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
@@ -44,6 +47,7 @@ on:
       - 'tests/unit/test_adp_same_page_manifest.py'
       - 'tests/unit/test_adp_same_page_safe_fill.py'
       - 'tests/unit/test_adp_same_page_contact_address_contract.py'
+      - 'tests/unit/test_adp_personal_information_profile.py'
       - 'tests/scripts/test_gd004_bootstrap.ps1'
 
 permissions:
@@ -64,6 +68,7 @@ jobs:
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_manifest.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_safe_fill.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_contact_address_contract.py' -v
+          python -m unittest discover -s tests/unit -p 'test_adp_personal_information_profile.py' -v
       - name: Assert bootstrap and inspector authority boundaries
         run: |
           python - <<'PY'
@@ -74,6 +79,7 @@ jobs:
           same_page_manifest = Path('src/ejs/services/adp_same_page_manifest.py').read_text(encoding='utf-8')
           same_page_safe_fill = Path('src/ejs/services/adp_same_page_safe_fill.py').read_text(encoding='utf-8')
           same_page_contact_address = Path('src/ejs/services/adp_same_page_contact_address_contract.py').read_text(encoding='utf-8')
+          personal_information_profile = Path('src/ejs/services/adp_personal_information_profile.py').read_text(encoding='utf-8')
           workflow = Path('.github/workflows/gd004-adp-verified-session-inspector.yml').read_text(encoding='utf-8')
           helper = Path('scripts/bootstrap_adp_verified_session.ps1').read_text(encoding='utf-8')
           persistent_helper = Path('scripts/probe_adp_persistent_profile.ps1').read_text(encoding='utf-8')
@@ -148,6 +154,11 @@ jobs:
           assert 'next_click_attempts": 0' in same_page_contact_address
           assert 'submit_attempts": 0' in same_page_contact_address
           assert 'input_values_read": False' in same_page_contact_address
+          assert 'resolve_adp_profile' in personal_information_profile
+          assert 'raw_values_exposed": False' in personal_information_profile
+          assert '.click(' not in personal_information_profile
+          assert '.fill(' not in personal_information_profile
+          assert 'select_option' not in personal_information_profile
           assert 'Invoke-GhSecretSetUtf8' not in same_page_contact_address_helper
           assert 'gh secret' not in same_page_contact_address_helper
           assert 'set_input_files' not in same_page_contact_address_helper
