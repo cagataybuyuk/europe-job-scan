@@ -1,6 +1,7 @@
 param(
   [string]$ApplicationUrl = 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=eae41664-19fb-4412-96f8-43f15d52332b&ccId=19000101_000001&jobId=955507&source=LR&lang=en_US',
   [string]$ExpectedManifestFingerprint = '',
+  [switch]$AllowReviewedTurkishAsciiNameOverwrite,
   [int]$TimeoutSeconds = 900
 )
 
@@ -90,9 +91,28 @@ try {
   Write-Host 'A verified ADP browser will open.'
   Write-Host 'Complete Apply / identity / verification manually.'
   Write-Host 'When Personal Information opens, do not edit fields and do not click Next.'
-  Write-Host 'The executor may fill only a blank reviewed First Name or Last Name control.'
+  Write-Host 'The executor may fill a blank reviewed First Name or Last Name control.'
+  if ($AllowReviewedTurkishAsciiNameOverwrite) {
+    Write-Host 'Reviewed Turkish-to-ASCII name overwrite is enabled only for exact transliteration-equivalent existing values.'
+  }
 
-  & $python.Source @pythonPrefixArgs -m ejs.services.adp_verified_session_bootstrap --url $ApplicationUrl --storage-state-out $statePath --report-out $bootstrapReportPath --session-storage-out $sessionStoragePath --postlogin-url-out $postLoginUrlPath --same-page-manifest-out $manifestPath --same-page-safe-fill-profile $profilePath --same-page-safe-fill-expected-manifest-fingerprint $ExpectedManifestFingerprint --same-page-safe-fill-report-out $safeFillReportPath --timeout-seconds $TimeoutSeconds
+  $bootstrapArgs = @(
+    '-m', 'ejs.services.adp_verified_session_bootstrap',
+    '--url', $ApplicationUrl,
+    '--storage-state-out', $statePath,
+    '--report-out', $bootstrapReportPath,
+    '--session-storage-out', $sessionStoragePath,
+    '--postlogin-url-out', $postLoginUrlPath,
+    '--same-page-manifest-out', $manifestPath,
+    '--same-page-safe-fill-profile', $profilePath,
+    '--same-page-safe-fill-expected-manifest-fingerprint', $ExpectedManifestFingerprint,
+    '--same-page-safe-fill-report-out', $safeFillReportPath,
+    '--timeout-seconds', [string]$TimeoutSeconds
+  )
+  if ($AllowReviewedTurkishAsciiNameOverwrite) {
+    $bootstrapArgs += '--same-page-safe-fill-allow-reviewed-turkish-ascii-name-overwrite'
+  }
+  & $python.Source @pythonPrefixArgs @bootstrapArgs
 
   if ($LASTEXITCODE -ne 0) {
     throw "ADP same-page safe-fill bootstrap failed with exit code $LASTEXITCODE."
@@ -126,6 +146,7 @@ try {
     next_click_attempts = $report.next_click_attempts
     file_upload_attempts = $report.file_upload_attempts
     submit_attempts = $report.submit_attempts
+    reviewed_turkish_ascii_name_overwrite_allowed = $report.reviewed_turkish_ascii_name_overwrite_allowed
     raw_values_exposed = $false
   } | ConvertTo-Json -Compress
 } finally {
