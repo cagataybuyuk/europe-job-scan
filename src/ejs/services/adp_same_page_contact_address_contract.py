@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from ejs.services.adp_same_page_manifest import (
     extract_same_page_manifest,
     manifest_surface_fingerprint,
 )
 
-CONTRACT_VERSION = "adp-same-page-contact-address-contract-v1"
+CONTRACT_VERSION = "adp-same-page-contact-address-contract-v2"
 
 ADDRESS_CONTROLS = (
     ("country", "PersonalAddress_country", "Country*", True),
@@ -31,6 +32,115 @@ ADDRESS_CONTROLS = (
 
 def _normalize(value: str) -> str:
     return " ".join((value or "").split())
+
+
+def _sanitize_semantic_text(value: str) -> str:
+    text = _normalize(value)
+    text = re.sub(r"[^\s@]+@[^\s@]+", "[email]", text)
+    text = re.sub(r"\b\d{6,}\b", "[digits]", text)
+    return text[:600]
+
+
+def _nearest_semantic_context(locator) -> dict:
+    try:
+        raw = locator.evaluate(
+            """el => {
+              let node = el.parentElement;
+              for (let depth = 1; depth <= 6 && node; depth++, node = node.parentElement) {
+                const clone = node.cloneNode(true);
+                clone.querySelectorAll(
+                  'input,select,textarea,option,button,script,style,[contenteditable="true"]'
+                ).forEach(item => item.remove());
+                const text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+                if (text) {
+                  return {
+                    depth,
+                    tag: node.tagName.toLowerCase(),
+                    text,
+                  };
+                }
+              }
+              return {depth: -1, tag: '', text: ''};
+            }"""
+        )
+    except Exception:
+        raw = {"depth": -1, "tag": "", "text": ""}
+    return {
+        "depth": int(raw.get("depth", -1) or -1),
+        "tag": str(raw.get("tag", ""))[:80],
+        "text": _sanitize_semantic_text(str(raw.get("text", ""))),
+        "candidate_values_read": False,
+    }
+
+
+def _pairing_from_distance_matrix(matrix: list[dict]) -> list[dict]:
+    rows = [row for row in matrix if isinstance(row, dict)]
+    pairs = []
+    used_phones: set[int] = set()
+    country_ordinals = sorted({int(row.get("countryOrdinal", -1)) for row in rows})
+    for country_ordinal in country_ordinals:
+        candidates = [
+            row for row in rows
+            if int(row.get("countryOrdinal", -1)) == country_ordinal
+        ]
+        candidates.sort(key=lambda row: (
+            int(row.get("distance", 9999)),
+            int(row.get("phoneOrdinal", -1)),
+        ))
+        if not candidates:
+            raise PermissionError("ADP_CONTACT_ADDRESS_PHONE_PAIRING_INCOMPLETE")
+        best = candidates[0]
+        best_distance = int(best.get("distance", 9999))
+        tied = [
+            row for row in candidates
+            if int(row.get("distance", 9999)) == best_distance
+        ]
+        if len(tied) != 1:
+            raise PermissionError("ADP_CONTACT_ADDRESS_PHONE_PAIRING_AMBIGUOUS")
+        phone_ordinal = int(best.get("phoneOrdinal", -1))
+        if phone_ordinal < 0 or phone_ordinal in used_phones:
+            raise PermissionError("ADP_CONTACT_ADDRESS_PHONE_PAIRING_NOT_BIJECTIVE")
+        used_phones.add(phone_ordinal)
+        pairs.append({
+            "country_ordinal": country_ordinal,
+            "phone_ordinal": phone_ordinal,
+            "dom_distance": best_distance,
+        })
+    return pairs
+
+
+def _phone_pair_semantics(page, pairs: list[dict]) -> list[dict]:
+    countries = page.locator("select[name='phoneCountry']")
+    phones = page.locator("input[name='phone']")
+    results = []
+    for pair in pairs:
+        country_ordinal = int(pair["country_ordinal"])
+        phone_ordinal = int(pair["phone_ordinal"])
+        country = countries.nth(country_ordinal)
+        phone = phones.nth(phone_ordinal)
+        results.append({
+            **pair,
+            "country_semantic_context": _nearest_semantic_context(country),
+            "phone_semantic_context": _nearest_semantic_context(phone),
+            "candidate_values_read": False,
+        })
+    return results
+
+
+def _country_combobox_hints(page) -> dict:
+    locator = page.locator("#PersonalAddress_country")
+    if locator.count() != 1:
+        raise PermissionError("ADP_CONTACT_ADDRESS_COUNTRY_CONTROL_NOT_UNIQUE")
+    return {
+        "semantic_context": _nearest_semantic_context(locator),
+        "list_attribute_present": bool(_attr(locator, "list")),
+        "aria_controls_present": bool(_attr(locator, "aria-controls")),
+        "aria_autocomplete": _attr(locator, "aria-autocomplete"),
+        "aria_expanded": _attr(locator, "aria-expanded"),
+        "visible_listbox_count": int(page.locator("[role='listbox']:visible").count()),
+        "visible_option_role_count": int(page.locator("[role='option']:visible").count()),
+        "candidate_values_read": False,
+    }
 
 
 def _attr(locator, name: str) -> str:
@@ -199,6 +309,8 @@ def _stable_descriptor(report: dict) -> dict:
             for row in report.get("phone_input_controls", [])
         ],
         "phone_dom_distance_matrix": report.get("phone_dom_distance_matrix", []),
+        "phone_pair_candidates": report.get("phone_pair_candidates", []),
+        "address_country_combobox_hints": report.get("address_country_combobox_hints", {}),
     }
 
 
@@ -248,6 +360,9 @@ def inspect_on_verified_page(
         )
 
     matrix = _phone_dom_distance_matrix(page)
+    pairs = _pairing_from_distance_matrix(matrix)
+    phone_pair_semantics = _phone_pair_semantics(page, pairs)
+    country_combobox_hints = _country_combobox_hints(page)
     report = {
         "contract_version": CONTRACT_VERSION,
         "manifest_surface_fingerprint": observed,
@@ -255,6 +370,8 @@ def inspect_on_verified_page(
         "phone_country_controls": phone_countries,
         "phone_input_controls": phone_inputs,
         "phone_dom_distance_matrix": matrix,
+        "phone_pair_candidates": phone_pair_semantics,
+        "address_country_combobox_hints": country_combobox_hints,
         "address_control_count": len(address),
         "phone_country_control_count": len(phone_countries),
         "phone_input_control_count": len(phone_inputs),
