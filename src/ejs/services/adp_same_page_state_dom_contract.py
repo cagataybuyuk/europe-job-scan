@@ -16,7 +16,7 @@ from ejs.services.adp_same_page_contact_address_contract import (
     inspect_on_verified_page as inspect_contact_address_on_verified_page,
 )
 
-CONTRACT_VERSION = "adp-same-page-state-dom-contract-v1"
+CONTRACT_VERSION = "adp-same-page-state-dom-contract-v2"
 STATE_ID = "PersonalAddress_state"
 
 
@@ -85,6 +85,81 @@ def _descendants(wrapper) -> list[dict]:
     )
 
 
+def _sibling_metadata(wrapper) -> list[dict]:
+    return wrapper.evaluate(
+        """el => {
+          const rows = [];
+          const siblings = [
+            ['previous', el.previousElementSibling],
+            ['next', el.nextElementSibling],
+          ];
+          for (const [relation, node] of siblings) {
+            if (!node) continue;
+            const attr = (name) => node.getAttribute(name) || '';
+            rows.push({
+              relation,
+              tag: node.tagName.toLowerCase(),
+              id: attr('id'),
+              name: attr('name'),
+              type: attr('type'),
+              role: attr('role'),
+              class_name: String(node.className || '').slice(0, 300),
+              aria_expanded: attr('aria-expanded'),
+              aria_autocomplete: attr('aria-autocomplete'),
+              interactive_descendant_count: node.querySelectorAll(
+                'input,select,textarea,button,[role="combobox"]'
+              ).length,
+              value_attribute_read: false,
+              property_value_read: false,
+            });
+          }
+          return rows;
+        }"""
+    )
+
+
+def _ancestor_neighborhood(wrapper, max_depth: int = 4) -> list[dict]:
+    return wrapper.evaluate(
+        """(el, maxDepth) => {
+          const selector = 'input,select,textarea,button,[role="combobox"]';
+          const seen = new Set();
+          const rows = [];
+          let scope = el.parentElement;
+          for (let depth = 1; depth <= maxDepth && scope; depth++, scope = scope.parentElement) {
+            const nodes = Array.from(scope.querySelectorAll(selector));
+            for (const node of nodes) {
+              if (seen.has(node)) continue;
+              seen.add(node);
+              const attr = (name) => node.getAttribute(name) || '';
+              rows.push({
+                ancestor_depth: depth,
+                ordinal: rows.length,
+                tag: node.tagName.toLowerCase(),
+                id: attr('id'),
+                name: attr('name'),
+                type: attr('type'),
+                role: attr('role'),
+                readonly: node.hasAttribute('readonly'),
+                disabled_attribute: node.hasAttribute('disabled'),
+                hidden_attribute: node.hasAttribute('hidden'),
+                tabindex: attr('tabindex'),
+                class_name: String(node.className || '').slice(0, 300),
+                aria_expanded: attr('aria-expanded'),
+                aria_controls: attr('aria-controls'),
+                aria_activedescendant: attr('aria-activedescendant'),
+                aria_autocomplete: attr('aria-autocomplete'),
+                aria_haspopup: attr('aria-haspopup'),
+                value_attribute_read: false,
+                property_value_read: false,
+              });
+            }
+          }
+          return rows;
+        }""",
+        max_depth,
+    )
+
+
 def _parent_chain(locator, depth: int = 5) -> list[dict]:
     return locator.evaluate(
         """(el, maxDepth) => {
@@ -117,6 +192,8 @@ def _stable_descriptor(report: dict) -> dict:
         "contact_contract_fingerprint": report.get("contact_contract_fingerprint", ""),
         "wrapper": report.get("wrapper", {}),
         "descendants": report.get("descendants", []),
+        "wrapper_siblings": report.get("wrapper_siblings", []),
+        "ancestor_neighborhood": report.get("ancestor_neighborhood", []),
         "wrapper_parent_chain": report.get("wrapper_parent_chain", []),
     }
 
@@ -158,23 +235,32 @@ def inspect_on_verified_page(
 
     wrapper_metadata = _metadata(wrapper)
     descendants = _descendants(wrapper)
+    siblings = _sibling_metadata(wrapper)
+    neighborhood = _ancestor_neighborhood(wrapper)
     parent_chain = _parent_chain(wrapper)
 
-    interactive = [
+    interactive_descendants = [
         row for row in descendants
         if row.get("tag") in {"input", "select", "textarea", "button"}
         or row.get("role") == "combobox"
     ]
-    if not interactive:
-        raise PermissionError("ADP_STATE_DOM_CONTRACT_INTERACTIVE_DESCENDANT_MISSING")
+    interactive_neighborhood = [
+        row for row in neighborhood
+        if row.get("tag") in {"input", "select", "textarea", "button"}
+        or row.get("role") == "combobox"
+    ]
 
     report = {
         "contract_version": CONTRACT_VERSION,
         "contact_contract_fingerprint": observed_contact,
         "wrapper": wrapper_metadata,
         "descendants": descendants,
+        "wrapper_siblings": siblings,
+        "ancestor_neighborhood": neighborhood,
         "wrapper_parent_chain": parent_chain,
-        "interactive_descendant_count": len(interactive),
+        "interactive_descendant_count": len(interactive_descendants),
+        "interactive_neighborhood_count": len(interactive_neighborhood),
+        "interactive_candidate_count": len(interactive_neighborhood),
         "form_value_write_attempts": 0,
         "state_selection_attempts": 0,
         "country_selection_attempts": 0,
