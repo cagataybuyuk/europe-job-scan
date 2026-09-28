@@ -74,7 +74,775 @@ try {
   $first = Read-ExactLocalText 'First name' 'First name'
   $last = Read-ExactLocalText 'Last name' 'Last name'
   $email = Read-ExactLocalText 'Email' 'Email'
-  if ($email -notmatch '^[^s@]+@[^s@]+.[^s@]+$') {
+  if ($email -notmatch '^[^ @]+@[^ @]+[.][^ @]+
+    throw 'Email format is invalid.'
+  }
+
+  $phoneCountry = (Read-ExactLocalText 'Mobile phone country ISO-2 (for example TR)' 'Mobile phone country').ToUpperInvariant()
+  if ($phoneCountry -notmatch '^[A-Z]{2}$') {
+    throw 'Mobile phone country must be exactly two uppercase ASCII letters.'
+  }
+  $phone = Read-ExactLocalText 'Mobile national number - digits only, without country code' 'Mobile national number'
+  if ($phone -notmatch '^[0-9]{4,20}
+    throw 'Mobile national number must contain 4-20 digits only.'
+  }
+  if ($phoneCountry -eq 'TR' -and $phone -notmatch '^5[0-9]{9}
+    throw 'For TR mobile, enter 10 digits starting with 5, without +90 and without a leading 0.'
+  }
+
+  $addressCountry = (Read-ExactLocalText 'Address country ISO-2 (reviewed runtime currently supports TR)' 'Address country').ToUpperInvariant()
+  if ($addressCountry -ne 'TR') {
+    throw 'This reviewed ADP canary currently supports address country TR only.'
+  }
+  $line1 = Read-ExactLocalText 'Address Line 1' 'Address Line 1'
+  $line2 = Read-ExactLocalText 'Address Line 2 (optional; press Enter if empty)' 'Address Line 2' $false
+  $line3 = Read-ExactLocalText 'Address Line 3 (optional; press Enter if empty)' 'Address Line 3' $false
+  $city = Read-ExactLocalText 'City' 'City'
+  $state = Read-ExactLocalText 'State / Territory' 'State / Territory'
+  $postal = Read-ExactLocalText 'Postal Code' 'Postal Code'
+
+  $profileJson = @{
+    profile_version = 'adp-personal-information-local-canary-v1'
+    first_name = $first
+    last_name = $last
+    email = $email
+    phone_country_iso2 = $phoneCountry
+    phone_national_number = $phone
+    adp_ascii_name_policy_approved = [bool]$AllowReviewedTurkishAsciiNameOverwrite
+    address_country_iso2 = $addressCountry
+    address_line1 = $line1
+    address_line2 = $line2
+    address_line3 = $line3
+    city = $city
+    state_or_territory = $state
+    postal_code = $postal
+  } | ConvertTo-Json -Compress
+
+  $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+  [IO.File]::WriteAllText($profilePath, $profileJson, $utf8NoBom)
+
+  Write-Host 'A verified ADP browser will open.'
+  Write-Host 'Complete Apply / identity / verification manually.'
+  Write-Host 'When Personal Information opens, do not edit fields and do not click Next.'
+  Write-Host 'The executor may verify/fill identity, required Mobile Number, Turkey, and reviewed address fields only.'
+  Write-Host 'Home Phone, consent, Next, upload and submit remain disabled.'
+
+  $args = @(
+    '-m', 'ejs.services.adp_verified_session_bootstrap',
+    '--url', $ApplicationUrl,
+    '--storage-state-out', $statePath,
+    '--report-out', $bootstrapReportPath,
+    '--same-page-personal-information-profile', $profilePath,
+    '--same-page-personal-information-expected-manifest-fingerprint', $ExpectedManifestFingerprint,
+    '--same-page-personal-information-expected-contact-contract-fingerprint', $ExpectedContactContractFingerprint,
+    '--same-page-personal-information-expected-country-surface-fingerprint', $ExpectedCountrySurfaceFingerprint,
+    '--same-page-personal-information-report-out', $safeFillReportPath,
+    '--timeout-seconds', [string]$TimeoutSeconds
+  )
+  if ($AllowReviewedTurkishAsciiNameOverwrite) {
+    $args += '--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite'
+  }
+
+  & $python.Source @pythonPrefixArgs @args
+  if ($LASTEXITCODE -ne 0) {
+    throw "ADP Personal Information safe-fill bootstrap failed with exit code $LASTEXITCODE."
+  }
+
+  if (-not (Test-Path -LiteralPath $safeFillReportPath)) {
+    throw 'ADP Personal Information safe-fill report was not created.'
+  }
+  $report = Get-Content -Raw -LiteralPath $safeFillReportPath | ConvertFrom-Json
+
+  if ($report.safe_fill_status -ne 'verified' -or
+      $report.home_phone_write_attempts -ne 0 -or
+      $report.consent_action_attempts -ne 0 -or
+      $report.navigation_click_attempts -ne 0 -or
+      $report.next_click_attempts -ne 0 -or
+      $report.file_upload_attempts -ne 0 -or
+      $report.submit_attempts -ne 0) {
+    throw 'ADP Personal Information safe-fill exceeded its reviewed authority boundary.'
+  }
+
+  Write-Host 'ADP Personal Information safe-fill verified. Next/upload/submit were not performed.'
+  [pscustomobject]@{
+    safe_fill_status = $report.safe_fill_status
+    executor_version = $report.executor_version
+    form_value_write_attempts = $report.form_value_write_attempts
+    form_value_write_successes = $report.form_value_write_successes
+    phone_write_attempts = $report.phone_write_attempts
+    phone_write_successes = $report.phone_write_successes
+    address_write_attempts = $report.address_write_attempts
+    address_write_successes = $report.address_write_successes
+    country_selection_attempts = $report.country_selection_attempts
+    country_selection_successes = $report.country_selection_successes
+    email_readback_match = $report.identity_result.email_readback_match
+    home_phone_write_attempts = $report.home_phone_write_attempts
+    next_click_attempts = $report.next_click_attempts
+    file_upload_attempts = $report.file_upload_attempts
+    submit_attempts = $report.submit_attempts
+    raw_values_exposed = $false
+  } | ConvertTo-Json -Compress
+} finally {
+  foreach ($Path in @($statePath, $bootstrapReportPath, $profilePath, $safeFillReportPath)) {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Variable profileJson, first, last, email, phoneCountry, phone, addressCountry, line1, line2, line3, city, state, postal, utf8NoBom -ErrorAction SilentlyContinue
+}
+) {
+    throw 'Email format is invalid.'
+  }
+
+  $phoneCountry = (Read-ExactLocalText 'Mobile phone country ISO-2 (for example TR)' 'Mobile phone country').ToUpperInvariant()
+  if ($phoneCountry -notmatch '^[A-Z]{2}$') {
+    throw 'Mobile phone country must be exactly two uppercase ASCII letters.'
+  }
+  $phone = Read-ExactLocalText 'Mobile national number - digits only, without country code' 'Mobile national number'
+  if ($phone -notmatch '^d{4,20}$') {
+    throw 'Mobile national number must contain 4-20 digits only.'
+  }
+  if ($phoneCountry -eq 'TR' -and $phone -notmatch '^5d{9}$') {
+    throw 'For TR mobile, enter 10 digits starting with 5, without +90 and without a leading 0.'
+  }
+
+  $addressCountry = (Read-ExactLocalText 'Address country ISO-2 (reviewed runtime currently supports TR)' 'Address country').ToUpperInvariant()
+  if ($addressCountry -ne 'TR') {
+    throw 'This reviewed ADP canary currently supports address country TR only.'
+  }
+  $line1 = Read-ExactLocalText 'Address Line 1' 'Address Line 1'
+  $line2 = Read-ExactLocalText 'Address Line 2 (optional; press Enter if empty)' 'Address Line 2' $false
+  $line3 = Read-ExactLocalText 'Address Line 3 (optional; press Enter if empty)' 'Address Line 3' $false
+  $city = Read-ExactLocalText 'City' 'City'
+  $state = Read-ExactLocalText 'State / Territory' 'State / Territory'
+  $postal = Read-ExactLocalText 'Postal Code' 'Postal Code'
+
+  $profileJson = @{
+    profile_version = 'adp-personal-information-local-canary-v1'
+    first_name = $first
+    last_name = $last
+    email = $email
+    phone_country_iso2 = $phoneCountry
+    phone_national_number = $phone
+    adp_ascii_name_policy_approved = [bool]$AllowReviewedTurkishAsciiNameOverwrite
+    address_country_iso2 = $addressCountry
+    address_line1 = $line1
+    address_line2 = $line2
+    address_line3 = $line3
+    city = $city
+    state_or_territory = $state
+    postal_code = $postal
+  } | ConvertTo-Json -Compress
+
+  $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+  [IO.File]::WriteAllText($profilePath, $profileJson, $utf8NoBom)
+
+  Write-Host 'A verified ADP browser will open.'
+  Write-Host 'Complete Apply / identity / verification manually.'
+  Write-Host 'When Personal Information opens, do not edit fields and do not click Next.'
+  Write-Host 'The executor may verify/fill identity, required Mobile Number, Turkey, and reviewed address fields only.'
+  Write-Host 'Home Phone, consent, Next, upload and submit remain disabled.'
+
+  $args = @(
+    '-m', 'ejs.services.adp_verified_session_bootstrap',
+    '--url', $ApplicationUrl,
+    '--storage-state-out', $statePath,
+    '--report-out', $bootstrapReportPath,
+    '--same-page-personal-information-profile', $profilePath,
+    '--same-page-personal-information-expected-manifest-fingerprint', $ExpectedManifestFingerprint,
+    '--same-page-personal-information-expected-contact-contract-fingerprint', $ExpectedContactContractFingerprint,
+    '--same-page-personal-information-expected-country-surface-fingerprint', $ExpectedCountrySurfaceFingerprint,
+    '--same-page-personal-information-report-out', $safeFillReportPath,
+    '--timeout-seconds', [string]$TimeoutSeconds
+  )
+  if ($AllowReviewedTurkishAsciiNameOverwrite) {
+    $args += '--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite'
+  }
+
+  & $python.Source @pythonPrefixArgs @args
+  if ($LASTEXITCODE -ne 0) {
+    throw "ADP Personal Information safe-fill bootstrap failed with exit code $LASTEXITCODE."
+  }
+
+  if (-not (Test-Path -LiteralPath $safeFillReportPath)) {
+    throw 'ADP Personal Information safe-fill report was not created.'
+  }
+  $report = Get-Content -Raw -LiteralPath $safeFillReportPath | ConvertFrom-Json
+
+  if ($report.safe_fill_status -ne 'verified' -or
+      $report.home_phone_write_attempts -ne 0 -or
+      $report.consent_action_attempts -ne 0 -or
+      $report.navigation_click_attempts -ne 0 -or
+      $report.next_click_attempts -ne 0 -or
+      $report.file_upload_attempts -ne 0 -or
+      $report.submit_attempts -ne 0) {
+    throw 'ADP Personal Information safe-fill exceeded its reviewed authority boundary.'
+  }
+
+  Write-Host 'ADP Personal Information safe-fill verified. Next/upload/submit were not performed.'
+  [pscustomobject]@{
+    safe_fill_status = $report.safe_fill_status
+    executor_version = $report.executor_version
+    form_value_write_attempts = $report.form_value_write_attempts
+    form_value_write_successes = $report.form_value_write_successes
+    phone_write_attempts = $report.phone_write_attempts
+    phone_write_successes = $report.phone_write_successes
+    address_write_attempts = $report.address_write_attempts
+    address_write_successes = $report.address_write_successes
+    country_selection_attempts = $report.country_selection_attempts
+    country_selection_successes = $report.country_selection_successes
+    email_readback_match = $report.identity_result.email_readback_match
+    home_phone_write_attempts = $report.home_phone_write_attempts
+    next_click_attempts = $report.next_click_attempts
+    file_upload_attempts = $report.file_upload_attempts
+    submit_attempts = $report.submit_attempts
+    raw_values_exposed = $false
+  } | ConvertTo-Json -Compress
+} finally {
+  foreach ($Path in @($statePath, $bootstrapReportPath, $profilePath, $safeFillReportPath)) {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Variable profileJson, first, last, email, phoneCountry, phone, addressCountry, line1, line2, line3, city, state, postal, utf8NoBom -ErrorAction SilentlyContinue
+}
+) {
+    throw 'Mobile national number must contain 4-20 digits only.'
+  }
+  if ($phoneCountry -eq 'TR' -and $phone -notmatch '^5d{9}$') {
+    throw 'For TR mobile, enter 10 digits starting with 5, without +90 and without a leading 0.'
+  }
+
+  $addressCountry = (Read-ExactLocalText 'Address country ISO-2 (reviewed runtime currently supports TR)' 'Address country').ToUpperInvariant()
+  if ($addressCountry -ne 'TR') {
+    throw 'This reviewed ADP canary currently supports address country TR only.'
+  }
+  $line1 = Read-ExactLocalText 'Address Line 1' 'Address Line 1'
+  $line2 = Read-ExactLocalText 'Address Line 2 (optional; press Enter if empty)' 'Address Line 2' $false
+  $line3 = Read-ExactLocalText 'Address Line 3 (optional; press Enter if empty)' 'Address Line 3' $false
+  $city = Read-ExactLocalText 'City' 'City'
+  $state = Read-ExactLocalText 'State / Territory' 'State / Territory'
+  $postal = Read-ExactLocalText 'Postal Code' 'Postal Code'
+
+  $profileJson = @{
+    profile_version = 'adp-personal-information-local-canary-v1'
+    first_name = $first
+    last_name = $last
+    email = $email
+    phone_country_iso2 = $phoneCountry
+    phone_national_number = $phone
+    adp_ascii_name_policy_approved = [bool]$AllowReviewedTurkishAsciiNameOverwrite
+    address_country_iso2 = $addressCountry
+    address_line1 = $line1
+    address_line2 = $line2
+    address_line3 = $line3
+    city = $city
+    state_or_territory = $state
+    postal_code = $postal
+  } | ConvertTo-Json -Compress
+
+  $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+  [IO.File]::WriteAllText($profilePath, $profileJson, $utf8NoBom)
+
+  Write-Host 'A verified ADP browser will open.'
+  Write-Host 'Complete Apply / identity / verification manually.'
+  Write-Host 'When Personal Information opens, do not edit fields and do not click Next.'
+  Write-Host 'The executor may verify/fill identity, required Mobile Number, Turkey, and reviewed address fields only.'
+  Write-Host 'Home Phone, consent, Next, upload and submit remain disabled.'
+
+  $args = @(
+    '-m', 'ejs.services.adp_verified_session_bootstrap',
+    '--url', $ApplicationUrl,
+    '--storage-state-out', $statePath,
+    '--report-out', $bootstrapReportPath,
+    '--same-page-personal-information-profile', $profilePath,
+    '--same-page-personal-information-expected-manifest-fingerprint', $ExpectedManifestFingerprint,
+    '--same-page-personal-information-expected-contact-contract-fingerprint', $ExpectedContactContractFingerprint,
+    '--same-page-personal-information-expected-country-surface-fingerprint', $ExpectedCountrySurfaceFingerprint,
+    '--same-page-personal-information-report-out', $safeFillReportPath,
+    '--timeout-seconds', [string]$TimeoutSeconds
+  )
+  if ($AllowReviewedTurkishAsciiNameOverwrite) {
+    $args += '--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite'
+  }
+
+  & $python.Source @pythonPrefixArgs @args
+  if ($LASTEXITCODE -ne 0) {
+    throw "ADP Personal Information safe-fill bootstrap failed with exit code $LASTEXITCODE."
+  }
+
+  if (-not (Test-Path -LiteralPath $safeFillReportPath)) {
+    throw 'ADP Personal Information safe-fill report was not created.'
+  }
+  $report = Get-Content -Raw -LiteralPath $safeFillReportPath | ConvertFrom-Json
+
+  if ($report.safe_fill_status -ne 'verified' -or
+      $report.home_phone_write_attempts -ne 0 -or
+      $report.consent_action_attempts -ne 0 -or
+      $report.navigation_click_attempts -ne 0 -or
+      $report.next_click_attempts -ne 0 -or
+      $report.file_upload_attempts -ne 0 -or
+      $report.submit_attempts -ne 0) {
+    throw 'ADP Personal Information safe-fill exceeded its reviewed authority boundary.'
+  }
+
+  Write-Host 'ADP Personal Information safe-fill verified. Next/upload/submit were not performed.'
+  [pscustomobject]@{
+    safe_fill_status = $report.safe_fill_status
+    executor_version = $report.executor_version
+    form_value_write_attempts = $report.form_value_write_attempts
+    form_value_write_successes = $report.form_value_write_successes
+    phone_write_attempts = $report.phone_write_attempts
+    phone_write_successes = $report.phone_write_successes
+    address_write_attempts = $report.address_write_attempts
+    address_write_successes = $report.address_write_successes
+    country_selection_attempts = $report.country_selection_attempts
+    country_selection_successes = $report.country_selection_successes
+    email_readback_match = $report.identity_result.email_readback_match
+    home_phone_write_attempts = $report.home_phone_write_attempts
+    next_click_attempts = $report.next_click_attempts
+    file_upload_attempts = $report.file_upload_attempts
+    submit_attempts = $report.submit_attempts
+    raw_values_exposed = $false
+  } | ConvertTo-Json -Compress
+} finally {
+  foreach ($Path in @($statePath, $bootstrapReportPath, $profilePath, $safeFillReportPath)) {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Variable profileJson, first, last, email, phoneCountry, phone, addressCountry, line1, line2, line3, city, state, postal, utf8NoBom -ErrorAction SilentlyContinue
+}
+) {
+    throw 'Email format is invalid.'
+  }
+
+  $phoneCountry = (Read-ExactLocalText 'Mobile phone country ISO-2 (for example TR)' 'Mobile phone country').ToUpperInvariant()
+  if ($phoneCountry -notmatch '^[A-Z]{2}$') {
+    throw 'Mobile phone country must be exactly two uppercase ASCII letters.'
+  }
+  $phone = Read-ExactLocalText 'Mobile national number - digits only, without country code' 'Mobile national number'
+  if ($phone -notmatch '^d{4,20}$') {
+    throw 'Mobile national number must contain 4-20 digits only.'
+  }
+  if ($phoneCountry -eq 'TR' -and $phone -notmatch '^5d{9}$') {
+    throw 'For TR mobile, enter 10 digits starting with 5, without +90 and without a leading 0.'
+  }
+
+  $addressCountry = (Read-ExactLocalText 'Address country ISO-2 (reviewed runtime currently supports TR)' 'Address country').ToUpperInvariant()
+  if ($addressCountry -ne 'TR') {
+    throw 'This reviewed ADP canary currently supports address country TR only.'
+  }
+  $line1 = Read-ExactLocalText 'Address Line 1' 'Address Line 1'
+  $line2 = Read-ExactLocalText 'Address Line 2 (optional; press Enter if empty)' 'Address Line 2' $false
+  $line3 = Read-ExactLocalText 'Address Line 3 (optional; press Enter if empty)' 'Address Line 3' $false
+  $city = Read-ExactLocalText 'City' 'City'
+  $state = Read-ExactLocalText 'State / Territory' 'State / Territory'
+  $postal = Read-ExactLocalText 'Postal Code' 'Postal Code'
+
+  $profileJson = @{
+    profile_version = 'adp-personal-information-local-canary-v1'
+    first_name = $first
+    last_name = $last
+    email = $email
+    phone_country_iso2 = $phoneCountry
+    phone_national_number = $phone
+    adp_ascii_name_policy_approved = [bool]$AllowReviewedTurkishAsciiNameOverwrite
+    address_country_iso2 = $addressCountry
+    address_line1 = $line1
+    address_line2 = $line2
+    address_line3 = $line3
+    city = $city
+    state_or_territory = $state
+    postal_code = $postal
+  } | ConvertTo-Json -Compress
+
+  $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+  [IO.File]::WriteAllText($profilePath, $profileJson, $utf8NoBom)
+
+  Write-Host 'A verified ADP browser will open.'
+  Write-Host 'Complete Apply / identity / verification manually.'
+  Write-Host 'When Personal Information opens, do not edit fields and do not click Next.'
+  Write-Host 'The executor may verify/fill identity, required Mobile Number, Turkey, and reviewed address fields only.'
+  Write-Host 'Home Phone, consent, Next, upload and submit remain disabled.'
+
+  $args = @(
+    '-m', 'ejs.services.adp_verified_session_bootstrap',
+    '--url', $ApplicationUrl,
+    '--storage-state-out', $statePath,
+    '--report-out', $bootstrapReportPath,
+    '--same-page-personal-information-profile', $profilePath,
+    '--same-page-personal-information-expected-manifest-fingerprint', $ExpectedManifestFingerprint,
+    '--same-page-personal-information-expected-contact-contract-fingerprint', $ExpectedContactContractFingerprint,
+    '--same-page-personal-information-expected-country-surface-fingerprint', $ExpectedCountrySurfaceFingerprint,
+    '--same-page-personal-information-report-out', $safeFillReportPath,
+    '--timeout-seconds', [string]$TimeoutSeconds
+  )
+  if ($AllowReviewedTurkishAsciiNameOverwrite) {
+    $args += '--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite'
+  }
+
+  & $python.Source @pythonPrefixArgs @args
+  if ($LASTEXITCODE -ne 0) {
+    throw "ADP Personal Information safe-fill bootstrap failed with exit code $LASTEXITCODE."
+  }
+
+  if (-not (Test-Path -LiteralPath $safeFillReportPath)) {
+    throw 'ADP Personal Information safe-fill report was not created.'
+  }
+  $report = Get-Content -Raw -LiteralPath $safeFillReportPath | ConvertFrom-Json
+
+  if ($report.safe_fill_status -ne 'verified' -or
+      $report.home_phone_write_attempts -ne 0 -or
+      $report.consent_action_attempts -ne 0 -or
+      $report.navigation_click_attempts -ne 0 -or
+      $report.next_click_attempts -ne 0 -or
+      $report.file_upload_attempts -ne 0 -or
+      $report.submit_attempts -ne 0) {
+    throw 'ADP Personal Information safe-fill exceeded its reviewed authority boundary.'
+  }
+
+  Write-Host 'ADP Personal Information safe-fill verified. Next/upload/submit were not performed.'
+  [pscustomobject]@{
+    safe_fill_status = $report.safe_fill_status
+    executor_version = $report.executor_version
+    form_value_write_attempts = $report.form_value_write_attempts
+    form_value_write_successes = $report.form_value_write_successes
+    phone_write_attempts = $report.phone_write_attempts
+    phone_write_successes = $report.phone_write_successes
+    address_write_attempts = $report.address_write_attempts
+    address_write_successes = $report.address_write_successes
+    country_selection_attempts = $report.country_selection_attempts
+    country_selection_successes = $report.country_selection_successes
+    email_readback_match = $report.identity_result.email_readback_match
+    home_phone_write_attempts = $report.home_phone_write_attempts
+    next_click_attempts = $report.next_click_attempts
+    file_upload_attempts = $report.file_upload_attempts
+    submit_attempts = $report.submit_attempts
+    raw_values_exposed = $false
+  } | ConvertTo-Json -Compress
+} finally {
+  foreach ($Path in @($statePath, $bootstrapReportPath, $profilePath, $safeFillReportPath)) {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Variable profileJson, first, last, email, phoneCountry, phone, addressCountry, line1, line2, line3, city, state, postal, utf8NoBom -ErrorAction SilentlyContinue
+}
+) {
+    throw 'For TR mobile, enter 10 digits starting with 5, without +90 and without a leading 0.'
+  }
+
+  $addressCountry = (Read-ExactLocalText 'Address country ISO-2 (reviewed runtime currently supports TR)' 'Address country').ToUpperInvariant()
+  if ($addressCountry -ne 'TR') {
+    throw 'This reviewed ADP canary currently supports address country TR only.'
+  }
+  $line1 = Read-ExactLocalText 'Address Line 1' 'Address Line 1'
+  $line2 = Read-ExactLocalText 'Address Line 2 (optional; press Enter if empty)' 'Address Line 2' $false
+  $line3 = Read-ExactLocalText 'Address Line 3 (optional; press Enter if empty)' 'Address Line 3' $false
+  $city = Read-ExactLocalText 'City' 'City'
+  $state = Read-ExactLocalText 'State / Territory' 'State / Territory'
+  $postal = Read-ExactLocalText 'Postal Code' 'Postal Code'
+
+  $profileJson = @{
+    profile_version = 'adp-personal-information-local-canary-v1'
+    first_name = $first
+    last_name = $last
+    email = $email
+    phone_country_iso2 = $phoneCountry
+    phone_national_number = $phone
+    adp_ascii_name_policy_approved = [bool]$AllowReviewedTurkishAsciiNameOverwrite
+    address_country_iso2 = $addressCountry
+    address_line1 = $line1
+    address_line2 = $line2
+    address_line3 = $line3
+    city = $city
+    state_or_territory = $state
+    postal_code = $postal
+  } | ConvertTo-Json -Compress
+
+  $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+  [IO.File]::WriteAllText($profilePath, $profileJson, $utf8NoBom)
+
+  Write-Host 'A verified ADP browser will open.'
+  Write-Host 'Complete Apply / identity / verification manually.'
+  Write-Host 'When Personal Information opens, do not edit fields and do not click Next.'
+  Write-Host 'The executor may verify/fill identity, required Mobile Number, Turkey, and reviewed address fields only.'
+  Write-Host 'Home Phone, consent, Next, upload and submit remain disabled.'
+
+  $args = @(
+    '-m', 'ejs.services.adp_verified_session_bootstrap',
+    '--url', $ApplicationUrl,
+    '--storage-state-out', $statePath,
+    '--report-out', $bootstrapReportPath,
+    '--same-page-personal-information-profile', $profilePath,
+    '--same-page-personal-information-expected-manifest-fingerprint', $ExpectedManifestFingerprint,
+    '--same-page-personal-information-expected-contact-contract-fingerprint', $ExpectedContactContractFingerprint,
+    '--same-page-personal-information-expected-country-surface-fingerprint', $ExpectedCountrySurfaceFingerprint,
+    '--same-page-personal-information-report-out', $safeFillReportPath,
+    '--timeout-seconds', [string]$TimeoutSeconds
+  )
+  if ($AllowReviewedTurkishAsciiNameOverwrite) {
+    $args += '--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite'
+  }
+
+  & $python.Source @pythonPrefixArgs @args
+  if ($LASTEXITCODE -ne 0) {
+    throw "ADP Personal Information safe-fill bootstrap failed with exit code $LASTEXITCODE."
+  }
+
+  if (-not (Test-Path -LiteralPath $safeFillReportPath)) {
+    throw 'ADP Personal Information safe-fill report was not created.'
+  }
+  $report = Get-Content -Raw -LiteralPath $safeFillReportPath | ConvertFrom-Json
+
+  if ($report.safe_fill_status -ne 'verified' -or
+      $report.home_phone_write_attempts -ne 0 -or
+      $report.consent_action_attempts -ne 0 -or
+      $report.navigation_click_attempts -ne 0 -or
+      $report.next_click_attempts -ne 0 -or
+      $report.file_upload_attempts -ne 0 -or
+      $report.submit_attempts -ne 0) {
+    throw 'ADP Personal Information safe-fill exceeded its reviewed authority boundary.'
+  }
+
+  Write-Host 'ADP Personal Information safe-fill verified. Next/upload/submit were not performed.'
+  [pscustomobject]@{
+    safe_fill_status = $report.safe_fill_status
+    executor_version = $report.executor_version
+    form_value_write_attempts = $report.form_value_write_attempts
+    form_value_write_successes = $report.form_value_write_successes
+    phone_write_attempts = $report.phone_write_attempts
+    phone_write_successes = $report.phone_write_successes
+    address_write_attempts = $report.address_write_attempts
+    address_write_successes = $report.address_write_successes
+    country_selection_attempts = $report.country_selection_attempts
+    country_selection_successes = $report.country_selection_successes
+    email_readback_match = $report.identity_result.email_readback_match
+    home_phone_write_attempts = $report.home_phone_write_attempts
+    next_click_attempts = $report.next_click_attempts
+    file_upload_attempts = $report.file_upload_attempts
+    submit_attempts = $report.submit_attempts
+    raw_values_exposed = $false
+  } | ConvertTo-Json -Compress
+} finally {
+  foreach ($Path in @($statePath, $bootstrapReportPath, $profilePath, $safeFillReportPath)) {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Variable profileJson, first, last, email, phoneCountry, phone, addressCountry, line1, line2, line3, city, state, postal, utf8NoBom -ErrorAction SilentlyContinue
+}
+) {
+    throw 'Email format is invalid.'
+  }
+
+  $phoneCountry = (Read-ExactLocalText 'Mobile phone country ISO-2 (for example TR)' 'Mobile phone country').ToUpperInvariant()
+  if ($phoneCountry -notmatch '^[A-Z]{2}$') {
+    throw 'Mobile phone country must be exactly two uppercase ASCII letters.'
+  }
+  $phone = Read-ExactLocalText 'Mobile national number - digits only, without country code' 'Mobile national number'
+  if ($phone -notmatch '^d{4,20}$') {
+    throw 'Mobile national number must contain 4-20 digits only.'
+  }
+  if ($phoneCountry -eq 'TR' -and $phone -notmatch '^5d{9}$') {
+    throw 'For TR mobile, enter 10 digits starting with 5, without +90 and without a leading 0.'
+  }
+
+  $addressCountry = (Read-ExactLocalText 'Address country ISO-2 (reviewed runtime currently supports TR)' 'Address country').ToUpperInvariant()
+  if ($addressCountry -ne 'TR') {
+    throw 'This reviewed ADP canary currently supports address country TR only.'
+  }
+  $line1 = Read-ExactLocalText 'Address Line 1' 'Address Line 1'
+  $line2 = Read-ExactLocalText 'Address Line 2 (optional; press Enter if empty)' 'Address Line 2' $false
+  $line3 = Read-ExactLocalText 'Address Line 3 (optional; press Enter if empty)' 'Address Line 3' $false
+  $city = Read-ExactLocalText 'City' 'City'
+  $state = Read-ExactLocalText 'State / Territory' 'State / Territory'
+  $postal = Read-ExactLocalText 'Postal Code' 'Postal Code'
+
+  $profileJson = @{
+    profile_version = 'adp-personal-information-local-canary-v1'
+    first_name = $first
+    last_name = $last
+    email = $email
+    phone_country_iso2 = $phoneCountry
+    phone_national_number = $phone
+    adp_ascii_name_policy_approved = [bool]$AllowReviewedTurkishAsciiNameOverwrite
+    address_country_iso2 = $addressCountry
+    address_line1 = $line1
+    address_line2 = $line2
+    address_line3 = $line3
+    city = $city
+    state_or_territory = $state
+    postal_code = $postal
+  } | ConvertTo-Json -Compress
+
+  $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+  [IO.File]::WriteAllText($profilePath, $profileJson, $utf8NoBom)
+
+  Write-Host 'A verified ADP browser will open.'
+  Write-Host 'Complete Apply / identity / verification manually.'
+  Write-Host 'When Personal Information opens, do not edit fields and do not click Next.'
+  Write-Host 'The executor may verify/fill identity, required Mobile Number, Turkey, and reviewed address fields only.'
+  Write-Host 'Home Phone, consent, Next, upload and submit remain disabled.'
+
+  $args = @(
+    '-m', 'ejs.services.adp_verified_session_bootstrap',
+    '--url', $ApplicationUrl,
+    '--storage-state-out', $statePath,
+    '--report-out', $bootstrapReportPath,
+    '--same-page-personal-information-profile', $profilePath,
+    '--same-page-personal-information-expected-manifest-fingerprint', $ExpectedManifestFingerprint,
+    '--same-page-personal-information-expected-contact-contract-fingerprint', $ExpectedContactContractFingerprint,
+    '--same-page-personal-information-expected-country-surface-fingerprint', $ExpectedCountrySurfaceFingerprint,
+    '--same-page-personal-information-report-out', $safeFillReportPath,
+    '--timeout-seconds', [string]$TimeoutSeconds
+  )
+  if ($AllowReviewedTurkishAsciiNameOverwrite) {
+    $args += '--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite'
+  }
+
+  & $python.Source @pythonPrefixArgs @args
+  if ($LASTEXITCODE -ne 0) {
+    throw "ADP Personal Information safe-fill bootstrap failed with exit code $LASTEXITCODE."
+  }
+
+  if (-not (Test-Path -LiteralPath $safeFillReportPath)) {
+    throw 'ADP Personal Information safe-fill report was not created.'
+  }
+  $report = Get-Content -Raw -LiteralPath $safeFillReportPath | ConvertFrom-Json
+
+  if ($report.safe_fill_status -ne 'verified' -or
+      $report.home_phone_write_attempts -ne 0 -or
+      $report.consent_action_attempts -ne 0 -or
+      $report.navigation_click_attempts -ne 0 -or
+      $report.next_click_attempts -ne 0 -or
+      $report.file_upload_attempts -ne 0 -or
+      $report.submit_attempts -ne 0) {
+    throw 'ADP Personal Information safe-fill exceeded its reviewed authority boundary.'
+  }
+
+  Write-Host 'ADP Personal Information safe-fill verified. Next/upload/submit were not performed.'
+  [pscustomobject]@{
+    safe_fill_status = $report.safe_fill_status
+    executor_version = $report.executor_version
+    form_value_write_attempts = $report.form_value_write_attempts
+    form_value_write_successes = $report.form_value_write_successes
+    phone_write_attempts = $report.phone_write_attempts
+    phone_write_successes = $report.phone_write_successes
+    address_write_attempts = $report.address_write_attempts
+    address_write_successes = $report.address_write_successes
+    country_selection_attempts = $report.country_selection_attempts
+    country_selection_successes = $report.country_selection_successes
+    email_readback_match = $report.identity_result.email_readback_match
+    home_phone_write_attempts = $report.home_phone_write_attempts
+    next_click_attempts = $report.next_click_attempts
+    file_upload_attempts = $report.file_upload_attempts
+    submit_attempts = $report.submit_attempts
+    raw_values_exposed = $false
+  } | ConvertTo-Json -Compress
+} finally {
+  foreach ($Path in @($statePath, $bootstrapReportPath, $profilePath, $safeFillReportPath)) {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Variable profileJson, first, last, email, phoneCountry, phone, addressCountry, line1, line2, line3, city, state, postal, utf8NoBom -ErrorAction SilentlyContinue
+}
+) {
+    throw 'Mobile national number must contain 4-20 digits only.'
+  }
+  if ($phoneCountry -eq 'TR' -and $phone -notmatch '^5d{9}$') {
+    throw 'For TR mobile, enter 10 digits starting with 5, without +90 and without a leading 0.'
+  }
+
+  $addressCountry = (Read-ExactLocalText 'Address country ISO-2 (reviewed runtime currently supports TR)' 'Address country').ToUpperInvariant()
+  if ($addressCountry -ne 'TR') {
+    throw 'This reviewed ADP canary currently supports address country TR only.'
+  }
+  $line1 = Read-ExactLocalText 'Address Line 1' 'Address Line 1'
+  $line2 = Read-ExactLocalText 'Address Line 2 (optional; press Enter if empty)' 'Address Line 2' $false
+  $line3 = Read-ExactLocalText 'Address Line 3 (optional; press Enter if empty)' 'Address Line 3' $false
+  $city = Read-ExactLocalText 'City' 'City'
+  $state = Read-ExactLocalText 'State / Territory' 'State / Territory'
+  $postal = Read-ExactLocalText 'Postal Code' 'Postal Code'
+
+  $profileJson = @{
+    profile_version = 'adp-personal-information-local-canary-v1'
+    first_name = $first
+    last_name = $last
+    email = $email
+    phone_country_iso2 = $phoneCountry
+    phone_national_number = $phone
+    adp_ascii_name_policy_approved = [bool]$AllowReviewedTurkishAsciiNameOverwrite
+    address_country_iso2 = $addressCountry
+    address_line1 = $line1
+    address_line2 = $line2
+    address_line3 = $line3
+    city = $city
+    state_or_territory = $state
+    postal_code = $postal
+  } | ConvertTo-Json -Compress
+
+  $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+  [IO.File]::WriteAllText($profilePath, $profileJson, $utf8NoBom)
+
+  Write-Host 'A verified ADP browser will open.'
+  Write-Host 'Complete Apply / identity / verification manually.'
+  Write-Host 'When Personal Information opens, do not edit fields and do not click Next.'
+  Write-Host 'The executor may verify/fill identity, required Mobile Number, Turkey, and reviewed address fields only.'
+  Write-Host 'Home Phone, consent, Next, upload and submit remain disabled.'
+
+  $args = @(
+    '-m', 'ejs.services.adp_verified_session_bootstrap',
+    '--url', $ApplicationUrl,
+    '--storage-state-out', $statePath,
+    '--report-out', $bootstrapReportPath,
+    '--same-page-personal-information-profile', $profilePath,
+    '--same-page-personal-information-expected-manifest-fingerprint', $ExpectedManifestFingerprint,
+    '--same-page-personal-information-expected-contact-contract-fingerprint', $ExpectedContactContractFingerprint,
+    '--same-page-personal-information-expected-country-surface-fingerprint', $ExpectedCountrySurfaceFingerprint,
+    '--same-page-personal-information-report-out', $safeFillReportPath,
+    '--timeout-seconds', [string]$TimeoutSeconds
+  )
+  if ($AllowReviewedTurkishAsciiNameOverwrite) {
+    $args += '--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite'
+  }
+
+  & $python.Source @pythonPrefixArgs @args
+  if ($LASTEXITCODE -ne 0) {
+    throw "ADP Personal Information safe-fill bootstrap failed with exit code $LASTEXITCODE."
+  }
+
+  if (-not (Test-Path -LiteralPath $safeFillReportPath)) {
+    throw 'ADP Personal Information safe-fill report was not created.'
+  }
+  $report = Get-Content -Raw -LiteralPath $safeFillReportPath | ConvertFrom-Json
+
+  if ($report.safe_fill_status -ne 'verified' -or
+      $report.home_phone_write_attempts -ne 0 -or
+      $report.consent_action_attempts -ne 0 -or
+      $report.navigation_click_attempts -ne 0 -or
+      $report.next_click_attempts -ne 0 -or
+      $report.file_upload_attempts -ne 0 -or
+      $report.submit_attempts -ne 0) {
+    throw 'ADP Personal Information safe-fill exceeded its reviewed authority boundary.'
+  }
+
+  Write-Host 'ADP Personal Information safe-fill verified. Next/upload/submit were not performed.'
+  [pscustomobject]@{
+    safe_fill_status = $report.safe_fill_status
+    executor_version = $report.executor_version
+    form_value_write_attempts = $report.form_value_write_attempts
+    form_value_write_successes = $report.form_value_write_successes
+    phone_write_attempts = $report.phone_write_attempts
+    phone_write_successes = $report.phone_write_successes
+    address_write_attempts = $report.address_write_attempts
+    address_write_successes = $report.address_write_successes
+    country_selection_attempts = $report.country_selection_attempts
+    country_selection_successes = $report.country_selection_successes
+    email_readback_match = $report.identity_result.email_readback_match
+    home_phone_write_attempts = $report.home_phone_write_attempts
+    next_click_attempts = $report.next_click_attempts
+    file_upload_attempts = $report.file_upload_attempts
+    submit_attempts = $report.submit_attempts
+    raw_values_exposed = $false
+  } | ConvertTo-Json -Compress
+} finally {
+  foreach ($Path in @($statePath, $bootstrapReportPath, $profilePath, $safeFillReportPath)) {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Variable profileJson, first, last, email, phoneCountry, phone, addressCountry, line1, line2, line3, city, state, postal, utf8NoBom -ErrorAction SilentlyContinue
+}
+) {
     throw 'Email format is invalid.'
   }
 
