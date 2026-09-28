@@ -33,6 +33,10 @@ from ejs.services.adp_same_page_personal_information_safe_fill import (
     AdpSamePagePersonalInformationSafeFillRequest,
     run_on_verified_page as run_same_page_personal_information_safe_fill,
 )
+from ejs.services.adp_same_page_country_keyboard_selection_canary import (
+    AdpSamePageCountryKeyboardSelectionRequest,
+    run_on_verified_page as run_same_page_country_keyboard_selection,
+)
 
 BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v5"
 OTP_CONTROL_ID = "oneTimePassWord"
@@ -69,6 +73,10 @@ class AdpVerifiedSessionBootstrapRequest:
     same_page_personal_information_expected_country_surface_fingerprint: str = ""
     same_page_personal_information_report_out: str = ""
     same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite: bool = False
+    same_page_country_keyboard_selection_report_out: str = ""
+    same_page_country_keyboard_expected_manifest_fingerprint: str = ""
+    same_page_country_keyboard_expected_contact_contract_fingerprint: str = ""
+    same_page_country_keyboard_expected_option_surface_fingerprint: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
@@ -112,6 +120,18 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
         all(safe_fill_parts) or all(country_probe_parts)
     ):
         raise ValueError("ADP_PERSONAL_INFORMATION_SAFE_FILL_MUST_RUN_EXCLUSIVELY")
+    country_keyboard_parts = (
+        bool(request.same_page_country_keyboard_selection_report_out),
+        bool(request.same_page_country_keyboard_expected_manifest_fingerprint),
+        bool(request.same_page_country_keyboard_expected_contact_contract_fingerprint),
+        bool(request.same_page_country_keyboard_expected_option_surface_fingerprint),
+    )
+    if any(country_keyboard_parts) and not all(country_keyboard_parts):
+        raise ValueError("ADP_COUNTRY_KEYBOARD_CANARY_REQUIRES_COMPLETE_CONFIGURATION")
+    if all(country_keyboard_parts) and (
+        all(personal_information_parts) or all(country_probe_parts) or all(safe_fill_parts)
+    ):
+        raise ValueError("ADP_COUNTRY_KEYBOARD_CANARY_MUST_RUN_EXCLUSIVELY")
 
 
 def _open_reviewed_adp_target(page, application_url: str) -> dict:
@@ -689,6 +709,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         if request.same_page_personal_information_report_out
         else None
     )
+    same_page_country_keyboard_selection_report_path = (
+        Path(request.same_page_country_keyboard_selection_report_out)
+        if request.same_page_country_keyboard_selection_report_out
+        else None
+    )
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     if session_storage_path is not None:
@@ -707,6 +732,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         same_page_country_combobox_probe_path.parent.mkdir(parents=True, exist_ok=True)
     if same_page_personal_information_report_path is not None:
         same_page_personal_information_report_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_country_keyboard_selection_report_path is not None:
+        same_page_country_keyboard_selection_report_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
         browser = None
@@ -909,6 +936,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                         same_page_contact_address_contract = None
                         same_page_country_combobox_probe = None
                         same_page_personal_information_safe_fill = None
+                        same_page_country_keyboard_selection = None
                         if same_page_manifest_path is not None:
                             same_page_manifest = extract_same_page_manifest(
                                 page,
@@ -1011,6 +1039,50 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                     "submit_attempts": 0,
                                     "raw_values_exposed": False,
                                     "input_values_read": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_country_keyboard_selection_report_path is not None:
+                            same_page_country_keyboard_selection = (
+                                run_same_page_country_keyboard_selection(
+                                    page,
+                                    AdpSamePageCountryKeyboardSelectionRequest(
+                                        application_url=request.application_url,
+                                        expected_manifest_fingerprint=(
+                                            request.same_page_country_keyboard_expected_manifest_fingerprint
+                                        ),
+                                        expected_contact_contract_fingerprint=(
+                                            request.same_page_country_keyboard_expected_contact_contract_fingerprint
+                                        ),
+                                        expected_country_option_surface_fingerprint=(
+                                            request.same_page_country_keyboard_expected_option_surface_fingerprint
+                                        ),
+                                    ),
+                                )
+                            )
+                            same_page_country_keyboard_selection_report_path.write_text(
+                                json.dumps(
+                                    same_page_country_keyboard_selection,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_country_keyboard_selection": {
+                                    "canary_version": same_page_country_keyboard_selection.get("canary_version", ""),
+                                    "selection_status": same_page_country_keyboard_selection.get("selection_status", ""),
+                                    "open_click_attempts": same_page_country_keyboard_selection.get("open_click_attempts", 0),
+                                    "text_write_attempts": same_page_country_keyboard_selection.get("text_write_attempts", 0),
+                                    "keyboard_commit_attempts": same_page_country_keyboard_selection.get("keyboard_commit_attempts", 0),
+                                    "country_selection_successes": same_page_country_keyboard_selection.get("country_selection_successes", 0),
+                                    "phone_write_attempts": 0,
+                                    "address_text_write_attempts": 0,
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "raw_values_exposed": False,
                                 }
                             }, sort_keys=True))
 
@@ -1193,6 +1265,14 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                 if isinstance(same_page_personal_information_safe_fill, dict)
                                 else 0
                             ),
+                            "same_page_country_keyboard_selection_executed": isinstance(
+                                same_page_country_keyboard_selection, dict
+                            ),
+                            "same_page_country_keyboard_selection_status": (
+                                str(same_page_country_keyboard_selection.get("selection_status", ""))
+                                if isinstance(same_page_country_keyboard_selection, dict)
+                                else ""
+                            ),
                             "same_page_safe_fill_executed": isinstance(same_page_safe_fill, dict),
                             "same_page_safe_fill_write_attempts": (
                                 int(same_page_safe_fill.get("form_value_write_attempts", 0))
@@ -1292,6 +1372,19 @@ def main() -> int:
         "--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite",
         action="store_true",
     )
+    parser.add_argument("--same-page-country-keyboard-selection-report-out", default="")
+    parser.add_argument(
+        "--same-page-country-keyboard-expected-manifest-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-country-keyboard-expected-contact-contract-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-country-keyboard-expected-option-surface-fingerprint",
+        default="",
+    )
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
@@ -1344,6 +1437,18 @@ def main() -> int:
         same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite=(
             args.same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite
         ),
+        same_page_country_keyboard_selection_report_out=(
+            args.same_page_country_keyboard_selection_report_out
+        ),
+        same_page_country_keyboard_expected_manifest_fingerprint=(
+            args.same_page_country_keyboard_expected_manifest_fingerprint
+        ),
+        same_page_country_keyboard_expected_contact_contract_fingerprint=(
+            args.same_page_country_keyboard_expected_contact_contract_fingerprint
+        ),
+        same_page_country_keyboard_expected_option_surface_fingerprint=(
+            args.same_page_country_keyboard_expected_option_surface_fingerprint
+        ),
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
@@ -1380,6 +1485,12 @@ def main() -> int:
         ),
         "same_page_personal_information_write_successes": (
             report.get("same_page_personal_information_write_successes", 0)
+        ),
+        "same_page_country_keyboard_selection_executed": (
+            report.get("same_page_country_keyboard_selection_executed") is True
+        ),
+        "same_page_country_keyboard_selection_status": (
+            report.get("same_page_country_keyboard_selection_status", "")
         ),
         "same_page_safe_fill_write_successes": report.get("same_page_safe_fill_write_successes", 0),
         "live_handoff_reuse_proven": report.get("live_handoff_reuse_proven") is True,
