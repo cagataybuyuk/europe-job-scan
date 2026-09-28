@@ -148,6 +148,35 @@ class AdpSamePageSafeFillTests(unittest.TestCase):
         first.fill.assert_not_called()
         last.fill.assert_not_called()
 
+    def test_turkish_ascii_equivalent_conflict_is_classified_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = self.profile_path(tmp)
+            page = MagicMock()
+            first = self.locator("Cagatay")
+            last = self.locator("Büyük")
+            email = self.locator("candidate@example.com", enabled=False)
+            page.locator.side_effect = lambda selector: {
+                f"#{FIRST_NAME_ID}": first,
+                f"#{LAST_NAME_ID}": last,
+                f"#{EMAIL_ID}": email,
+            }[selector]
+            with patch.object(safe_fill, "extract_same_page_manifest", return_value=manifest_fixture()), \
+                    patch.object(safe_fill, "manifest_surface_fingerprint", return_value=FP):
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "PROFILE_CONFLICT:candidate.last_name:turkish_ascii_equivalent",
+                ):
+                    run_on_verified_page(
+                        page,
+                        AdpSamePageSafeFillRequest(
+                            application_url=URL,
+                            expected_manifest_fingerprint=FP,
+                            profile_json_path=str(profile),
+                        ),
+                    )
+        first.fill.assert_not_called()
+        last.fill.assert_not_called()
+
     def test_disabled_email_mismatch_blocks_before_name_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
             profile = self.profile_path(tmp)
