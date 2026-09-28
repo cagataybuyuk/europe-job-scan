@@ -29,6 +29,10 @@ from ejs.services.adp_same_page_contact_address_contract import (
 from ejs.services.adp_same_page_country_combobox_probe import (
     inspect_country_combobox_on_verified_page,
 )
+from ejs.services.adp_same_page_personal_information_safe_fill import (
+    AdpSamePagePersonalInformationSafeFillRequest,
+    run_on_verified_page as run_same_page_personal_information_safe_fill,
+)
 
 BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v5"
 OTP_CONTROL_ID = "oneTimePassWord"
@@ -59,6 +63,12 @@ class AdpVerifiedSessionBootstrapRequest:
     same_page_country_combobox_probe_out: str = ""
     same_page_country_expected_manifest_fingerprint: str = ""
     same_page_country_expected_contact_contract_fingerprint: str = ""
+    same_page_personal_information_profile_path: str = ""
+    same_page_personal_information_expected_manifest_fingerprint: str = ""
+    same_page_personal_information_expected_contact_contract_fingerprint: str = ""
+    same_page_personal_information_expected_country_surface_fingerprint: str = ""
+    same_page_personal_information_report_out: str = ""
+    same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite: bool = False
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
@@ -89,6 +99,15 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
     )
     if any(country_probe_parts) and not all(country_probe_parts):
         raise ValueError("ADP_COUNTRY_COMBOBOX_PROBE_REQUIRES_COMPLETE_CONFIGURATION")
+    personal_information_parts = (
+        bool(request.same_page_personal_information_profile_path),
+        bool(request.same_page_personal_information_expected_manifest_fingerprint),
+        bool(request.same_page_personal_information_expected_contact_contract_fingerprint),
+        bool(request.same_page_personal_information_expected_country_surface_fingerprint),
+        bool(request.same_page_personal_information_report_out),
+    )
+    if any(personal_information_parts) and not all(personal_information_parts):
+        raise ValueError("ADP_PERSONAL_INFORMATION_SAFE_FILL_REQUIRES_COMPLETE_CONFIGURATION")
 
 
 def _open_reviewed_adp_target(page, application_url: str) -> dict:
@@ -661,6 +680,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         if request.same_page_country_combobox_probe_out
         else None
     )
+    same_page_personal_information_report_path = (
+        Path(request.same_page_personal_information_report_out)
+        if request.same_page_personal_information_report_out
+        else None
+    )
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     if session_storage_path is not None:
@@ -677,6 +701,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         same_page_contact_address_contract_path.parent.mkdir(parents=True, exist_ok=True)
     if same_page_country_combobox_probe_path is not None:
         same_page_country_combobox_probe_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_personal_information_report_path is not None:
+        same_page_personal_information_report_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
         browser = None
@@ -878,6 +904,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                         same_page_safe_fill = None
                         same_page_contact_address_contract = None
                         same_page_country_combobox_probe = None
+                        same_page_personal_information_safe_fill = None
                         if same_page_manifest_path is not None:
                             same_page_manifest = extract_same_page_manifest(
                                 page,
@@ -980,6 +1007,56 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                     "submit_attempts": 0,
                                     "raw_values_exposed": False,
                                     "input_values_read": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_personal_information_report_path is not None:
+                            same_page_personal_information_safe_fill = (
+                                run_same_page_personal_information_safe_fill(
+                                    page,
+                                    AdpSamePagePersonalInformationSafeFillRequest(
+                                        application_url=request.application_url,
+                                        expected_manifest_fingerprint=(
+                                            request.same_page_personal_information_expected_manifest_fingerprint
+                                        ),
+                                        expected_contact_contract_fingerprint=(
+                                            request.same_page_personal_information_expected_contact_contract_fingerprint
+                                        ),
+                                        expected_country_option_surface_fingerprint=(
+                                            request.same_page_personal_information_expected_country_surface_fingerprint
+                                        ),
+                                        profile_json_path=(
+                                            request.same_page_personal_information_profile_path
+                                        ),
+                                        allow_reviewed_turkish_ascii_name_overwrite=(
+                                            request.same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite
+                                        ),
+                                    ),
+                                )
+                            )
+                            same_page_personal_information_report_path.write_text(
+                                json.dumps(
+                                    same_page_personal_information_safe_fill,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_personal_information_safe_fill": {
+                                    "executor_version": same_page_personal_information_safe_fill.get("executor_version", ""),
+                                    "safe_fill_status": same_page_personal_information_safe_fill.get("safe_fill_status", ""),
+                                    "form_value_write_attempts": same_page_personal_information_safe_fill.get("form_value_write_attempts", 0),
+                                    "form_value_write_successes": same_page_personal_information_safe_fill.get("form_value_write_successes", 0),
+                                    "phone_write_attempts": same_page_personal_information_safe_fill.get("phone_write_attempts", 0),
+                                    "address_write_attempts": same_page_personal_information_safe_fill.get("address_write_attempts", 0),
+                                    "country_selection_attempts": same_page_personal_information_safe_fill.get("country_selection_attempts", 0),
+                                    "home_phone_write_attempts": same_page_personal_information_safe_fill.get("home_phone_write_attempts", 0),
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "raw_values_exposed": False,
                                 }
                             }, sort_keys=True))
 
@@ -1099,6 +1176,19 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                 if isinstance(same_page_country_combobox_probe, dict)
                                 else ""
                             ),
+                            "same_page_personal_information_safe_fill_executed": isinstance(
+                                same_page_personal_information_safe_fill, dict
+                            ),
+                            "same_page_personal_information_write_attempts": (
+                                int(same_page_personal_information_safe_fill.get("form_value_write_attempts", 0))
+                                if isinstance(same_page_personal_information_safe_fill, dict)
+                                else 0
+                            ),
+                            "same_page_personal_information_write_successes": (
+                                int(same_page_personal_information_safe_fill.get("form_value_write_successes", 0))
+                                if isinstance(same_page_personal_information_safe_fill, dict)
+                                else 0
+                            ),
                             "same_page_safe_fill_executed": isinstance(same_page_safe_fill, dict),
                             "same_page_safe_fill_write_attempts": (
                                 int(same_page_safe_fill.get("form_value_write_attempts", 0))
@@ -1180,6 +1270,24 @@ def main() -> int:
         "--same-page-country-expected-contact-contract-fingerprint",
         default="",
     )
+    parser.add_argument("--same-page-personal-information-profile", default="")
+    parser.add_argument(
+        "--same-page-personal-information-expected-manifest-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-personal-information-expected-contact-contract-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-personal-information-expected-country-surface-fingerprint",
+        default="",
+    )
+    parser.add_argument("--same-page-personal-information-report-out", default="")
+    parser.add_argument(
+        "--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite",
+        action="store_true",
+    )
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
@@ -1214,6 +1322,24 @@ def main() -> int:
         same_page_country_expected_contact_contract_fingerprint=(
             args.same_page_country_expected_contact_contract_fingerprint
         ),
+        same_page_personal_information_profile_path=(
+            args.same_page_personal_information_profile
+        ),
+        same_page_personal_information_expected_manifest_fingerprint=(
+            args.same_page_personal_information_expected_manifest_fingerprint
+        ),
+        same_page_personal_information_expected_contact_contract_fingerprint=(
+            args.same_page_personal_information_expected_contact_contract_fingerprint
+        ),
+        same_page_personal_information_expected_country_surface_fingerprint=(
+            args.same_page_personal_information_expected_country_surface_fingerprint
+        ),
+        same_page_personal_information_report_out=(
+            args.same_page_personal_information_report_out
+        ),
+        same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite=(
+            args.same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite
+        ),
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
@@ -1241,6 +1367,15 @@ def main() -> int:
         ),
         "same_page_country_option_surface_fingerprint": (
             report.get("same_page_country_option_surface_fingerprint", "")
+        ),
+        "same_page_personal_information_safe_fill_executed": (
+            report.get("same_page_personal_information_safe_fill_executed") is True
+        ),
+        "same_page_personal_information_write_attempts": (
+            report.get("same_page_personal_information_write_attempts", 0)
+        ),
+        "same_page_personal_information_write_successes": (
+            report.get("same_page_personal_information_write_successes", 0)
         ),
         "same_page_safe_fill_write_successes": report.get("same_page_safe_fill_write_successes", 0),
         "live_handoff_reuse_proven": report.get("live_handoff_reuse_proven") is True,
