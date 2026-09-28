@@ -51,7 +51,11 @@ def element(*, element_id="", name="", control_type="text", role="", y=0.0):
         "aria-required": "",
     }
     loc.get_attribute.side_effect = lambda key: attrs.get(key)
-    loc.evaluate.return_value = "select" if control_type == "select-one" else "input"
+    def evaluate(script):
+        if "cloneNode" in str(script):
+            return {"depth": 2, "tag": "div", "text": "Mobile Number required"}
+        return "select" if control_type == "select-one" else "input"
+    loc.evaluate.side_effect = evaluate
     loc.is_disabled.return_value = False
     loc.is_visible.return_value = True
     loc.is_enabled.return_value = True
@@ -88,11 +92,16 @@ class AdpSamePageContactAddressContractTests(unittest.TestCase):
         phone_collection.count.return_value = 2
         phone_collection.nth.side_effect = lambda index: phones[index]
 
+        empty_collection = MagicMock()
+        empty_collection.count.return_value = 0
+
         def locate(selector):
             if selector == "select[name='phoneCountry']":
                 return country_collection
             if selector == "input[name='phone']":
                 return phone_collection
+            if selector in {"[role='listbox']:visible", "[role='option']:visible"}:
+                return empty_collection
             return address[selector]
 
         page.locator.side_effect = locate
@@ -113,6 +122,12 @@ class AdpSamePageContactAddressContractTests(unittest.TestCase):
         self.assertEqual(report["address_control_count"], 7)
         self.assertEqual(report["phone_country_control_count"], 2)
         self.assertEqual(report["phone_input_control_count"], 2)
+        self.assertEqual(
+            [(row["country_ordinal"], row["phone_ordinal"], row["dom_distance"])
+             for row in report["phone_pair_candidates"]],
+            [(0, 0, 3), (1, 1, 3)],
+        )
+        self.assertEqual(report["address_country_combobox_hints"]["visible_listbox_count"], 0)
         self.assertEqual(report["form_value_write_attempts"], 0)
         self.assertEqual(report["phone_write_attempts"], 0)
         self.assertEqual(report["address_write_attempts"], 0)
@@ -126,6 +141,29 @@ class AdpSamePageContactAddressContractTests(unittest.TestCase):
             loc.fill.assert_not_called()
             loc.click.assert_not_called()
             loc.select_option.assert_not_called()
+
+    def test_semantic_context_redacts_email_and_long_digits(self):
+        self.assertEqual(
+            contract._sanitize_semantic_text(
+                "Mobile candidate@example.com 5551112233 secondary"
+            ),
+            "Mobile [email] [digits] secondary",
+        )
+
+    def test_phone_pairing_requires_unique_bijective_nearest_pairs(self):
+        matrix = [
+            {"countryOrdinal": 0, "phoneOrdinal": 0, "distance": 4},
+            {"countryOrdinal": 0, "phoneOrdinal": 1, "distance": 14},
+            {"countryOrdinal": 1, "phoneOrdinal": 0, "distance": 14},
+            {"countryOrdinal": 1, "phoneOrdinal": 1, "distance": 4},
+        ]
+        self.assertEqual(
+            contract._pairing_from_distance_matrix(matrix),
+            [
+                {"country_ordinal": 0, "phone_ordinal": 0, "dom_distance": 4},
+                {"country_ordinal": 1, "phone_ordinal": 1, "dom_distance": 4},
+            ],
+        )
 
     def test_manifest_mismatch_blocks_before_runtime_locator_access(self):
         page = MagicMock()
