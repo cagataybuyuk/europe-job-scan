@@ -1,0 +1,289 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from ejs.services import adp_same_page_personal_information_safe_fill as safe_fill
+from ejs.services.adp_same_page_personal_information_safe_fill import (
+    AdpSamePagePersonalInformationSafeFillRequest,
+    _fill_blank_or_verify,
+    run_on_verified_page,
+)
+
+URL = (
+    "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/"
+    "recruitment.html?cid=test&ccId=19000101_000001&jobId=960970"
+)
+MANIFEST_FP = "a" * 64
+CONTACT_FP = "b" * 64
+COUNTRY_FP = "c" * 64
+
+
+def contact_fixture():
+    return {
+        "phone_pair_candidates": [
+            {
+                "country_ordinal": 0,
+                "phone_ordinal": 0,
+                "dom_distance": 4,
+                "country_semantic_context": {"text": "Mobile Number*"},
+                "phone_semantic_context": {"text": "Mobile Number*"},
+            },
+            {
+                "country_ordinal": 1,
+                "phone_ordinal": 1,
+                "dom_distance": 4,
+                "country_semantic_context": {"text": "Home Phone Number"},
+                "phone_semantic_context": {"text": "Home Phone Number"},
+            },
+        ]
+    }
+
+
+def input_locator(before: str, after: str | None = None):
+    loc = MagicMock()
+    loc.count.return_value = 1
+    loc.is_visible.return_value = True
+    loc.is_enabled.return_value = True
+    values = [before] if after is None else [before, after]
+    loc.input_value.side_effect = values
+    loc.evaluate.return_value = True
+    return loc
+
+
+class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
+    def profile_path(self, tmp: str) -> str:
+        payload = {
+            "profile_version": "candidate-profile-v3",
+            "first_name": "Cagatay",
+            "last_name": "Buyuk",
+            "email": "candidate@example.com",
+            "phone_country_iso2": "TR",
+            "phone_national_number": "5551112233",
+            "adp_ascii_name_policy_approved": True,
+            "address_country_iso2": "TR",
+            "address_line1": "Example Mah. Example Cad. 1",
+            "address_line2": "",
+            "address_line3": "",
+            "city": "Istanbul",
+            "state_or_territory": "Istanbul",
+            "postal_code": "34700",
+        }
+        path = Path(tmp) / "profile.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return str(path)
+
+    def test_blank_text_address_write_is_exact_and_conflict_blocks(self):
+        counters = {
+            "form_value_write_attempts": 0,
+            "form_value_write_successes": 0,
+            "address_write_attempts": 0,
+            "address_write_successes": 0,
+        }
+        blank = input_locator("", "Istanbul")
+        result = _fill_blank_or_verify(
+            blank,
+            "Istanbul",
+            "candidate.address.city",
+            counters,
+        )
+        blank.fill.assert_called_once_with("Istanbul")
+        self.assertTrue(result["executed"])
+        self.assertEqual(counters["form_value_write_attempts"], 1)
+        self.assertEqual(counters["address_write_attempts"], 1)
+
+        conflict = input_locator("Ankara")
+        with self.assertRaisesRegex(PermissionError, "PROFILE_CONFLICT"):
+            _fill_blank_or_verify(
+                conflict,
+                "Istanbul",
+                "candidate.address.city",
+                counters,
+            )
+        conflict.fill.assert_not_called()
+
+    def test_full_executor_selects_reviewed_country_and_required_address_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_path = self.profile_path(tmp)
+            page = MagicMock()
+
+            country = MagicMock()
+            country.count.return_value = 1
+            country.is_visible.return_value = True
+            country.is_enabled.return_value = True
+            country.get_attribute.side_effect = lambda key: {
+                "role": "combobox",
+                "aria-autocomplete": "list",
+            }.get(key)
+            country.input_value.side_effect = ["", "Turkey"]
+
+            option = MagicMock()
+            option.is_disabled.return_value = False
+
+            phone_country = MagicMock()
+            phone_country.is_visible.return_value = True
+            phone_country.is_enabled.return_value = True
+            phone_country.input_value.side_effect = ["TR", "TR"]
+            phone_country.locator.return_value.count.return_value = 1
+            phone_country.locator.return_value.is_disabled.return_value = False
+
+            home_country = MagicMock()
+            countries = MagicMock()
+            countries.count.return_value = 2
+            countries.nth.side_effect = [phone_country, home_country]
+
+            phone = MagicMock()
+            phone.is_visible.return_value = True
+            phone.is_enabled.return_value = True
+            phone.input_value.side_effect = ["5551112233", "5551112233"]
+            home_phone = MagicMock()
+            phones = MagicMock()
+            phones.count.return_value = 2
+            phones.nth.side_effect = [phone, home_phone]
+
+            address_values = {
+                "#PersonalAddress_address_line1": ("", "Example Mah. Example Cad. 1"),
+                "#PersonalAddress_address_line2": ("", ""),
+                "#PersonalAddress_address_line3": ("", ""),
+                "#PersonalAddress_city": ("", "Istanbul"),
+                "#PersonalAddress_state": ("", "Istanbul"),
+                "#PersonalAddress_postalCode": ("", "34700"),
+            }
+            address_locators = {
+                selector: input_locator(before, after)
+                for selector, (before, after) in address_values.items()
+            }
+
+            def locate(selector):
+                if selector == "#PersonalAddress_country":
+                    return country
+                if selector == "select[name='phoneCountry']":
+                    return countries
+                if selector == "input[name='phone']":
+                    return phones
+                return address_locators[selector]
+
+            page.locator.side_effect = locate
+
+            identity = {
+                "safe_fill_status": "verified",
+                "form_value_write_attempts": 0,
+                "form_value_write_successes": 0,
+                "email_readback_only": {"readback_match": True},
+            }
+            surface = {
+                "visible_listbox_count": 1,
+                "visible_option_count": 241,
+                "options": [
+                    {"ordinal": 221, "label": "Turkey", "disabled": False},
+                ],
+                "turkey_candidate_labels": ["Turkey"],
+                "turkey_candidate_count": 1,
+                "unique_visible_labels": True,
+                "candidate_values_read": False,
+            }
+
+            with patch.object(
+                safe_fill,
+                "run_identity_safe_fill",
+                return_value=identity,
+            ), patch.object(
+                safe_fill,
+                "inspect_contact_address_on_verified_page",
+                side_effect=[contact_fixture(), contact_fixture()],
+            ), patch.object(
+                safe_fill,
+                "contact_contract_fingerprint",
+                return_value=CONTACT_FP,
+            ), patch.object(
+                safe_fill,
+                "_visible_option_surface",
+                return_value=surface,
+            ), patch.object(
+                safe_fill,
+                "option_surface_fingerprint",
+                return_value=COUNTRY_FP,
+            ), patch.object(
+                safe_fill,
+                "_unique_visible_option",
+                return_value=option,
+            ):
+                report = run_on_verified_page(
+                    page,
+                    AdpSamePagePersonalInformationSafeFillRequest(
+                        application_url=URL,
+                        expected_manifest_fingerprint=MANIFEST_FP,
+                        expected_contact_contract_fingerprint=CONTACT_FP,
+                        expected_country_option_surface_fingerprint=COUNTRY_FP,
+                        profile_json_path=profile_path,
+                        allow_reviewed_turkish_ascii_name_overwrite=True,
+                    ),
+                )
+
+        country.click.assert_called_once()
+        option.click.assert_called_once()
+        phone.fill.assert_not_called()
+        phone_country.select_option.assert_not_called()
+        home_phone.fill.assert_not_called()
+        home_country.select_option.assert_not_called()
+
+        self.assertEqual(report["safe_fill_status"], "verified")
+        self.assertEqual(report["country_selection_attempts"], 1)
+        self.assertEqual(report["country_selection_successes"], 1)
+        self.assertEqual(report["address_write_attempts"], 5)
+        self.assertEqual(report["address_write_successes"], 5)
+        self.assertEqual(report["phone_write_attempts"], 0)
+        self.assertEqual(report["home_phone_write_attempts"], 0)
+        self.assertEqual(report["next_click_attempts"], 0)
+        self.assertEqual(report["file_upload_attempts"], 0)
+        self.assertEqual(report["submit_attempts"], 0)
+        self.assertFalse(report["raw_values_exposed"])
+
+    def test_unreviewed_address_country_blocks_before_country_click(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_path = self.profile_path(tmp)
+            raw = json.loads(Path(profile_path).read_text(encoding="utf-8"))
+            raw["address_country_iso2"] = "DE"
+            Path(profile_path).write_text(json.dumps(raw), encoding="utf-8")
+            page = MagicMock()
+
+            with patch.object(
+                safe_fill,
+                "run_identity_safe_fill",
+                return_value={
+                    "safe_fill_status": "verified",
+                    "form_value_write_attempts": 0,
+                    "form_value_write_successes": 0,
+                    "email_readback_only": {"readback_match": True},
+                },
+            ), patch.object(
+                safe_fill,
+                "inspect_contact_address_on_verified_page",
+                return_value=contact_fixture(),
+            ), patch.object(
+                safe_fill,
+                "contact_contract_fingerprint",
+                return_value=CONTACT_FP,
+            ), patch.object(
+                safe_fill,
+                "_write_mobile_phone",
+                return_value={"home_phone_touched": False},
+            ):
+                with self.assertRaisesRegex(PermissionError, "ADDRESS_COUNTRY_NOT_REVIEWED"):
+                    run_on_verified_page(
+                        page,
+                        AdpSamePagePersonalInformationSafeFillRequest(
+                            application_url=URL,
+                            expected_manifest_fingerprint=MANIFEST_FP,
+                            expected_contact_contract_fingerprint=CONTACT_FP,
+                            expected_country_option_surface_fingerprint=COUNTRY_FP,
+                            profile_json_path=profile_path,
+                        ),
+                    )
+
+
+if __name__ == "__main__":
+    unittest.main()
