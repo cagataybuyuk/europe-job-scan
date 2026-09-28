@@ -17,6 +17,7 @@ $AdpHelperRelativePaths = @(
   '../../scripts/probe_adp_same_page_contact_address.ps1',
   '../../scripts/probe_adp_same_page_country_combobox.ps1',
   '../../scripts/probe_adp_same_page_personal_information_safe_fill.ps1',
+  '../../scripts/probe_adp_same_page_country_keyboard_selection.ps1',
   '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 )
 foreach ($RelativePath in $AdpHelperRelativePaths) {
@@ -200,6 +201,23 @@ foreach ($BrokenValidationRegex in @(
   }
 }
 Write-Host 'PASS: ADP Personal Information local validators reject escape-damaged regexes'
+
+$CountryKeyboardHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_country_keyboard_selection.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-country-keyboard-selection-report-out',
+  '--same-page-country-keyboard-expected-manifest-fingerprint',
+  '--same-page-country-keyboard-expected-contact-contract-fingerprint',
+  '--same-page-country-keyboard-expected-option-surface-fingerprint',
+  'Phone, address text, consent, Next, upload and submit remain disabled.'
+)) {
+  if (-not $CountryKeyboardHelperText.Contains($RequiredSnippet)) {
+    throw "Country keyboard helper is missing reviewed contract: $RequiredSnippet"
+  }
+}
+if ($CountryKeyboardHelperText -match 'Invoke-GhSecretSetUtf8|gh secret|set_input_files') {
+  throw 'Country keyboard helper must not provision secrets or upload files'
+}
+Write-Host 'PASS: ADP Country keyboard helper stays isolated and submit-free'
 
 # Execute the actual helper body with a fake native Python boundary. A failed
 # local replay must never call the secret writer; all temporary paths are cleaned.
