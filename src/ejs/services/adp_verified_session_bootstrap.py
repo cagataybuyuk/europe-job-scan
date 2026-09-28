@@ -108,6 +108,10 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
     )
     if any(personal_information_parts) and not all(personal_information_parts):
         raise ValueError("ADP_PERSONAL_INFORMATION_SAFE_FILL_REQUIRES_COMPLETE_CONFIGURATION")
+    if all(personal_information_parts) and (
+        all(safe_fill_parts) or all(country_probe_parts)
+    ):
+        raise ValueError("ADP_PERSONAL_INFORMATION_SAFE_FILL_MUST_RUN_EXCLUSIVELY")
 
 
 def _open_reviewed_adp_target(page, application_url: str) -> dict:
