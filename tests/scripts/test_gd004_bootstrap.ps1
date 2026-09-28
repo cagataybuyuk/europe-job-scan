@@ -18,6 +18,7 @@ $AdpHelperRelativePaths = @(
   '../../scripts/probe_adp_same_page_country_combobox.ps1',
   '../../scripts/probe_adp_same_page_personal_information_safe_fill.ps1',
   '../../scripts/probe_adp_same_page_country_keyboard_selection.ps1',
+  '../../scripts/probe_adp_same_page_country_dom_contract.ps1',
   '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 )
 foreach ($RelativePath in $AdpHelperRelativePaths) {
@@ -218,6 +219,23 @@ if ($CountryKeyboardHelperText -match 'Invoke-GhSecretSetUtf8|gh secret|set_inpu
   throw 'Country keyboard helper must not provision secrets or upload files'
 }
 Write-Host 'PASS: ADP Country keyboard helper stays isolated and submit-free'
+
+$CountryDomHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_country_dom_contract.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-country-dom-contract-out',
+  '--same-page-country-dom-expected-manifest-fingerprint',
+  '--same-page-country-dom-expected-contact-contract-fingerprint',
+  '--same-page-country-dom-expected-option-surface-fingerprint',
+  'will not select an option or read candidate values'
+)) {
+  if (-not $CountryDomHelperText.Contains($RequiredSnippet)) {
+    throw "Country DOM helper is missing reviewed read-only contract: $RequiredSnippet"
+  }
+}
+if ($CountryDomHelperText -match 'Invoke-GhSecretSetUtf8|gh secret|set_input_files') {
+  throw 'Country DOM helper must not provision secrets or upload files'
+}
+Write-Host 'PASS: ADP Country DOM helper stays read-only and value-free'
 
 # Execute the actual helper body with a fake native Python boundary. A failed
 # local replay must never call the secret writer; all temporary paths are cleaned.
