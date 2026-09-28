@@ -14,6 +14,7 @@ $AdpHelperRelativePaths = @(
   '../../scripts/probe_adp_live_handoff.ps1',
   '../../scripts/probe_adp_same_page_manifest.ps1',
   '../../scripts/probe_adp_same_page_safe_fill.ps1',
+  '../../scripts/probe_adp_same_page_contact_address.ps1',
   '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 )
 foreach ($RelativePath in $AdpHelperRelativePaths) {
@@ -118,6 +119,24 @@ if ($SamePageSafeFillHelperText -match 'set_input_files|\.click\(|select_option'
   throw 'Same-page safe-fill helper must not contain navigation/upload/select browser calls'
 }
 Write-Host 'PASS: ADP same-page safe-fill helper stays inside reviewed local authority'
+
+$SamePageContactAddressHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_contact_address.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-contact-address-contract-out $contractPath',
+  '--same-page-contact-address-expected-manifest-fingerprint $ExpectedManifestFingerprint',
+  'No candidate field value will be read or written by this probe.'
+)) {
+  if ($SamePageContactAddressHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Same-page contact/address helper is missing read-only contract: $RequiredSnippet"
+  }
+}
+if ($SamePageContactAddressHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Same-page contact/address helper must not provision GitHub secrets'
+}
+if ($SamePageContactAddressHelperText -match 'set_input_files|\.click\(|\.fill\(|select_option|input_value') {
+  throw 'Same-page contact/address helper must not contain browser mutation or value-read calls'
+}
+Write-Host 'PASS: ADP same-page contact/address helper is read-only and value-free'
 
 # Execute the actual helper body with a fake native Python boundary. A failed
 # local replay must never call the secret writer; all temporary paths are cleaned.
