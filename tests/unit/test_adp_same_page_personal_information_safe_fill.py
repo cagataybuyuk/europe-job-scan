@@ -209,20 +209,12 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
             ), patch.object(
                 safe_fill,
                 "_selected_country_label_evidence",
-                side_effect=[
-                    {
-                        "present": False,
-                        "reviewed_label_match": False,
-                        "label_hash": "",
-                        "raw_value_exposed": False,
-                    },
-                    {
-                        "present": True,
-                        "reviewed_label_match": True,
-                        "label_hash": "hash",
-                        "raw_value_exposed": False,
-                    },
-                ],
+                return_value={
+                    "present": True,
+                    "reviewed_label_match": True,
+                    "label_hash": "hash",
+                    "raw_value_exposed": False,
+                },
             ), patch.object(
                 safe_fill,
                 "_visible_option_surface",
