@@ -16,6 +16,7 @@ $AdpHelperRelativePaths = @(
   '../../scripts/probe_adp_same_page_safe_fill.ps1',
   '../../scripts/probe_adp_same_page_contact_address.ps1',
   '../../scripts/probe_adp_same_page_country_combobox.ps1',
+  '../../scripts/probe_adp_same_page_personal_information_safe_fill.ps1',
   '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 )
 foreach ($RelativePath in $AdpHelperRelativePaths) {
@@ -157,6 +158,28 @@ if ($SamePageCountryHelperText -match 'set_input_files|\.fill\(|select_option|in
   throw 'Same-page Country helper must not contain browser mutation/value-read calls'
 }
 Write-Host 'PASS: ADP same-page Country helper stays one-click and selection-free'
+
+$PersonalInfoHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_personal_information_safe_fill.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-personal-information-profile',
+  '--same-page-personal-information-expected-manifest-fingerprint',
+  '--same-page-personal-information-expected-contact-contract-fingerprint',
+  '--same-page-personal-information-expected-country-surface-fingerprint',
+  '--same-page-personal-information-report-out',
+  'Home Phone, consent, Next, upload and submit remain disabled.',
+  'Raw values will not be printed in the result.'
+)) {
+  if ($PersonalInfoHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Personal Information safe-fill helper is missing reviewed contract: $RequiredSnippet"
+  }
+}
+if ($PersonalInfoHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Personal Information safe-fill helper must not provision GitHub secrets'
+}
+if ($PersonalInfoHelperText -match 'set_input_files') {
+  throw 'Personal Information safe-fill helper must not contain upload calls'
+}
+Write-Host 'PASS: ADP Personal Information helper stays local, bounded and submit-free'
 
 # Execute the actual helper body with a fake native Python boundary. A failed
 # local replay must never call the secret writer; all temporary paths are cleaned.
