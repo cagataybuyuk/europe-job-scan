@@ -182,7 +182,25 @@ if ($PersonalInfoHelperText -match 'set_input_files') {
 Write-Host 'PASS: ADP Personal Information helper stays local, bounded and submit-free'
 
 foreach ($RequiredValidationRegex in @(
-  "'^[^ @]+@[^ @]+[.][^ @]+
+  "'^[^ @]+@[^ @]+[.][^ @]+$'",
+  "'^[0-9]{4,20}$'",
+  "'^5[0-9]{9}$'"
+)) {
+  if ($PersonalInfoHelperText -notlike ('*' + $RequiredValidationRegex + '*')) {
+    throw "Personal Information helper is missing preserved validation regex: $RequiredValidationRegex"
+  }
+}
+foreach ($BrokenValidationRegex in @(
+  "'^[^s@]+@[^s@]+.[^s@]+$'",
+  "'^d{4,20}$'",
+  "'^5d{9}$'"
+)) {
+  if ($PersonalInfoHelperText -like ('*' + $BrokenValidationRegex + '*')) {
+    throw "Personal Information helper contains escape-damaged validation regex: $BrokenValidationRegex"
+  }
+}
+Write-Host 'PASS: ADP Personal Information local validators reject escape-damaged regexes'
+
 # Execute the actual helper body with a fake native Python boundary. A failed
 # local replay must never call the secret writer; all temporary paths are cleaned.
 & {
