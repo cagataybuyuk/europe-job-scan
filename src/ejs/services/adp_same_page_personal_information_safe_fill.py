@@ -189,9 +189,11 @@ def _set_address_country(
     option = _unique_visible_option(page, REVIEWED_ADDRESS_COUNTRY_LABEL)
     counters["country_selection_attempts"] += 1
     counters["address_write_attempts"] += 1
+    counters["form_value_write_attempts"] += 1
     option.click(timeout=request.timeout_ms)
     counters["country_selection_successes"] += 1
     counters["address_write_successes"] += 1
+    counters["form_value_write_successes"] += 1
     page.wait_for_timeout(250)
 
     after = country.input_value()
