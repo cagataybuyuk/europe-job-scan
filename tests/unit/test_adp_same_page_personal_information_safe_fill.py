@@ -120,7 +120,7 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
                 "aria-autocomplete": "list",
                 "aria-expanded": "false",
             }.get(key)
-            country.input_value.side_effect = ["", "Turkey"]
+            country.input_value.side_effect = ["", ""]
             country.evaluate.return_value = True
 
             option = MagicMock()
@@ -208,6 +208,23 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
                 return_value=CONTACT_FP,
             ), patch.object(
                 safe_fill,
+                "_selected_country_label_evidence",
+                side_effect=[
+                    {
+                        "present": False,
+                        "reviewed_label_match": False,
+                        "label_hash": "",
+                        "raw_value_exposed": False,
+                    },
+                    {
+                        "present": True,
+                        "reviewed_label_match": True,
+                        "label_hash": "hash",
+                        "raw_value_exposed": False,
+                    },
+                ],
+            ), patch.object(
+                safe_fill,
                 "_visible_option_surface",
                 return_value=surface,
             ), patch.object(
@@ -241,7 +258,7 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
         self.assertEqual(report["safe_fill_status"], "verified")
         self.assertEqual(report["country_selection_attempts"], 1)
         self.assertEqual(report["country_selection_successes"], 1)
-        self.assertEqual(report["address_country_result"]["readback_mode"], "label")
+        self.assertEqual(report["address_country_result"]["readback_mode"], "selected_label")
         self.assertEqual(report["address_write_attempts"], 5)
         self.assertEqual(report["address_write_successes"], 5)
         self.assertEqual(report["phone_write_attempts"], 0)
@@ -250,6 +267,35 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
         self.assertEqual(report["file_upload_attempts"], 0)
         self.assertEqual(report["submit_attempts"], 0)
         self.assertFalse(report["raw_values_exposed"])
+
+    def test_country_readback_accepts_rendered_react_select_single_value_with_empty_input(self):
+        page = MagicMock()
+        country = MagicMock()
+        country.input_value.return_value = ""
+        country.evaluate.return_value = True
+        country.get_attribute.return_value = "false"
+        empty = MagicMock()
+        empty.count.return_value = 0
+        page.locator.return_value = empty
+
+        with patch.object(
+            safe_fill,
+            "_selected_country_label_evidence",
+            return_value={
+                "present": True,
+                "reviewed_label_match": True,
+                "label_hash": "hash",
+                "raw_value_exposed": False,
+            },
+        ):
+            evidence = _country_readback_evidence(page, country)
+
+        self.assertEqual(evidence["mode"], "selected_label")
+        self.assertFalse(evidence["nonempty"])
+        self.assertTrue(evidence["browser_valid"])
+        self.assertTrue(evidence["selected_label_present"])
+        self.assertTrue(evidence["selected_label_match"])
+        self.assertFalse(evidence["raw_value_exposed"])
 
     def test_country_readback_accepts_nonempty_valid_closed_custom_value_without_exposing_raw(self):
         page = MagicMock()
@@ -261,7 +307,17 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
         empty.count.return_value = 0
         page.locator.return_value = empty
 
-        evidence = _country_readback_evidence(page, country)
+        with patch.object(
+            safe_fill,
+            "_selected_country_label_evidence",
+            return_value={
+                "present": False,
+                "reviewed_label_match": False,
+                "label_hash": "",
+                "raw_value_exposed": False,
+            },
+        ):
+            evidence = _country_readback_evidence(page, country)
 
         self.assertEqual(evidence["mode"], "custom_committed")
         self.assertTrue(evidence["nonempty"])
@@ -281,7 +337,17 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
         empty.count.return_value = 0
         page.locator.return_value = empty
 
-        evidence = _country_readback_evidence(page, country)
+        with patch.object(
+            safe_fill,
+            "_selected_country_label_evidence",
+            return_value={
+                "present": False,
+                "reviewed_label_match": False,
+                "label_hash": "",
+                "raw_value_exposed": False,
+            },
+        ):
+            evidence = _country_readback_evidence(page, country)
 
         self.assertEqual(evidence["mode"], "mismatch")
         self.assertFalse(evidence["browser_valid"])
