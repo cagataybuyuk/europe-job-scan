@@ -177,6 +177,50 @@ class AdpSamePageSafeFillTests(unittest.TestCase):
         first.fill.assert_not_called()
         last.fill.assert_not_called()
 
+    def test_reviewed_turkish_ascii_equivalent_can_be_overwritten_when_explicitly_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = self.profile_path(tmp)
+            page = MagicMock()
+            first = self.locator("Cagatay")
+            last = self.locator("Büyük")
+            last.input_value.side_effect = ["Büyük", "Buyuk"]
+            email = self.locator("candidate@example.com", enabled=False)
+            page.locator.side_effect = lambda selector: {
+                f"#{FIRST_NAME_ID}": first,
+                f"#{LAST_NAME_ID}": last,
+                f"#{EMAIL_ID}": email,
+            }[selector]
+            with patch.object(
+                safe_fill,
+                "extract_same_page_manifest",
+                side_effect=[manifest_fixture(), manifest_fixture()],
+            ), patch.object(
+                safe_fill,
+                "manifest_surface_fingerprint",
+                return_value=FP,
+            ):
+                report = run_on_verified_page(
+                    page,
+                    AdpSamePageSafeFillRequest(
+                        application_url=URL,
+                        expected_manifest_fingerprint=FP,
+                        profile_json_path=str(profile),
+                        allow_reviewed_turkish_ascii_name_overwrite=True,
+                    ),
+                )
+
+        first.fill.assert_not_called()
+        last.fill.assert_called_once_with("Buyuk")
+        self.assertEqual(report["form_value_write_attempts"], 1)
+        self.assertEqual(report["form_value_write_successes"], 1)
+        self.assertTrue(report["reviewed_turkish_ascii_name_overwrite_allowed"])
+        self.assertTrue(
+            report["field_results"][1]["reviewed_turkish_ascii_overwrite_executed"]
+        )
+        self.assertEqual(report["next_click_attempts"], 0)
+        self.assertEqual(report["file_upload_attempts"], 0)
+        self.assertEqual(report["submit_attempts"], 0)
+
     def test_disabled_email_mismatch_blocks_before_name_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
             profile = self.profile_path(tmp)
