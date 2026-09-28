@@ -100,9 +100,10 @@ Write-Host 'PASS: ADP same-page manifest helper is read-only and secret-write-fr
 
 $SamePageSafeFillHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_safe_fill.ps1')
 foreach ($RequiredSnippet in @(
-  '--same-page-safe-fill-profile $profilePath',
-  '--same-page-safe-fill-expected-manifest-fingerprint $ExpectedManifestFingerprint',
-  '--same-page-safe-fill-report-out $safeFillReportPath',
+  "'--same-page-safe-fill-profile', $profilePath",
+  "'--same-page-safe-fill-expected-manifest-fingerprint', $ExpectedManifestFingerprint",
+  "'--same-page-safe-fill-report-out', $safeFillReportPath",
+  '--same-page-safe-fill-allow-reviewed-turkish-ascii-name-overwrite',
   'A non-empty browser value that differs from your input will block instead of being overwritten.',
   'No navigation, phone/address, upload, or submit action was performed.'
 )) {
