@@ -11,6 +11,7 @@ on:
       - 'src/ejs/services/adp_same_page_contact_address_contract.py'
       - 'src/ejs/services/adp_personal_information_profile.py'
       - 'src/ejs/services/adp_same_page_country_combobox_probe.py'
+      - 'src/ejs/services/adp_same_page_personal_information_safe_fill.py'
       - 'scripts/bootstrap_adp_verified_session.ps1'
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
@@ -18,6 +19,7 @@ on:
       - 'scripts/probe_adp_same_page_safe_fill.ps1'
       - 'scripts/probe_adp_same_page_contact_address.ps1'
       - 'scripts/probe_adp_same_page_country_combobox.ps1'
+      - 'scripts/probe_adp_same_page_personal_information_safe_fill.ps1'
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
@@ -26,6 +28,7 @@ on:
       - 'tests/unit/test_adp_same_page_contact_address_contract.py'
       - 'tests/unit/test_adp_personal_information_profile.py'
       - 'tests/unit/test_adp_same_page_country_combobox_probe.py'
+      - 'tests/unit/test_adp_same_page_personal_information_safe_fill.py'
       - 'tests/scripts/test_gd004_bootstrap.ps1'
       - '.github/workflows/gd004-adp-verified-session-regression.yml'
   push:
@@ -39,6 +42,7 @@ on:
       - 'src/ejs/services/adp_same_page_contact_address_contract.py'
       - 'src/ejs/services/adp_personal_information_profile.py'
       - 'src/ejs/services/adp_same_page_country_combobox_probe.py'
+      - 'src/ejs/services/adp_same_page_personal_information_safe_fill.py'
       - 'scripts/bootstrap_adp_verified_session.ps1'
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
@@ -46,6 +50,7 @@ on:
       - 'scripts/probe_adp_same_page_safe_fill.ps1'
       - 'scripts/probe_adp_same_page_contact_address.ps1'
       - 'scripts/probe_adp_same_page_country_combobox.ps1'
+      - 'scripts/probe_adp_same_page_personal_information_safe_fill.ps1'
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
@@ -54,6 +59,7 @@ on:
       - 'tests/unit/test_adp_same_page_contact_address_contract.py'
       - 'tests/unit/test_adp_personal_information_profile.py'
       - 'tests/unit/test_adp_same_page_country_combobox_probe.py'
+      - 'tests/unit/test_adp_same_page_personal_information_safe_fill.py'
       - 'tests/scripts/test_gd004_bootstrap.ps1'
 
 permissions:
@@ -76,6 +82,7 @@ jobs:
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_contact_address_contract.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_personal_information_profile.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_country_combobox_probe.py' -v
+          python -m unittest discover -s tests/unit -p 'test_adp_same_page_personal_information_safe_fill.py' -v
       - name: Assert bootstrap and inspector authority boundaries
         run: |
           python - <<'PY'
@@ -88,6 +95,7 @@ jobs:
           same_page_contact_address = Path('src/ejs/services/adp_same_page_contact_address_contract.py').read_text(encoding='utf-8')
           personal_information_profile = Path('src/ejs/services/adp_personal_information_profile.py').read_text(encoding='utf-8')
           country_probe = Path('src/ejs/services/adp_same_page_country_combobox_probe.py').read_text(encoding='utf-8')
+          personal_info_safe_fill = Path('src/ejs/services/adp_same_page_personal_information_safe_fill.py').read_text(encoding='utf-8')
           workflow = Path('.github/workflows/gd004-adp-verified-session-inspector.yml').read_text(encoding='utf-8')
           helper = Path('scripts/bootstrap_adp_verified_session.ps1').read_text(encoding='utf-8')
           persistent_helper = Path('scripts/probe_adp_persistent_profile.ps1').read_text(encoding='utf-8')
@@ -96,6 +104,7 @@ jobs:
           same_page_safe_fill_helper = Path('scripts/probe_adp_same_page_safe_fill.ps1').read_text(encoding='utf-8')
           same_page_contact_address_helper = Path('scripts/probe_adp_same_page_contact_address.ps1').read_text(encoding='utf-8')
           country_probe_helper = Path('scripts/probe_adp_same_page_country_combobox.ps1').read_text(encoding='utf-8')
+          personal_info_helper = Path('scripts/probe_adp_same_page_personal_information_safe_fill.ps1').read_text(encoding='utf-8')
           assert 'headless=False' in bootstrap
           assert 'Do not paste the code into this terminal' in bootstrap
           assert 'storage_state(path=' in bootstrap
@@ -191,6 +200,20 @@ jobs:
           assert '.fill(' not in country_probe_helper
           assert 'select_option' not in country_probe_helper
           assert 'input_value(' not in country_probe_helper
+          assert personal_info_safe_fill.count('.select_option(') == 1, personal_info_safe_fill.count('.select_option(')
+          assert personal_info_safe_fill.count('.fill(') == 2, personal_info_safe_fill.count('.fill(')
+          assert personal_info_safe_fill.count('.click(') == 2, personal_info_safe_fill.count('.click(')
+          assert 'home_phone_write_attempts": 0' in personal_info_safe_fill
+          assert 'consent_action_attempts": 0' in personal_info_safe_fill
+          assert 'navigation_click_attempts": 0' in personal_info_safe_fill
+          assert 'next_click_attempts": 0' in personal_info_safe_fill
+          assert 'file_upload_attempts": 0' in personal_info_safe_fill
+          assert 'submit_attempts": 0' in personal_info_safe_fill
+          assert 'final_submit_allowed": False' in personal_info_safe_fill
+          assert 'set_input_files' not in personal_info_safe_fill
+          assert 'Invoke-GhSecretSetUtf8' not in personal_info_helper
+          assert 'gh secret' not in personal_info_helper
+          assert 'set_input_files' not in personal_info_helper
           assert 'EJS_FILE_UPLOAD: "false"' in workflow
           assert 'EJS_FINAL_SUBMIT: "false"' in workflow
           assert 'EJS_KILL_SWITCH: "true"' in workflow
