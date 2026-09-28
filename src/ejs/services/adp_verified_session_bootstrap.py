@@ -23,6 +23,9 @@ from ejs.services.adp_same_page_safe_fill import (
     AdpSamePageSafeFillRequest,
     run_on_verified_page as run_same_page_safe_fill,
 )
+from ejs.services.adp_same_page_contact_address_contract import (
+    inspect_on_verified_page as inspect_same_page_contact_address_contract,
+)
 
 BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v5"
 OTP_CONTROL_ID = "oneTimePassWord"
@@ -48,6 +51,8 @@ class AdpVerifiedSessionBootstrapRequest:
     same_page_safe_fill_expected_manifest_fingerprint: str = ""
     same_page_safe_fill_report_out: str = ""
     same_page_safe_fill_allow_reviewed_turkish_ascii_name_overwrite: bool = False
+    same_page_contact_address_contract_out: str = ""
+    same_page_contact_address_expected_manifest_fingerprint: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
@@ -65,6 +70,12 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
     )
     if any(safe_fill_parts) and not all(safe_fill_parts):
         raise ValueError("ADP_SAME_PAGE_SAFE_FILL_REQUIRES_COMPLETE_CONFIGURATION")
+    contact_contract_parts = (
+        bool(request.same_page_contact_address_contract_out),
+        bool(request.same_page_contact_address_expected_manifest_fingerprint),
+    )
+    if any(contact_contract_parts) and not all(contact_contract_parts):
+        raise ValueError("ADP_CONTACT_ADDRESS_CONTRACT_REQUIRES_COMPLETE_CONFIGURATION")
 
 
 def _open_reviewed_adp_target(page, application_url: str) -> dict:
@@ -627,6 +638,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         if request.same_page_safe_fill_report_out
         else None
     )
+    same_page_contact_address_contract_path = (
+        Path(request.same_page_contact_address_contract_out)
+        if request.same_page_contact_address_contract_out
+        else None
+    )
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     if session_storage_path is not None:
@@ -639,6 +655,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         same_page_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     if same_page_safe_fill_report_path is not None:
         same_page_safe_fill_report_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_contact_address_contract_path is not None:
+        same_page_contact_address_contract_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
         browser = None
@@ -838,6 +856,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
 
                         same_page_manifest = None
                         same_page_safe_fill = None
+                        same_page_contact_address_contract = None
                         if same_page_manifest_path is not None:
                             same_page_manifest = extract_same_page_manifest(
                                 page,
@@ -866,6 +885,43 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                     "file_upload_attempts": 0,
                                     "submit_attempts": 0,
                                     "raw_values_exposed": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_contact_address_contract_path is not None:
+                            same_page_contact_address_contract = (
+                                inspect_same_page_contact_address_contract(
+                                    page,
+                                    request.application_url,
+                                    request.same_page_contact_address_expected_manifest_fingerprint,
+                                    timeout_ms=20_000,
+                                    render_wait_ms=5_000,
+                                )
+                            )
+                            same_page_contact_address_contract_path.write_text(
+                                json.dumps(
+                                    same_page_contact_address_contract,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_contact_address_contract": {
+                                    "contract_version": same_page_contact_address_contract.get("contract_version", ""),
+                                    "contract_fingerprint": same_page_contact_address_contract.get("contract_fingerprint", ""),
+                                    "address_control_count": same_page_contact_address_contract.get("address_control_count", 0),
+                                    "phone_country_control_count": same_page_contact_address_contract.get("phone_country_control_count", 0),
+                                    "phone_input_control_count": same_page_contact_address_contract.get("phone_input_control_count", 0),
+                                    "form_value_write_attempts": 0,
+                                    "phone_write_attempts": 0,
+                                    "address_write_attempts": 0,
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "raw_values_exposed": False,
+                                    "input_values_read": False,
                                 }
                             }, sort_keys=True))
 
@@ -969,6 +1025,14 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                 if isinstance(same_page_manifest, dict)
                                 else 0
                             ),
+                            "same_page_contact_address_contract_exported": isinstance(
+                                same_page_contact_address_contract, dict
+                            ),
+                            "same_page_contact_address_contract_fingerprint": (
+                                str(same_page_contact_address_contract.get("contract_fingerprint", ""))
+                                if isinstance(same_page_contact_address_contract, dict)
+                                else ""
+                            ),
                             "same_page_safe_fill_executed": isinstance(same_page_safe_fill, dict),
                             "same_page_safe_fill_write_attempts": (
                                 int(same_page_safe_fill.get("form_value_write_attempts", 0))
@@ -1036,6 +1100,11 @@ def main() -> int:
         "--same-page-safe-fill-allow-reviewed-turkish-ascii-name-overwrite",
         action="store_true",
     )
+    parser.add_argument("--same-page-contact-address-contract-out", default="")
+    parser.add_argument(
+        "--same-page-contact-address-expected-manifest-fingerprint",
+        default="",
+    )
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
@@ -1055,6 +1124,12 @@ def main() -> int:
         same_page_safe_fill_allow_reviewed_turkish_ascii_name_overwrite=(
             args.same_page_safe_fill_allow_reviewed_turkish_ascii_name_overwrite
         ),
+        same_page_contact_address_contract_out=(
+            args.same_page_contact_address_contract_out
+        ),
+        same_page_contact_address_expected_manifest_fingerprint=(
+            args.same_page_contact_address_expected_manifest_fingerprint
+        ),
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
@@ -1071,6 +1146,12 @@ def main() -> int:
         "same_page_manifest_file_control_count": report.get("same_page_manifest_file_control_count", 0),
         "same_page_safe_fill_executed": report.get("same_page_safe_fill_executed") is True,
         "same_page_safe_fill_write_attempts": report.get("same_page_safe_fill_write_attempts", 0),
+        "same_page_contact_address_contract_exported": (
+            report.get("same_page_contact_address_contract_exported") is True
+        ),
+        "same_page_contact_address_contract_fingerprint": (
+            report.get("same_page_contact_address_contract_fingerprint", "")
+        ),
         "same_page_safe_fill_write_successes": report.get("same_page_safe_fill_write_successes", 0),
         "live_handoff_reuse_proven": report.get("live_handoff_reuse_proven") is True,
         "live_handoff_strongest_reusable_scope": report.get("live_handoff_strongest_reusable_scope", ""),
