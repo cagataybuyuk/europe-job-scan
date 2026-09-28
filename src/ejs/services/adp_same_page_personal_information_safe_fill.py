@@ -145,12 +145,45 @@ def _unique_visible_option(page, label: str):
     return matches[0]
 
 
+def _selected_country_label_evidence(country) -> dict:
+    try:
+        result = country.evaluate(
+            """el => {
+              const valueContainer = el.parentElement && el.parentElement.parentElement
+                ? el.parentElement.parentElement
+                : null;
+              if (!valueContainer) return {present: false, text: ''};
+              const node = valueContainer.querySelector(
+                '.MDFSelectBox__single-value, [class*="__single-value"]'
+              );
+              if (!node) return {present: false, text: ''};
+              return {
+                present: true,
+                text: (node.textContent || '').replace(/\\s+/g, ' ').trim(),
+              };
+            }"""
+        )
+    except Exception:
+        result = {"present": False, "text": ""}
+    text = str(result.get("text", "") or "")
+    normalized = " ".join(text.split())
+    return {
+        "present": result.get("present") is True,
+        "reviewed_label_match": (
+            normalized.casefold() == REVIEWED_ADDRESS_COUNTRY_LABEL.casefold()
+        ),
+        "label_hash": value_hash(normalized) if normalized else "",
+        "raw_value_exposed": False,
+    }
+
+
 def _country_readback_evidence(page, country) -> dict:
     value = country.input_value()
     normalized = " ".join(value.split())
-    label_match = normalized.casefold() == REVIEWED_ADDRESS_COUNTRY_LABEL.casefold()
-    iso2_match = normalized.upper() == REVIEWED_ADDRESS_COUNTRY_ISO2
+    input_label_match = normalized.casefold() == REVIEWED_ADDRESS_COUNTRY_LABEL.casefold()
+    input_iso2_match = normalized.upper() == REVIEWED_ADDRESS_COUNTRY_ISO2
     nonempty = bool(normalized)
+    selected_label = _selected_country_label_evidence(country)
     try:
         valid = bool(country.evaluate("el => el.checkValidity()"))
     except Exception:
@@ -168,9 +201,19 @@ def _country_readback_evidence(page, country) -> dict:
         and visible_listboxes == 0
         and visible_options == 0
     )
-    if label_match:
+    selected_label_committed = (
+        selected_label["present"]
+        and selected_label["reviewed_label_match"]
+        and valid
+        and aria_expanded in {"", "false"}
+        and visible_listboxes == 0
+        and visible_options == 0
+    )
+    if selected_label_committed:
+        mode = "selected_label"
+    elif input_label_match:
         mode = "label"
-    elif iso2_match:
+    elif input_iso2_match:
         mode = "iso2"
     elif committed_custom_value:
         mode = "custom_committed"
@@ -185,6 +228,9 @@ def _country_readback_evidence(page, country) -> dict:
         "aria_expanded": aria_expanded,
         "visible_listbox_count": visible_listboxes,
         "visible_option_count": visible_options,
+        "selected_label_present": selected_label["present"],
+        "selected_label_match": selected_label["reviewed_label_match"],
+        "selected_label_hash": selected_label["label_hash"],
         "raw_value_exposed": False,
     }
 
@@ -209,7 +255,7 @@ def _set_address_country(
     before = country.input_value()
     if before:
         before_evidence = _country_readback_evidence(page, country)
-        if before_evidence["mode"] in {"label", "iso2"}:
+        if before_evidence["mode"] in {"selected_label", "label", "iso2"}:
             return {
                 "executed": False,
                 "country_iso2": REVIEWED_ADDRESS_COUNTRY_ISO2,
@@ -243,9 +289,10 @@ def _set_address_country(
     for _ in range(20):
         page.wait_for_timeout(150)
         readback = _country_readback_evidence(page, country)
-        if readback["mode"] in {"label", "iso2", "custom_committed"}:
+        if readback["mode"] in {"selected_label", "label", "iso2", "custom_committed"}:
             break
     if not isinstance(readback, dict) or readback["mode"] not in {
+        "selected_label",
         "label",
         "iso2",
         "custom_committed",
