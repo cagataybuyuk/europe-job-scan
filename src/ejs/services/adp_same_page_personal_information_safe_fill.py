@@ -145,6 +145,50 @@ def _unique_visible_option(page, label: str):
     return matches[0]
 
 
+def _country_readback_evidence(page, country) -> dict:
+    value = country.input_value()
+    normalized = " ".join(value.split())
+    label_match = normalized.casefold() == REVIEWED_ADDRESS_COUNTRY_LABEL.casefold()
+    iso2_match = normalized.upper() == REVIEWED_ADDRESS_COUNTRY_ISO2
+    nonempty = bool(normalized)
+    try:
+        valid = bool(country.evaluate("el => el.checkValidity()"))
+    except Exception:
+        valid = False
+    try:
+        aria_expanded = str(country.get_attribute("aria-expanded") or "").casefold()
+    except Exception:
+        aria_expanded = ""
+    visible_listboxes = int(page.locator("[role='listbox']:visible").count())
+    visible_options = int(page.locator("[role='option']:visible").count())
+    committed_custom_value = (
+        nonempty
+        and valid
+        and aria_expanded in {"", "false"}
+        and visible_listboxes == 0
+        and visible_options == 0
+    )
+    if label_match:
+        mode = "label"
+    elif iso2_match:
+        mode = "iso2"
+    elif committed_custom_value:
+        mode = "custom_committed"
+    elif not nonempty:
+        mode = "empty"
+    else:
+        mode = "mismatch"
+    return {
+        "mode": mode,
+        "nonempty": nonempty,
+        "browser_valid": valid,
+        "aria_expanded": aria_expanded,
+        "visible_listbox_count": visible_listboxes,
+        "visible_option_count": visible_options,
+        "raw_value_exposed": False,
+    }
+
+
 def _set_address_country(
     page,
     profile,
@@ -164,12 +208,15 @@ def _set_address_country(
 
     before = country.input_value()
     if before:
-        if " ".join(before.split()).casefold() == REVIEWED_ADDRESS_COUNTRY_LABEL.casefold():
+        before_evidence = _country_readback_evidence(page, country)
+        if before_evidence["mode"] in {"label", "iso2"}:
             return {
                 "executed": False,
                 "country_iso2": REVIEWED_ADDRESS_COUNTRY_ISO2,
                 "country_label": REVIEWED_ADDRESS_COUNTRY_LABEL,
                 "readback_match": True,
+                "readback_mode": before_evidence["mode"],
+                "readback_evidence": before_evidence,
                 "option_surface_fingerprint": request.expected_country_option_surface_fingerprint,
             }
         raise PermissionError("ADP_PERSONAL_INFO_PROFILE_CONFLICT:candidate.address.country")
@@ -191,20 +238,34 @@ def _set_address_country(
     counters["address_write_attempts"] += 1
     counters["form_value_write_attempts"] += 1
     option.click(timeout=request.timeout_ms)
+
+    readback = None
+    for _ in range(20):
+        page.wait_for_timeout(150)
+        readback = _country_readback_evidence(page, country)
+        if readback["mode"] in {"label", "iso2", "custom_committed"}:
+            break
+    if not isinstance(readback, dict) or readback["mode"] not in {
+        "label",
+        "iso2",
+        "custom_committed",
+    }:
+        mode = readback.get("mode", "unknown") if isinstance(readback, dict) else "unknown"
+        raise PermissionError(
+            f"ADP_PERSONAL_INFO_COUNTRY_READBACK_MISMATCH:{mode}"
+        )
+
     counters["country_selection_successes"] += 1
     counters["address_write_successes"] += 1
     counters["form_value_write_successes"] += 1
-    page.wait_for_timeout(250)
-
-    after = country.input_value()
-    if " ".join(after.split()).casefold() != REVIEWED_ADDRESS_COUNTRY_LABEL.casefold():
-        raise PermissionError("ADP_PERSONAL_INFO_COUNTRY_READBACK_MISMATCH")
 
     return {
         "executed": True,
         "country_iso2": REVIEWED_ADDRESS_COUNTRY_ISO2,
         "country_label": REVIEWED_ADDRESS_COUNTRY_LABEL,
         "readback_match": True,
+        "readback_mode": readback["mode"],
+        "readback_evidence": readback,
         "option_surface_fingerprint": observed_surface,
     }
 
