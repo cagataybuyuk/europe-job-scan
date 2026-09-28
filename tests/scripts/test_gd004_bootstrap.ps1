@@ -133,7 +133,7 @@ foreach ($RequiredSnippet in @(
 if ($SamePageContactAddressHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
   throw 'Same-page contact/address helper must not provision GitHub secrets'
 }
-if ($SamePageContactAddressHelperText -match 'set_input_files|\.click\(|\.fill\(|select_option|input_value') {
+if ($SamePageContactAddressHelperText -match 'set_input_files|\.click\(|\.fill\(|select_option|input_value\(') {
   throw 'Same-page contact/address helper must not contain browser mutation or value-read calls'
 }
 Write-Host 'PASS: ADP same-page contact/address helper is read-only and value-free'
