@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from ejs.services import adp_same_page_personal_information_safe_fill as safe_fill
 from ejs.services.adp_same_page_personal_information_safe_fill import (
     AdpSamePagePersonalInformationSafeFillRequest,
+    _country_readback_evidence,
     _fill_blank_or_verify,
     run_on_verified_page,
 )
@@ -117,8 +118,10 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
             country.get_attribute.side_effect = lambda key: {
                 "role": "combobox",
                 "aria-autocomplete": "list",
+                "aria-expanded": "false",
             }.get(key)
             country.input_value.side_effect = ["", "Turkey"]
+            country.evaluate.return_value = True
 
             option = MagicMock()
             option.is_disabled.return_value = False
@@ -157,6 +160,9 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
                 for selector, (before, after) in address_values.items()
             }
 
+            hidden_collection = MagicMock()
+            hidden_collection.count.return_value = 0
+
             def locate(selector):
                 if selector == "#PersonalAddress_country":
                     return country
@@ -164,6 +170,8 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
                     return countries
                 if selector == "input[name='phone']":
                     return phones
+                if selector in {"[role='listbox']:visible", "[role='option']:visible"}:
+                    return hidden_collection
                 return address_locators[selector]
 
             page.locator.side_effect = locate
@@ -233,6 +241,7 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
         self.assertEqual(report["safe_fill_status"], "verified")
         self.assertEqual(report["country_selection_attempts"], 1)
         self.assertEqual(report["country_selection_successes"], 1)
+        self.assertEqual(report["address_country_result"]["readback_mode"], "label")
         self.assertEqual(report["address_write_attempts"], 5)
         self.assertEqual(report["address_write_successes"], 5)
         self.assertEqual(report["phone_write_attempts"], 0)
@@ -241,6 +250,41 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
         self.assertEqual(report["file_upload_attempts"], 0)
         self.assertEqual(report["submit_attempts"], 0)
         self.assertFalse(report["raw_values_exposed"])
+
+    def test_country_readback_accepts_nonempty_valid_closed_custom_value_without_exposing_raw(self):
+        page = MagicMock()
+        country = MagicMock()
+        country.input_value.return_value = "opaque-internal-country-value"
+        country.evaluate.return_value = True
+        country.get_attribute.return_value = "false"
+        empty = MagicMock()
+        empty.count.return_value = 0
+        page.locator.return_value = empty
+
+        evidence = _country_readback_evidence(page, country)
+
+        self.assertEqual(evidence["mode"], "custom_committed")
+        self.assertTrue(evidence["nonempty"])
+        self.assertTrue(evidence["browser_valid"])
+        self.assertEqual(evidence["visible_listbox_count"], 0)
+        self.assertEqual(evidence["visible_option_count"], 0)
+        self.assertFalse(evidence["raw_value_exposed"])
+        self.assertNotIn("opaque-internal-country-value", repr(evidence))
+
+    def test_country_readback_does_not_claim_success_for_invalid_nonempty_value(self):
+        page = MagicMock()
+        country = MagicMock()
+        country.input_value.return_value = "opaque"
+        country.evaluate.return_value = False
+        country.get_attribute.return_value = "false"
+        empty = MagicMock()
+        empty.count.return_value = 0
+        page.locator.return_value = empty
+
+        evidence = _country_readback_evidence(page, country)
+
+        self.assertEqual(evidence["mode"], "mismatch")
+        self.assertFalse(evidence["browser_valid"])
 
     def test_unreviewed_address_country_blocks_before_country_click(self):
         with tempfile.TemporaryDirectory() as tmp:
