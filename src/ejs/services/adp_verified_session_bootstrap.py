@@ -40,6 +40,9 @@ from ejs.services.adp_same_page_country_keyboard_selection_canary import (
 from ejs.services.adp_same_page_country_dom_contract import (
     inspect_on_verified_page as inspect_same_page_country_dom_contract,
 )
+from ejs.services.adp_same_page_state_dom_contract import (
+    inspect_on_verified_page as inspect_same_page_state_dom_contract,
+)
 
 BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v5"
 OTP_CONTROL_ID = "oneTimePassWord"
@@ -84,6 +87,9 @@ class AdpVerifiedSessionBootstrapRequest:
     same_page_country_dom_expected_manifest_fingerprint: str = ""
     same_page_country_dom_expected_contact_contract_fingerprint: str = ""
     same_page_country_dom_expected_option_surface_fingerprint: str = ""
+    same_page_state_dom_contract_out: str = ""
+    same_page_state_dom_expected_manifest_fingerprint: str = ""
+    same_page_state_dom_expected_contact_contract_fingerprint: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
@@ -154,6 +160,21 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
         or all(safe_fill_parts)
     ):
         raise ValueError("ADP_COUNTRY_DOM_CONTRACT_MUST_RUN_EXCLUSIVELY")
+    state_dom_parts = (
+        bool(request.same_page_state_dom_contract_out),
+        bool(request.same_page_state_dom_expected_manifest_fingerprint),
+        bool(request.same_page_state_dom_expected_contact_contract_fingerprint),
+    )
+    if any(state_dom_parts) and not all(state_dom_parts):
+        raise ValueError("ADP_STATE_DOM_CONTRACT_REQUIRES_COMPLETE_CONFIGURATION")
+    if all(state_dom_parts) and (
+        all(country_dom_parts)
+        or all(country_keyboard_parts)
+        or all(personal_information_parts)
+        or all(country_probe_parts)
+        or all(safe_fill_parts)
+    ):
+        raise ValueError("ADP_STATE_DOM_CONTRACT_MUST_RUN_EXCLUSIVELY")
 
 
 def _open_reviewed_adp_target(page, application_url: str) -> dict:
@@ -741,6 +762,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         if request.same_page_country_dom_contract_out
         else None
     )
+    same_page_state_dom_contract_path = (
+        Path(request.same_page_state_dom_contract_out)
+        if request.same_page_state_dom_contract_out
+        else None
+    )
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     if session_storage_path is not None:
@@ -763,6 +789,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         same_page_country_keyboard_selection_report_path.parent.mkdir(parents=True, exist_ok=True)
     if same_page_country_dom_contract_path is not None:
         same_page_country_dom_contract_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_state_dom_contract_path is not None:
+        same_page_state_dom_contract_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
         browser = None
@@ -967,6 +995,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                         same_page_personal_information_safe_fill = None
                         same_page_country_keyboard_selection = None
                         same_page_country_dom_contract = None
+                        same_page_state_dom_contract = None
                         if same_page_manifest_path is not None:
                             same_page_manifest = extract_same_page_manifest(
                                 page,
@@ -1069,6 +1098,41 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                     "submit_attempts": 0,
                                     "raw_values_exposed": False,
                                     "input_values_read": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_state_dom_contract_path is not None:
+                            same_page_state_dom_contract = (
+                                inspect_same_page_state_dom_contract(
+                                    page,
+                                    request.application_url,
+                                    request.same_page_state_dom_expected_manifest_fingerprint,
+                                    request.same_page_state_dom_expected_contact_contract_fingerprint,
+                                    timeout_ms=20_000,
+                                    render_wait_ms=5_000,
+                                )
+                            )
+                            same_page_state_dom_contract_path.write_text(
+                                json.dumps(
+                                    same_page_state_dom_contract,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_state_dom_contract": {
+                                    "contract_version": same_page_state_dom_contract.get("contract_version", ""),
+                                    "contract_fingerprint": same_page_state_dom_contract.get("contract_fingerprint", ""),
+                                    "interactive_descendant_count": same_page_state_dom_contract.get("interactive_descendant_count", 0),
+                                    "form_value_write_attempts": 0,
+                                    "state_selection_attempts": 0,
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "candidate_values_read": False,
+                                    "raw_values_exposed": False,
                                 }
                             }, sort_keys=True))
 
@@ -1347,6 +1411,14 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                 if isinstance(same_page_country_dom_contract, dict)
                                 else ""
                             ),
+                            "same_page_state_dom_contract_exported": isinstance(
+                                same_page_state_dom_contract, dict
+                            ),
+                            "same_page_state_dom_contract_fingerprint": (
+                                str(same_page_state_dom_contract.get("contract_fingerprint", ""))
+                                if isinstance(same_page_state_dom_contract, dict)
+                                else ""
+                            ),
                             "same_page_safe_fill_executed": isinstance(same_page_safe_fill, dict),
                             "same_page_safe_fill_write_attempts": (
                                 int(same_page_safe_fill.get("form_value_write_attempts", 0))
@@ -1472,6 +1544,15 @@ def main() -> int:
         "--same-page-country-dom-expected-option-surface-fingerprint",
         default="",
     )
+    parser.add_argument("--same-page-state-dom-contract-out", default="")
+    parser.add_argument(
+        "--same-page-state-dom-expected-manifest-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-state-dom-expected-contact-contract-fingerprint",
+        default="",
+    )
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
@@ -1548,6 +1629,15 @@ def main() -> int:
         same_page_country_dom_expected_option_surface_fingerprint=(
             args.same_page_country_dom_expected_option_surface_fingerprint
         ),
+        same_page_state_dom_contract_out=(
+            args.same_page_state_dom_contract_out
+        ),
+        same_page_state_dom_expected_manifest_fingerprint=(
+            args.same_page_state_dom_expected_manifest_fingerprint
+        ),
+        same_page_state_dom_expected_contact_contract_fingerprint=(
+            args.same_page_state_dom_expected_contact_contract_fingerprint
+        ),
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
@@ -1596,6 +1686,12 @@ def main() -> int:
         ),
         "same_page_country_dom_contract_fingerprint": (
             report.get("same_page_country_dom_contract_fingerprint", "")
+        ),
+        "same_page_state_dom_contract_exported": (
+            report.get("same_page_state_dom_contract_exported") is True
+        ),
+        "same_page_state_dom_contract_fingerprint": (
+            report.get("same_page_state_dom_contract_fingerprint", "")
         ),
         "same_page_safe_fill_write_successes": report.get("same_page_safe_fill_write_successes", 0),
         "live_handoff_reuse_proven": report.get("live_handoff_reuse_proven") is True,
