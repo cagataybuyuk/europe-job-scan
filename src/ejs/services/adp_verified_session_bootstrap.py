@@ -47,6 +47,7 @@ class AdpVerifiedSessionBootstrapRequest:
     same_page_safe_fill_profile_path: str = ""
     same_page_safe_fill_expected_manifest_fingerprint: str = ""
     same_page_safe_fill_report_out: str = ""
+    same_page_safe_fill_allow_reviewed_turkish_ascii_name_overwrite: bool = False
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
@@ -863,6 +864,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                     "form_value_write_attempts": 0,
                                     "file_upload_attempts": 0,
                                     "submit_attempts": 0,
+                                    "reviewed_turkish_ascii_name_overwrite_allowed": (
+                                        same_page_safe_fill.get(
+                                            "reviewed_turkish_ascii_name_overwrite_allowed"
+                                        ) is True
+                                    ),
                                     "raw_values_exposed": False,
                                 }
                             }, sort_keys=True))
@@ -877,6 +883,9 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                         request.same_page_safe_fill_expected_manifest_fingerprint
                                     ),
                                     profile_json_path=request.same_page_safe_fill_profile_path,
+                                    allow_reviewed_turkish_ascii_name_overwrite=(
+                                        request.same_page_safe_fill_allow_reviewed_turkish_ascii_name_overwrite
+                                    ),
                                 ),
                             )
                             same_page_safe_fill_report_path.write_text(
@@ -1023,6 +1032,10 @@ def main() -> int:
     parser.add_argument("--same-page-safe-fill-profile", default="")
     parser.add_argument("--same-page-safe-fill-expected-manifest-fingerprint", default="")
     parser.add_argument("--same-page-safe-fill-report-out", default="")
+    parser.add_argument(
+        "--same-page-safe-fill-allow-reviewed-turkish-ascii-name-overwrite",
+        action="store_true",
+    )
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
@@ -1039,6 +1052,9 @@ def main() -> int:
             args.same_page_safe_fill_expected_manifest_fingerprint
         ),
         same_page_safe_fill_report_out=args.same_page_safe_fill_report_out,
+        same_page_safe_fill_allow_reviewed_turkish_ascii_name_overwrite=(
+            args.same_page_safe_fill_allow_reviewed_turkish_ascii_name_overwrite
+        ),
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
