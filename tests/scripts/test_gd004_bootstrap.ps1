@@ -186,7 +186,7 @@ foreach ($RequiredValidationRegex in @(
   "'^[0-9]{4,20}$'",
   "'^5[0-9]{9}$'"
 )) {
-  if ($PersonalInfoHelperText -notlike ('*' + $RequiredValidationRegex + '*')) {
+  if (-not $PersonalInfoHelperText.Contains($RequiredValidationRegex)) {
     throw "Personal Information helper is missing preserved validation regex: $RequiredValidationRegex"
   }
 }
@@ -195,7 +195,7 @@ foreach ($BrokenValidationRegex in @(
   "'^d{4,20}$'",
   "'^5d{9}$'"
 )) {
-  if ($PersonalInfoHelperText -like ('*' + $BrokenValidationRegex + '*')) {
+  if ($PersonalInfoHelperText.Contains($BrokenValidationRegex)) {
     throw "Personal Information helper contains escape-damaged validation regex: $BrokenValidationRegex"
   }
 }
