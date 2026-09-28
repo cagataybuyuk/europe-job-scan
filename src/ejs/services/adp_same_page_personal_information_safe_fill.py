@@ -165,6 +165,8 @@ def _selected_country_label_evidence(country) -> dict:
         )
     except Exception:
         result = {"present": False, "text": ""}
+    if not isinstance(result, dict):
+        result = {"present": False, "text": ""}
     text = str(result.get("text", "") or "")
     normalized = " ".join(text.split())
     return {
