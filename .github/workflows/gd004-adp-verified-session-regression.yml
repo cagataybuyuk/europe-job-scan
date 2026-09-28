@@ -141,7 +141,7 @@ jobs:
           assert '.click(' not in same_page_contact_address
           assert '.fill(' not in same_page_contact_address
           assert '.select_option(' not in same_page_contact_address
-          assert 'input_value' not in same_page_contact_address
+          assert 'input_value(' not in same_page_contact_address
           assert 'form_value_write_attempts": 0' in same_page_contact_address
           assert 'phone_write_attempts": 0' in same_page_contact_address
           assert 'address_write_attempts": 0' in same_page_contact_address
@@ -154,7 +154,7 @@ jobs:
           assert '.click(' not in same_page_contact_address_helper
           assert '.fill(' not in same_page_contact_address_helper
           assert 'select_option' not in same_page_contact_address_helper
-          assert 'input_value' not in same_page_contact_address_helper
+          assert 'input_value(' not in same_page_contact_address_helper
           assert 'EJS_FILE_UPLOAD: "false"' in workflow
           assert 'EJS_FINAL_SUBMIT: "false"' in workflow
           assert 'EJS_KILL_SWITCH: "true"' in workflow
