@@ -837,6 +837,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                         storage_evidence = _export_storage_state(context, storage_path)
 
                         same_page_manifest = None
+                        same_page_safe_fill = None
                         if same_page_manifest_path is not None:
                             same_page_manifest = extract_same_page_manifest(
                                 page,
@@ -864,16 +865,10 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                     "form_value_write_attempts": 0,
                                     "file_upload_attempts": 0,
                                     "submit_attempts": 0,
-                                    "reviewed_turkish_ascii_name_overwrite_allowed": (
-                                        same_page_safe_fill.get(
-                                            "reviewed_turkish_ascii_name_overwrite_allowed"
-                                        ) is True
-                                    ),
                                     "raw_values_exposed": False,
                                 }
                             }, sort_keys=True))
 
-                        same_page_safe_fill = None
                         if same_page_safe_fill_report_path is not None:
                             same_page_safe_fill = run_same_page_safe_fill(
                                 page,
@@ -911,6 +906,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                     "next_click_attempts": same_page_safe_fill.get("next_click_attempts", 0),
                                     "file_upload_attempts": same_page_safe_fill.get("file_upload_attempts", 0),
                                     "submit_attempts": same_page_safe_fill.get("submit_attempts", 0),
+                                    "reviewed_turkish_ascii_name_overwrite_allowed": (
+                                        same_page_safe_fill.get(
+                                            "reviewed_turkish_ascii_name_overwrite_allowed"
+                                        ) is True
+                                    ),
                                     "raw_values_exposed": False,
                                 }
                             }, sort_keys=True))
