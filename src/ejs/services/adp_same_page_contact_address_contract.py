@@ -51,7 +51,7 @@ def _nearest_semantic_context(locator) -> dict:
                 clone.querySelectorAll(
                   'input,select,textarea,option,button,script,style,[contenteditable="true"]'
                 ).forEach(item => item.remove());
-                const text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+                const text = (clone.textContent || '').replace(/\\s+/g, ' ').trim();
                 if (text) {
                   return {
                     depth,
