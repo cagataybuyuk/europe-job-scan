@@ -15,6 +15,7 @@ $AdpHelperRelativePaths = @(
   '../../scripts/probe_adp_same_page_manifest.ps1',
   '../../scripts/probe_adp_same_page_safe_fill.ps1',
   '../../scripts/probe_adp_same_page_contact_address.ps1',
+  '../../scripts/probe_adp_same_page_country_combobox.ps1',
   '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 )
 foreach ($RelativePath in $AdpHelperRelativePaths) {
@@ -137,6 +138,25 @@ if ($SamePageContactAddressHelperText -match 'set_input_files|\.click\(|\.fill\(
   throw 'Same-page contact/address helper must not contain browser mutation or value-read calls'
 }
 Write-Host 'PASS: ADP same-page contact/address helper is read-only and value-free'
+
+$SamePageCountryHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_country_combobox.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-country-combobox-probe-out $probePath',
+  '--same-page-country-expected-manifest-fingerprint $ExpectedManifestFingerprint',
+  '--same-page-country-expected-contact-contract-fingerprint $ExpectedContactContractFingerprint',
+  'will not select an option or write any candidate value'
+)) {
+  if ($SamePageCountryHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Same-page Country helper is missing one-click read-only contract: $RequiredSnippet"
+  }
+}
+if ($SamePageCountryHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Same-page Country helper must not provision GitHub secrets'
+}
+if ($SamePageCountryHelperText -match 'set_input_files|\.fill\(|select_option|input_value\(') {
+  throw 'Same-page Country helper must not contain browser mutation/value-read calls'
+}
+Write-Host 'PASS: ADP same-page Country helper stays one-click and selection-free'
 
 # Execute the actual helper body with a fake native Python boundary. A failed
 # local replay must never call the secret writer; all temporary paths are cleaned.
