@@ -55,6 +55,7 @@ class AdpSamePageSafeFillRequest:
     profile_json_path: str
     timeout_ms: int = 20_000
     render_wait_ms: int = 5_000
+    allow_reviewed_turkish_ascii_name_overwrite: bool = False
 
 
 def load_identity_profile(path: str) -> AdpSamePageIdentityProfile:
@@ -155,20 +156,33 @@ def _comparison_class(observed: str, desired: str) -> str:
     return "other"
 
 
-def _fill_blank_or_verify(page, element_id: str, desired: str, canonical: str, counters: dict) -> dict:
+def _fill_blank_or_verify(
+    page,
+    element_id: str,
+    desired: str,
+    canonical: str,
+    counters: dict,
+    *,
+    allow_reviewed_turkish_ascii_overwrite: bool = False,
+) -> dict:
     locator = page.locator(f"#{element_id}")
     if locator.count() != 1 or not locator.is_visible() or not locator.is_enabled():
         raise PermissionError(f"ADP_SAME_PAGE_SAFE_FILL_RUNTIME_CONTROL_NOT_ACTIONABLE:{canonical}")
 
     before = locator.input_value()
-    if before and before != desired:
-        comparison = _comparison_class(before, desired)
+    comparison = _comparison_class(before, desired) if before else "blank"
+    transliteration_overwrite = (
+        bool(before)
+        and comparison == "turkish_ascii_equivalent"
+        and allow_reviewed_turkish_ascii_overwrite
+    )
+    if before and before != desired and not transliteration_overwrite:
         raise PermissionError(
             f"ADP_SAME_PAGE_SAFE_FILL_PROFILE_CONFLICT:{canonical}:{comparison}"
         )
 
     executed = False
-    if not before:
+    if not before or transliteration_overwrite:
         counters["form_value_write_attempts"] += 1
         locator.fill(desired)
         counters["form_value_write_successes"] += 1
@@ -188,6 +202,8 @@ def _fill_blank_or_verify(page, element_id: str, desired: str, canonical: str, c
         "value_hash": value_hash(desired),
         "readback_match": True,
         "valid": True,
+        "comparison_class_before_write": comparison,
+        "reviewed_turkish_ascii_overwrite_executed": transliteration_overwrite,
     }
 
 
@@ -227,6 +243,9 @@ def run_on_verified_page(
             profile.first_name,
             "candidate.first_name",
             counters,
+            allow_reviewed_turkish_ascii_overwrite=(
+                request.allow_reviewed_turkish_ascii_name_overwrite
+            ),
         ),
         _fill_blank_or_verify(
             page,
@@ -234,6 +253,9 @@ def run_on_verified_page(
             profile.last_name,
             "candidate.last_name",
             counters,
+            allow_reviewed_turkish_ascii_overwrite=(
+                request.allow_reviewed_turkish_ascii_name_overwrite
+            ),
         ),
     ]
 
@@ -270,6 +292,9 @@ def run_on_verified_page(
         "address_write_attempts": 0,
         "consent_action_attempts": 0,
         "next_click_attempts": 0,
+        "reviewed_turkish_ascii_name_overwrite_allowed": (
+            request.allow_reviewed_turkish_ascii_name_overwrite
+        ),
         "further_navigation_allowed": False,
         "file_upload_allowed": False,
         "final_submit_allowed": False,
