@@ -15,6 +15,7 @@ on:
       - 'src/ejs/services/adp_same_page_country_keyboard_selection_canary.py'
       - 'src/ejs/services/adp_same_page_country_dom_contract.py'
       - 'src/ejs/services/adp_same_page_state_dom_contract.py'
+      - 'src/ejs/services/adp_same_page_state_after_country_contract.py'
       - 'scripts/bootstrap_adp_verified_session.ps1'
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
@@ -26,6 +27,7 @@ on:
       - 'scripts/probe_adp_same_page_country_keyboard_selection.ps1'
       - 'scripts/probe_adp_same_page_country_dom_contract.ps1'
       - 'scripts/probe_adp_same_page_state_dom_contract.ps1'
+      - 'scripts/probe_adp_same_page_state_after_country.ps1'
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
@@ -38,6 +40,7 @@ on:
       - 'tests/unit/test_adp_same_page_country_keyboard_selection_canary.py'
       - 'tests/unit/test_adp_same_page_country_dom_contract.py'
       - 'tests/unit/test_adp_same_page_state_dom_contract.py'
+      - 'tests/unit/test_adp_same_page_state_after_country_contract.py'
       - 'tests/scripts/test_gd004_bootstrap.ps1'
       - '.github/workflows/gd004-adp-verified-session-regression.yml'
   push:
@@ -55,6 +58,7 @@ on:
       - 'src/ejs/services/adp_same_page_country_keyboard_selection_canary.py'
       - 'src/ejs/services/adp_same_page_country_dom_contract.py'
       - 'src/ejs/services/adp_same_page_state_dom_contract.py'
+      - 'src/ejs/services/adp_same_page_state_after_country_contract.py'
       - 'scripts/bootstrap_adp_verified_session.ps1'
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
@@ -66,6 +70,7 @@ on:
       - 'scripts/probe_adp_same_page_country_keyboard_selection.ps1'
       - 'scripts/probe_adp_same_page_country_dom_contract.ps1'
       - 'scripts/probe_adp_same_page_state_dom_contract.ps1'
+      - 'scripts/probe_adp_same_page_state_after_country.ps1'
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
@@ -78,6 +83,7 @@ on:
       - 'tests/unit/test_adp_same_page_country_keyboard_selection_canary.py'
       - 'tests/unit/test_adp_same_page_country_dom_contract.py'
       - 'tests/unit/test_adp_same_page_state_dom_contract.py'
+      - 'tests/unit/test_adp_same_page_state_after_country_contract.py'
       - 'tests/scripts/test_gd004_bootstrap.ps1'
 
 permissions:
@@ -104,6 +110,7 @@ jobs:
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_country_keyboard_selection_canary.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_country_dom_contract.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_state_dom_contract.py' -v
+          python -m unittest discover -s tests/unit -p 'test_adp_same_page_state_after_country_contract.py' -v
       - name: Assert bootstrap and inspector authority boundaries
         run: |
           python - <<'PY'
@@ -120,6 +127,7 @@ jobs:
           country_keyboard_canary = Path('src/ejs/services/adp_same_page_country_keyboard_selection_canary.py').read_text(encoding='utf-8')
           country_dom_contract = Path('src/ejs/services/adp_same_page_country_dom_contract.py').read_text(encoding='utf-8')
           state_dom_contract = Path('src/ejs/services/adp_same_page_state_dom_contract.py').read_text(encoding='utf-8')
+          state_after_country_contract = Path('src/ejs/services/adp_same_page_state_after_country_contract.py').read_text(encoding='utf-8')
           workflow = Path('.github/workflows/gd004-adp-verified-session-inspector.yml').read_text(encoding='utf-8')
           helper = Path('scripts/bootstrap_adp_verified_session.ps1').read_text(encoding='utf-8')
           persistent_helper = Path('scripts/probe_adp_persistent_profile.ps1').read_text(encoding='utf-8')
@@ -132,6 +140,7 @@ jobs:
           country_keyboard_helper = Path('scripts/probe_adp_same_page_country_keyboard_selection.ps1').read_text(encoding='utf-8')
           country_dom_helper = Path('scripts/probe_adp_same_page_country_dom_contract.ps1').read_text(encoding='utf-8')
           state_dom_helper = Path('scripts/probe_adp_same_page_state_dom_contract.ps1').read_text(encoding='utf-8')
+          state_after_country_helper = Path('scripts/probe_adp_same_page_state_after_country.ps1').read_text(encoding='utf-8')
           assert 'headless=False' in bootstrap
           assert 'Do not paste the code into this terminal' in bootstrap
           assert 'storage_state(path=' in bootstrap
@@ -278,6 +287,16 @@ jobs:
           assert 'Invoke-GhSecretSetUtf8' not in state_dom_helper
           assert 'gh secret' not in state_dom_helper
           assert 'set_input_files' not in state_dom_helper
+          assert 'state_selection_attempts": 0' in state_after_country_contract
+          assert 'phone_write_attempts": 0' in state_after_country_contract
+          assert 'address_text_write_attempts": 0' in state_after_country_contract
+          assert 'next_click_attempts": 0' in state_after_country_contract
+          assert 'file_upload_attempts": 0' in state_after_country_contract
+          assert 'submit_attempts": 0' in state_after_country_contract
+          assert 'state_candidate_values_read": False' in state_after_country_contract
+          assert 'Invoke-GhSecretSetUtf8' not in state_after_country_helper
+          assert 'gh secret' not in state_after_country_helper
+          assert 'set_input_files' not in state_after_country_helper
           assert 'EJS_FILE_UPLOAD: "false"' in workflow
           assert 'EJS_FINAL_SUBMIT: "false"' in workflow
           assert 'EJS_KILL_SWITCH: "true"' in workflow
