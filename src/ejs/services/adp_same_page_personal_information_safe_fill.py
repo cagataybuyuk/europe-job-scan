@@ -33,12 +33,12 @@ from ejs.services.adp_same_page_safe_fill import (
     AdpSamePageSafeFillRequest,
     run_on_verified_page as run_identity_safe_fill,
 )
-from ejs.services.adp_same_page_state_after_country_contract import (
+from ejs.services.adp_same_page_state_surface import (
     STATE_ID,
-    _snapshot_state,
-    _state_option_surface,
+    normalize_state_label as _normalize_label,
+    snapshot_state as _snapshot_state,
+    state_option_surface as _state_option_surface,
 )
-from ejs.services.adp_same_page_state_selection_canary import _normalize_label
 
 EXECUTOR_VERSION = "adp-same-page-personal-information-safe-fill-v1"
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
