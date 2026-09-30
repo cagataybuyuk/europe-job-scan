@@ -87,10 +87,37 @@ def _visible_validation_surface(page) -> dict:
           const nodes = Array.from(document.querySelectorAll(
             '[role="alert"], [aria-invalid="true"], .vdl-form-group--error, .vdl-validation-error'
           )).filter(visible).slice(0, 80);
+          const structural = nodes.map((el, ordinal) => {
+            const attr = (name) => el.getAttribute(name) || '';
+            const parent = el.parentElement;
+            const closestGroup = el.closest('.vdl-form-group, [data-component], [role="group"]');
+            return {
+              ordinal,
+              tag: el.tagName.toLowerCase(),
+              id: attr('id'),
+              role: attr('role'),
+              aria_invalid: attr('aria-invalid'),
+              aria_live: attr('aria-live'),
+              aria_atomic: attr('aria-atomic'),
+              class_name: String(el.className || '').slice(0, 280),
+              parent_tag: parent ? parent.tagName.toLowerCase() : '',
+              parent_id: parent ? (parent.getAttribute('id') || '') : '',
+              parent_class_name: parent ? String(parent.className || '').slice(0, 280) : '',
+              closest_group_id: closestGroup ? (closestGroup.getAttribute('id') || '') : '',
+              closest_group_class_name: closestGroup ? String(closestGroup.className || '').slice(0, 280) : '',
+              text_read: false,
+              value_read: false,
+            };
+          });
           return {
             visible_issue_node_count: nodes.length,
             visible_alert_count: nodes.filter(el => el.getAttribute('role') === 'alert').length,
             visible_aria_invalid_count: nodes.filter(el => el.getAttribute('aria-invalid') === 'true').length,
+            visible_error_class_count: nodes.filter(el =>
+              el.classList.contains('vdl-form-group--error')
+              || el.classList.contains('vdl-validation-error')
+            ).length,
+            structural_nodes: structural,
             candidate_values_read: false,
             raw_values_exposed: false,
           };
@@ -195,6 +222,8 @@ def inspect_on_verified_page(
         "visible_issue_node_count": int(validation.get("visible_issue_node_count", 0)),
         "visible_alert_count": int(validation.get("visible_alert_count", 0)),
         "visible_aria_invalid_count": int(validation.get("visible_aria_invalid_count", 0)),
+        "visible_error_class_count": int(validation.get("visible_error_class_count", 0)),
+        "validation_structural_nodes": validation.get("structural_nodes", []),
         "next_click_attempts": 0,
         "form_value_write_attempts": 0,
         "file_upload_attempts": 0,
