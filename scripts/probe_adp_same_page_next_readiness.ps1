@@ -208,7 +208,11 @@ try {
     next_enabled = $readiness.next_enabled
     invalid_required_control_count = $readiness.invalid_required_control_count
     visible_issue_node_count = $readiness.visible_issue_node_count
-  } | ConvertTo-Json -Compress
+    visible_alert_count = $readiness.visible_alert_count
+    visible_aria_invalid_count = $readiness.visible_aria_invalid_count
+    visible_error_class_count = $readiness.visible_error_class_count
+    validation_structural_nodes = $readiness.validation_structural_nodes
+  } | ConvertTo-Json -Compress -Depth 6
 } finally {
   foreach ($Path in @($statePath, $bootstrapReportPath, $profilePath, $safeFillReportPath, $readinessReportPath)) {
     Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
