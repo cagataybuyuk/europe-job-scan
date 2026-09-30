@@ -3,6 +3,7 @@ param(
   [string]$ExpectedManifestFingerprint = '56f71967ac378836d170ab91b63ced2136a8988e5ce218b7750b25d80fcb51ac',
   [string]$ExpectedContactContractFingerprint = '53b635e9fa5d36f3d8e320f8a406204a093592901226b8ba9886253ceae285ad',
   [string]$ExpectedCountrySurfaceFingerprint = '7b4b13d36c10eb0be71cfe5154de1e80c06c5395a3a00098127d9a9efcf0515f',
+  [string]$ExpectedStateSurfaceFingerprint = '33e4bba11523aeb783c47335d9764d6785eccfa9b6da3aaa4e09b59674a2a4aa',
   [switch]$AllowReviewedTurkishAsciiNameOverwrite,
   [int]$TimeoutSeconds = 900
 )
@@ -13,7 +14,8 @@ Set-StrictMode -Version Latest
 foreach ($Fingerprint in @(
   $ExpectedManifestFingerprint,
   $ExpectedContactContractFingerprint,
-  $ExpectedCountrySurfaceFingerprint
+  $ExpectedCountrySurfaceFingerprint,
+  $ExpectedStateSurfaceFingerprint
 )) {
   if ([string]::IsNullOrWhiteSpace($Fingerprint) -or
       $Fingerprint.Length -ne 64 -or
@@ -98,7 +100,7 @@ try {
   $line2 = Read-ExactLocalText 'Address Line 2 (optional; press Enter if empty)' 'Address Line 2' $false
   $line3 = Read-ExactLocalText 'Address Line 3 (optional; press Enter if empty)' 'Address Line 3' $false
   $city = Read-ExactLocalText 'City' 'City'
-  $state = Read-ExactLocalText 'State / Territory' 'State / Territory'
+  $state = Read-ExactLocalText 'State / Territory (enter the exact ADP visible label, e.g. İstanbul)' 'State / Territory'
   $postal = Read-ExactLocalText 'Postal Code' 'Postal Code'
 
   $profileJson = @{
@@ -136,6 +138,7 @@ try {
     '--same-page-personal-information-expected-manifest-fingerprint', $ExpectedManifestFingerprint,
     '--same-page-personal-information-expected-contact-contract-fingerprint', $ExpectedContactContractFingerprint,
     '--same-page-personal-information-expected-country-surface-fingerprint', $ExpectedCountrySurfaceFingerprint,
+    '--same-page-personal-information-expected-state-surface-fingerprint', $ExpectedStateSurfaceFingerprint,
     '--same-page-personal-information-report-out', $safeFillReportPath,
     '--timeout-seconds', [string]$TimeoutSeconds
   )
@@ -157,6 +160,8 @@ try {
       $report.home_phone_write_attempts -ne 0 -or
       $report.consent_action_attempts -ne 0 -or
       $report.navigation_click_attempts -ne 0 -or
+      $report.state_selection_attempts -notin @(0,1) -or
+      $report.state_selection_successes -notin @(0,1) -or
       $report.next_click_attempts -ne 0 -or
       $report.file_upload_attempts -ne 0 -or
       $report.submit_attempts -ne 0) {
@@ -175,6 +180,8 @@ try {
     address_write_successes = $report.address_write_successes
     country_selection_attempts = $report.country_selection_attempts
     country_selection_successes = $report.country_selection_successes
+    state_selection_attempts = $report.state_selection_attempts
+    state_selection_successes = $report.state_selection_successes
     email_readback_match = $report.identity_result.email_readback_match
     home_phone_write_attempts = $report.home_phone_write_attempts
     next_click_attempts = $report.next_click_attempts
