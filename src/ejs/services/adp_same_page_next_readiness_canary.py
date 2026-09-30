@@ -12,9 +12,14 @@ import re
 
 from ejs.services.adp_live_inspector import validate_adp_live_url
 from ejs.services.adp_same_page_manifest import _target_binding
+from ejs.services.adp_navigation_canary import (
+    _resolve_document_locator,
+    _snapshot,
+)
 
 CANARY_VERSION = "adp-same-page-next-readiness-v1"
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+REVIEWED_NEXT_LABELS = {"next", "continue", "proceed"}
 
 EXPECTED_DISABLED_IDS = {"personalInfomationEmail"}
 
@@ -140,10 +145,30 @@ def inspect_on_verified_page(
         )
     ]
 
-    next_button = page.get_by_role("button", name="Next", exact=True)
-    count = int(next_button.count())
+    snapshot = _snapshot(
+        page,
+        requested_url=request.application_url,
+        timeout_ms=request.timeout_ms,
+        render_wait_ms=min(5_000, request.timeout_ms),
+    )
+    actions = snapshot.get("form", {}).get("actions", [])
+    candidates = [
+        action for action in actions
+        if isinstance(action, dict)
+        and action.get("visible") is True
+        and str(action.get("scope", "")) == "document"
+        and " ".join(str(action.get("label", "")).casefold().split())
+        in REVIEWED_NEXT_LABELS
+    ]
+    count = len(candidates)
     if count != 1:
         raise PermissionError(f"ADP_NEXT_READINESS_NEXT_ACTION_COUNT:{count}")
+
+    candidate = candidates[0]
+    next_button = _resolve_document_locator(
+        page,
+        str(candidate.get("observation_key", "")),
+    )
     if not next_button.is_visible():
         raise PermissionError("ADP_NEXT_READINESS_NEXT_NOT_VISIBLE")
 
@@ -162,6 +187,9 @@ def inspect_on_verified_page(
         "reviewed_required_control_count": len(required),
         "invalid_required_control_count": len(invalid_required),
         "next_action_count": count,
+        "next_action_label": " ".join(str(candidate.get("label", "")).split()),
+        "next_action_type": str(candidate.get("type", "")),
+        "next_observation_key_present": bool(candidate.get("observation_key")),
         "next_visible": True,
         "next_enabled": next_enabled,
         "visible_issue_node_count": int(validation.get("visible_issue_node_count", 0)),
