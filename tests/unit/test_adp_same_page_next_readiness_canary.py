@@ -23,6 +23,10 @@ def safe_fill_report():
         "file_upload_attempts": 0,
         "submit_attempts": 0,
         "expected_state_option_surface_fingerprint": STATE_FP,
+        "identity_result": {"email_readback_match": True},
+        "mobile_phone_result": {"phone_readback_match": True},
+        "address_country_result": {"readback_match": True},
+        "address_state_result": {"readback_match": True},
     }
 
 
