@@ -234,6 +234,9 @@ try {
     visible_alert_count = $readiness.visible_alert_count
     visible_aria_invalid_count = $readiness.visible_aria_invalid_count
     visible_error_class_count = $readiness.visible_error_class_count
+    explicit_address_error_count = $readiness.explicit_address_error_count
+    blocking_issue_node_count = $readiness.blocking_issue_node_count
+    informational_alert_count = $readiness.informational_alert_count
     validation_structural_nodes = $readiness.validation_structural_nodes
   } | ConvertTo-Json -Compress -Depth 6
 } finally {
