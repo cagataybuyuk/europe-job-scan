@@ -865,6 +865,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         same_page_country_combobox_probe_path.parent.mkdir(parents=True, exist_ok=True)
     if same_page_personal_information_report_path is not None:
         same_page_personal_information_report_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_personal_information_next_readiness_report_path is not None:
+        same_page_personal_information_next_readiness_report_path.parent.mkdir(parents=True, exist_ok=True)
     if same_page_country_keyboard_selection_report_path is not None:
         same_page_country_keyboard_selection_report_path.parent.mkdir(parents=True, exist_ok=True)
     if same_page_country_dom_contract_path is not None:
