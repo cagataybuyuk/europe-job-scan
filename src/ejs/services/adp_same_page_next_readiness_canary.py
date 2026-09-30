@@ -91,6 +91,13 @@ def _visible_validation_surface(page) -> dict:
             const attr = (name) => el.getAttribute(name) || '';
             const parent = el.parentElement;
             const closestGroup = el.closest('.vdl-form-group, [data-component], [role="group"]');
+            const isMessageNode =
+              el.getAttribute('role') === 'alert'
+              || el.id === 'addressErrorMessage'
+              || el.classList.contains('label-error');
+            const messageText = isMessageNode
+              ? String(el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 240)
+              : '';
             return {
               ordinal,
               tag: el.tagName.toLowerCase(),
@@ -105,7 +112,8 @@ def _visible_validation_surface(page) -> dict:
               parent_class_name: parent ? String(parent.className || '').slice(0, 280) : '',
               closest_group_id: closestGroup ? (closestGroup.getAttribute('id') || '') : '',
               closest_group_class_name: closestGroup ? String(closestGroup.className || '').slice(0, 280) : '',
-              text_read: false,
+              validation_message_text: messageText,
+              text_read: isMessageNode,
               value_read: false,
             };
           });
