@@ -67,6 +67,7 @@ $bootstrapReportPath = Join-Path $tempRoot ("ejs-adp-personal-info-bootstrap-$to
 $profilePath = Join-Path $tempRoot ("ejs-adp-personal-info-profile-$token.json")
 $safeFillReportPath = Join-Path $tempRoot ("ejs-adp-personal-info-safe-fill-$token.json")
 $readinessReportPath = Join-Path $tempRoot ("ejs-adp-next-readiness-$token.json")
+$entryAutopilotReportPath = Join-Path $tempRoot ("ejs-adp-entry-autopilot-$token.json")
 
 $profileJson = $null
 
@@ -147,8 +148,9 @@ try {
     [IO.File]::WriteAllText($profilePath, $profileJson, $utf8NoBom)
   }
 
-  Write-Host 'A verified ADP browser will open.'
-  Write-Host 'Complete Apply / identity / verification manually.'
+  Write-Host 'An ADP browser will open.'
+  Write-Host 'Apply, identity/phone safe-fill, Continue and Complete Your Application are automated.'
+  Write-Host 'When the verification-code dialog appears, enter only the code; Verify will be clicked automatically.'
   Write-Host 'When Personal Information opens, do not edit fields and do not click Next.'
   Write-Host 'The executor may verify/fill identity, required Mobile Number, Turkey, and reviewed address fields only.'
   Write-Host 'Home Phone, consent, Next, upload and submit remain disabled.'
@@ -159,6 +161,8 @@ try {
     '--url', $ApplicationUrl,
     '--storage-state-out', $statePath,
     '--report-out', $bootstrapReportPath,
+    '--entry-autopilot-profile', $profilePath,
+    '--entry-autopilot-report-out', $entryAutopilotReportPath,
     '--same-page-personal-information-profile', $profilePath,
     '--same-page-personal-information-expected-manifest-fingerprint', $ExpectedManifestFingerprint,
     '--same-page-personal-information-expected-contact-contract-fingerprint', $ExpectedContactContractFingerprint,
@@ -240,7 +244,7 @@ try {
     validation_structural_nodes = $readiness.validation_structural_nodes
   } | ConvertTo-Json -Compress -Depth 6
 } finally {
-  foreach ($Path in @($statePath, $bootstrapReportPath, $profilePath, $safeFillReportPath, $readinessReportPath)) {
+  foreach ($Path in @($statePath, $bootstrapReportPath, $profilePath, $safeFillReportPath, $readinessReportPath, $entryAutopilotReportPath)) {
     Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
   }
   Remove-Variable profileJson, first, last, email, phoneCountry, phone, addressCountry, line1, line2, line3, city, state, postal, utf8NoBom -ErrorAction SilentlyContinue
