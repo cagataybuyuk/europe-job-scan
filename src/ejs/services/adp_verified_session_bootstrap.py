@@ -56,6 +56,7 @@ from ejs.services.adp_same_page_next_readiness_canary import (
 )
 from ejs.services.adp_entry_autopilot import (
     AdpEntryAutopilotRequest,
+    AdpEntryNavigationSurfaceDrift,
     advance_to_otp_on_existing_page,
     click_complete_application_on_portal,
     click_verify_if_user_populated_otp,
@@ -928,13 +929,38 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                 "complete_application_click_successes": 0,
             }
             if request.entry_autopilot_profile_path:
-                entry_autopilot = advance_to_otp_on_existing_page(
-                    page,
-                    AdpEntryAutopilotRequest(
-                        application_url=request.application_url,
-                        profile_json_path=request.entry_autopilot_profile_path,
-                    ),
-                )
+                try:
+                    entry_autopilot = advance_to_otp_on_existing_page(
+                        page,
+                        AdpEntryAutopilotRequest(
+                            application_url=request.application_url,
+                            profile_json_path=request.entry_autopilot_profile_path,
+                        ),
+                    )
+                except AdpEntryNavigationSurfaceDrift as exc:
+                    diagnostic = {
+                        "autopilot_version": "adp-entry-autopilot-v1",
+                        "autopilot_status": "blocked_navigation_surface_drift",
+                        "error_code": exc.code,
+                        **exc.evidence,
+                        "apply_click_attempts": 0,
+                        "form_value_write_attempts": 0,
+                        "continue_click_attempts": 0,
+                        "otp_write_attempts": 0,
+                        "verify_click_attempts": 0,
+                        "complete_application_click_attempts": 0,
+                        "next_click_attempts": 0,
+                        "file_upload_attempts": 0,
+                        "submit_attempts": 0,
+                        "raw_values_exposed": False,
+                    }
+                    if entry_autopilot_report_path is not None:
+                        entry_autopilot_report_path.write_text(
+                            json.dumps(diagnostic, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+                    print(json.dumps({"entry_autopilot_diagnostic": diagnostic}, sort_keys=True))
+                    raise
                 if entry_autopilot_report_path is not None:
                     entry_autopilot_report_path.write_text(
                         json.dumps(
