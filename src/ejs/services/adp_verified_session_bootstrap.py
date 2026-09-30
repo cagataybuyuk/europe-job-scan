@@ -84,6 +84,7 @@ class AdpVerifiedSessionBootstrapRequest:
     same_page_personal_information_expected_manifest_fingerprint: str = ""
     same_page_personal_information_expected_contact_contract_fingerprint: str = ""
     same_page_personal_information_expected_country_surface_fingerprint: str = ""
+    same_page_personal_information_expected_state_surface_fingerprint: str = ""
     same_page_personal_information_report_out: str = ""
     same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite: bool = False
     same_page_country_keyboard_selection_report_out: str = ""
@@ -143,6 +144,7 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
         bool(request.same_page_personal_information_expected_manifest_fingerprint),
         bool(request.same_page_personal_information_expected_contact_contract_fingerprint),
         bool(request.same_page_personal_information_expected_country_surface_fingerprint),
+        bool(request.same_page_personal_information_expected_state_surface_fingerprint),
         bool(request.same_page_personal_information_report_out),
     )
     if any(personal_information_parts) and not all(personal_information_parts):
@@ -1381,6 +1383,9 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                         expected_country_option_surface_fingerprint=(
                                             request.same_page_personal_information_expected_country_surface_fingerprint
                                         ),
+                                        expected_state_option_surface_fingerprint=(
+                                            request.same_page_personal_information_expected_state_surface_fingerprint
+                                        ),
                                         profile_json_path=(
                                             request.same_page_personal_information_profile_path
                                         ),
@@ -1408,6 +1413,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                     "phone_write_attempts": same_page_personal_information_safe_fill.get("phone_write_attempts", 0),
                                     "address_write_attempts": same_page_personal_information_safe_fill.get("address_write_attempts", 0),
                                     "country_selection_attempts": same_page_personal_information_safe_fill.get("country_selection_attempts", 0),
+                                    "state_selection_attempts": same_page_personal_information_safe_fill.get("state_selection_attempts", 0),
+                                    "state_selection_successes": same_page_personal_information_safe_fill.get("state_selection_successes", 0),
                                     "home_phone_write_attempts": same_page_personal_information_safe_fill.get("home_phone_write_attempts", 0),
                                     "next_click_attempts": 0,
                                     "file_upload_attempts": 0,
@@ -1679,6 +1686,10 @@ def main() -> int:
         "--same-page-personal-information-expected-country-surface-fingerprint",
         default="",
     )
+    parser.add_argument(
+        "--same-page-personal-information-expected-state-surface-fingerprint",
+        default="",
+    )
     parser.add_argument("--same-page-personal-information-report-out", default="")
     parser.add_argument(
         "--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite",
@@ -1799,6 +1810,9 @@ def main() -> int:
         ),
         same_page_personal_information_expected_country_surface_fingerprint=(
             args.same_page_personal_information_expected_country_surface_fingerprint
+        ),
+        same_page_personal_information_expected_state_surface_fingerprint=(
+            args.same_page_personal_information_expected_state_surface_fingerprint
         ),
         same_page_personal_information_report_out=(
             args.same_page_personal_information_report_out
