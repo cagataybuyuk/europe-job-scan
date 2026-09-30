@@ -920,11 +920,58 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                     "initial_navigation_timeout_tolerated": navigation["navigation_timeout_tolerated"],
                     "raw_values_exposed": False,
                 }, sort_keys=True))
-            print(
-                "ADP browser opened. Complete the application-entry steps manually. "
-                "When the email verification code appears, enter it directly in the browser "
-                "and click Verify. Do not paste the code into this terminal."
-            )
+            entry_autopilot = None
+            entry_autopilot_counters = {
+                "verify_click_attempts": 0,
+                "verify_click_successes": 0,
+                "complete_application_click_attempts": 0,
+                "complete_application_click_successes": 0,
+            }
+            if request.entry_autopilot_profile_path:
+                entry_autopilot = advance_to_otp_on_existing_page(
+                    page,
+                    AdpEntryAutopilotRequest(
+                        application_url=request.application_url,
+                        profile_json_path=request.entry_autopilot_profile_path,
+                    ),
+                )
+                if entry_autopilot_report_path is not None:
+                    entry_autopilot_report_path.write_text(
+                        json.dumps(
+                            entry_autopilot,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            indent=2,
+                        ) + "\n",
+                        encoding="utf-8",
+                    )
+                print(json.dumps({
+                    "entry_autopilot": {
+                        "autopilot_version": entry_autopilot.get("autopilot_version", ""),
+                        "autopilot_status": entry_autopilot.get("autopilot_status", ""),
+                        "apply_click_attempts": entry_autopilot.get("apply_click_attempts", 0),
+                        "apply_click_successes": entry_autopilot.get("apply_click_successes", 0),
+                        "form_value_write_attempts": entry_autopilot.get("form_value_write_attempts", 0),
+                        "form_value_write_successes": entry_autopilot.get("form_value_write_successes", 0),
+                        "continue_click_attempts": entry_autopilot.get("continue_click_attempts", 0),
+                        "continue_click_successes": entry_autopilot.get("continue_click_successes", 0),
+                        "otp_write_attempts": 0,
+                        "next_click_attempts": 0,
+                        "file_upload_attempts": 0,
+                        "submit_attempts": 0,
+                        "raw_values_exposed": False,
+                    }
+                }, sort_keys=True))
+                print(
+                    "ADP Apply, identity/phone safe-fill and Continue completed automatically. "
+                    "Enter the verification code in the browser; Verify will be clicked automatically."
+                )
+            else:
+                print(
+                    "ADP browser opened. Complete the application-entry steps manually. "
+                    "When the email verification code appears, enter it directly in the browser "
+                    "and click Verify. Do not paste the code into this terminal."
+                )
 
             deadline = time.monotonic() + request.timeout_seconds
             verification_seen = False
