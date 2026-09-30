@@ -117,13 +117,27 @@ def _visible_validation_surface(page) -> dict:
               value_read: false,
             };
           });
+          const visibleAlerts = nodes.filter(el => el.getAttribute('role') === 'alert');
+          const ariaInvalid = nodes.filter(el => el.getAttribute('aria-invalid') === 'true');
+          const errorClassNodes = nodes.filter(el =>
+            el.classList.contains('vdl-form-group--error')
+            || el.classList.contains('vdl-validation-error')
+          );
+          const explicitAddressError = nodes.filter(el => el.id === 'addressErrorMessage');
+          const blocking = Array.from(new Set([
+            ...ariaInvalid,
+            ...errorClassNodes,
+            ...explicitAddressError,
+          ]));
           return {
             visible_issue_node_count: nodes.length,
-            visible_alert_count: nodes.filter(el => el.getAttribute('role') === 'alert').length,
-            visible_aria_invalid_count: nodes.filter(el => el.getAttribute('aria-invalid') === 'true').length,
-            visible_error_class_count: nodes.filter(el =>
-              el.classList.contains('vdl-form-group--error')
-              || el.classList.contains('vdl-validation-error')
+            visible_alert_count: visibleAlerts.length,
+            visible_aria_invalid_count: ariaInvalid.length,
+            visible_error_class_count: errorClassNodes.length,
+            explicit_address_error_count: explicitAddressError.length,
+            blocking_issue_node_count: blocking.length,
+            informational_alert_count: visibleAlerts.filter(
+              el => !blocking.includes(el)
             ).length,
             structural_nodes: structural,
             candidate_values_read: false,
@@ -212,7 +226,7 @@ def inspect_on_verified_page(
     ready = (
         not invalid_required
         and next_enabled
-        and int(validation.get("visible_issue_node_count", 0)) == 0
+        and int(validation.get("blocking_issue_node_count", 0)) == 0
     )
 
     return {
@@ -231,6 +245,9 @@ def inspect_on_verified_page(
         "visible_alert_count": int(validation.get("visible_alert_count", 0)),
         "visible_aria_invalid_count": int(validation.get("visible_aria_invalid_count", 0)),
         "visible_error_class_count": int(validation.get("visible_error_class_count", 0)),
+        "explicit_address_error_count": int(validation.get("explicit_address_error_count", 0)),
+        "blocking_issue_node_count": int(validation.get("blocking_issue_node_count", 0)),
+        "informational_alert_count": int(validation.get("informational_alert_count", 0)),
         "validation_structural_nodes": validation.get("structural_nodes", []),
         "next_click_attempts": 0,
         "form_value_write_attempts": 0,
