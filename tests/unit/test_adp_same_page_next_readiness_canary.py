@@ -146,10 +146,17 @@ class NextReadinessCanaryTests(unittest.TestCase):
                 "visible_alert_count": 1,
                 "visible_aria_invalid_count": 0,
                 "visible_error_class_count": 0,
-                "explicit_address_error_count": 0,
-                "blocking_issue_node_count": 0,
+                "explicit_address_error_count": 1,
+                "blocking_issue_node_count": 1,
                 "informational_alert_count": 0,
-                "structural_nodes": [],
+                "structural_nodes": [{
+                    "ordinal": 0,
+                    "id": "addressErrorMessage",
+                    "role": "alert",
+                    "validation_message_text": "Correct the information in highlighted fields.",
+                    "text_read": True,
+                    "value_read": False,
+                }],
             },
         ):
             report = inspect_on_verified_page(page, self.request(), safe_fill_report())
