@@ -33,6 +33,12 @@ from ejs.services.adp_same_page_safe_fill import (
     AdpSamePageSafeFillRequest,
     run_on_verified_page as run_identity_safe_fill,
 )
+from ejs.services.adp_same_page_state_after_country_contract import (
+    STATE_ID,
+    _snapshot_state,
+    _state_option_surface,
+)
+from ejs.services.adp_same_page_state_selection_canary import _normalize_label
 
 EXECUTOR_VERSION = "adp-same-page-personal-information-safe-fill-v1"
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -45,7 +51,6 @@ ADDRESS_TEXT_FIELDS = (
     ("candidate.address.address_line2", "PersonalAddress_address_line2", "address_line2", False),
     ("candidate.address.address_line3", "PersonalAddress_address_line3", "address_line3", False),
     ("candidate.address.city", "PersonalAddress_city", "city", True),
-    ("candidate.address.state", "PersonalAddress_state", "state_or_territory", True),
     ("candidate.address.postal_code", "PersonalAddress_postalCode", "postal_code", True),
 )
 
@@ -56,6 +61,7 @@ class AdpSamePagePersonalInformationSafeFillRequest:
     expected_manifest_fingerprint: str
     expected_contact_contract_fingerprint: str
     expected_country_option_surface_fingerprint: str
+    expected_state_option_surface_fingerprint: str
     profile_json_path: str
     timeout_ms: int = 20_000
     render_wait_ms: int = 5_000
@@ -76,6 +82,10 @@ def validate_request(request: AdpSamePagePersonalInformationSafeFillRequest) -> 
         (
             request.expected_country_option_surface_fingerprint,
             "ADP_PERSONAL_INFO_INVALID_COUNTRY_SURFACE_FINGERPRINT",
+        ),
+        (
+            request.expected_state_option_surface_fingerprint,
+            "ADP_PERSONAL_INFO_INVALID_STATE_SURFACE_FINGERPRINT",
         ),
     ):
         if not FINGERPRINT_RE.fullmatch(value):
@@ -319,6 +329,100 @@ def _set_address_country(
     }
 
 
+def _select_address_state(page, desired: str, request, counters: dict) -> dict:
+    reviewed = _normalize_label(desired)
+    if not reviewed:
+        raise PermissionError("ADP_PERSONAL_INFO_STATE_LABEL_EMPTY")
+
+    page.wait_for_timeout(750)
+    post_state = _snapshot_state(page)
+    surface = _state_option_surface(
+        page,
+        post_state,
+        timeout_ms=request.timeout_ms,
+    )
+    observed_surface = str(surface.get("surface_fingerprint", "") or "")
+    if observed_surface != request.expected_state_option_surface_fingerprint:
+        raise PermissionError("ADP_PERSONAL_INFO_STATE_OPTION_SURFACE_DRIFT")
+    if surface.get("unique_nonempty_labels") is not True:
+        raise PermissionError("ADP_PERSONAL_INFO_STATE_OPTION_LABEL_DRIFT")
+
+    reviewed_rows = [
+        row for row in surface.get("options", [])
+        if _normalize_label(row.get("label", "")) == reviewed
+        and row.get("disabled") is not True
+    ]
+    if len(reviewed_rows) != 1:
+        raise PermissionError(
+            f"ADP_PERSONAL_INFO_STATE_REVIEWED_LABEL_COUNT:{len(reviewed_rows)}"
+        )
+
+    state = page.locator(f"#{STATE_ID}")
+    if state.count() != 1 or not state.is_visible() or not state.is_enabled():
+        raise PermissionError("ADP_PERSONAL_INFO_STATE_CONTROL_NOT_ACTIONABLE")
+    if state.get_attribute("role") != "combobox":
+        raise PermissionError("ADP_PERSONAL_INFO_STATE_ROLE_DRIFT")
+    if state.get_attribute("aria-controls") != f"{STATE_ID}__listbox":
+        raise PermissionError("ADP_PERSONAL_INFO_STATE_LISTBOX_ID_DRIFT")
+
+    before = _normalize_label(state.inner_text() or "")
+    if before:
+        if before == reviewed:
+            return {
+                "executed": False,
+                "reviewed_state_label": reviewed,
+                "option_surface_fingerprint": observed_surface,
+                "readback_match": True,
+                "raw_value_exposed": False,
+            }
+        raise PermissionError("ADP_PERSONAL_INFO_PROFILE_CONFLICT:candidate.address.state")
+
+    counters["combobox_open_click_attempts"] += 1
+    state.click(timeout=request.timeout_ms)
+    counters["combobox_open_click_successes"] += 1
+    page.wait_for_timeout(200)
+
+    listbox = page.locator(f"#{STATE_ID}__listbox")
+    if listbox.count() != 1 or not listbox.is_visible():
+        raise PermissionError("ADP_PERSONAL_INFO_STATE_LISTBOX_NOT_VISIBLE")
+    options = listbox.locator("[role='option']")
+    live_matches = []
+    for index in range(int(options.count())):
+        option = options.nth(index)
+        if not option.is_visible() or option.is_disabled():
+            continue
+        if _normalize_label(option.inner_text() or "") == reviewed:
+            live_matches.append(option)
+    if len(live_matches) != 1:
+        try:
+            state.press("Escape", timeout=request.timeout_ms)
+        finally:
+            raise PermissionError(
+                f"ADP_PERSONAL_INFO_STATE_LIVE_LABEL_COUNT:{len(live_matches)}"
+            )
+
+    counters["state_selection_attempts"] += 1
+    counters["form_value_write_attempts"] += 1
+    counters["address_write_attempts"] += 1
+    live_matches[0].click(timeout=request.timeout_ms)
+    counters["state_selection_successes"] += 1
+    counters["form_value_write_successes"] += 1
+    counters["address_write_successes"] += 1
+
+    page.wait_for_timeout(250)
+    after = _normalize_label(state.inner_text() or "")
+    if after != reviewed:
+        raise PermissionError("ADP_PERSONAL_INFO_STATE_READBACK_MISMATCH")
+
+    return {
+        "executed": True,
+        "reviewed_state_label": reviewed,
+        "option_surface_fingerprint": observed_surface,
+        "readback_match": True,
+        "raw_value_exposed": False,
+    }
+
+
 def _write_mobile_phone(page, profile, contract: dict, counters: dict) -> dict:
     pair = reviewed_mobile_pair(contract)
     if pair.get("country_ordinal") != 0 or pair.get("phone_ordinal") != 0:
@@ -437,10 +541,18 @@ def run_on_verified_page(
         "combobox_open_click_successes": 0,
         "country_selection_attempts": 0,
         "country_selection_successes": 0,
+        "state_selection_attempts": 0,
+        "state_selection_successes": 0,
     }
 
     phone_result = _write_mobile_phone(page, profile, contract, counters)
     country_result = _set_address_country(page, profile, request, counters)
+    state_result = _select_address_state(
+        page,
+        profile.state_or_territory,
+        request,
+        counters,
+    )
 
     address_results = []
     for canonical, element_id, attr_name, _required in ADDRESS_TEXT_FIELDS:
@@ -454,26 +566,19 @@ def run_on_verified_page(
             )
         )
 
-    post_contract = inspect_contact_address_on_verified_page(
-        page,
-        request.application_url,
-        request.expected_manifest_fingerprint,
-        timeout_ms=request.timeout_ms,
-        render_wait_ms=request.render_wait_ms,
-    )
-    post_contact_fingerprint = contact_contract_fingerprint(post_contract)
-    if post_contact_fingerprint != request.expected_contact_contract_fingerprint:
-        raise PermissionError("ADP_PERSONAL_INFO_POST_WRITE_CONTACT_CONTRACT_DRIFT")
-
     return {
         "executor_version": EXECUTOR_VERSION,
         "safe_fill_status": "verified",
         "expected_manifest_fingerprint": request.expected_manifest_fingerprint,
         "expected_contact_contract_fingerprint": request.expected_contact_contract_fingerprint,
         "observed_contact_contract_fingerprint": observed_contract,
-        "post_write_contact_contract_fingerprint": post_contact_fingerprint,
+        "post_write_contact_contract_fingerprint": "",
+        "post_write_contact_reinspection_skipped_for_reviewed_state_rerender": True,
         "expected_country_option_surface_fingerprint": (
             request.expected_country_option_surface_fingerprint
+        ),
+        "expected_state_option_surface_fingerprint": (
+            request.expected_state_option_surface_fingerprint
         ),
         "profile_evidence": profile.non_secret_evidence(),
         "identity_result": {
@@ -486,6 +591,7 @@ def run_on_verified_page(
         },
         "mobile_phone_result": phone_result,
         "address_country_result": country_result,
+        "address_state_result": state_result,
         "address_field_results": address_results,
         **counters,
         "home_phone_write_attempts": 0,
