@@ -30,6 +30,7 @@ from ejs.services.adp_navigation_canary import (
     _normalize,
     _resolve_document_locator,
     _snapshot,
+    navigation_surface_descriptor,
     navigation_surface_fingerprint,
 )
 from ejs.services.adp_phone_contract_canary import phone_contract_descriptor
@@ -58,6 +59,19 @@ EXPECTED_ACTION_FP = "0e3e60f904525ad95f5244ce99a29a335928b01992f066cc4da9d45753
 
 OTP_CONTROL_ID = "oneTimePassWord"
 OTP_RE = re.compile(r"^[0-9]{6}$")
+
+
+class AdpEntryNavigationSurfaceDrift(PermissionError):
+    def __init__(self, code: str, snapshot: dict):
+        super().__init__(code)
+        self.code = code
+        self.evidence = {
+            "observed_navigation_surface_fingerprint": navigation_surface_fingerprint(snapshot),
+            "navigation_surface_descriptor": navigation_surface_descriptor(snapshot),
+            "auth_observed": snapshot.get("auth_observed") is True,
+            "captcha_observed": snapshot.get("captcha_observed") is True,
+            "raw_values_exposed": False,
+        }
 
 
 @dataclass(frozen=True)
@@ -153,7 +167,10 @@ def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> 
     if pre.get("captcha_observed") is True or pre.get("auth_observed") is True:
         raise PermissionError("ADP_ENTRY_AUTOPILOT_PREFLIGHT_BOUNDARY")
     if navigation_surface_fingerprint(pre) != EXPECTED_NAVIGATION_FP:
-        raise PermissionError("ADP_ENTRY_AUTOPILOT_NAVIGATION_SURFACE_DRIFT")
+        raise AdpEntryNavigationSurfaceDrift(
+            "ADP_ENTRY_AUTOPILOT_NAVIGATION_SURFACE_DRIFT",
+            pre,
+        )
 
     _cookie_preflight(page, request, counters)
 
@@ -164,7 +181,10 @@ def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> 
         render_wait_ms=request.render_wait_ms,
     )
     if navigation_surface_fingerprint(post_cookie) != EXPECTED_NAVIGATION_FP:
-        raise PermissionError("ADP_ENTRY_AUTOPILOT_POST_COOKIE_NAVIGATION_DRIFT")
+        raise AdpEntryNavigationSurfaceDrift(
+            "ADP_ENTRY_AUTOPILOT_POST_COOKIE_NAVIGATION_DRIFT",
+            post_cookie,
+        )
 
     approved = _approved_entry(post_cookie, 0, "Apply")
     entry = _resolve_document_locator(page, str(approved.get("observation_key", "")))
