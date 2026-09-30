@@ -29,7 +29,7 @@ from ejs.services.adp_same_page_state_dom_contract import (
     _sibling_metadata,
 )
 
-CONTRACT_VERSION = "adp-same-page-state-after-country-contract-v1"
+CONTRACT_VERSION = "adp-same-page-state-after-country-contract-v2"
 
 
 def _snapshot_state(page) -> dict:
@@ -50,6 +50,71 @@ def _snapshot_state(page) -> dict:
     }
 
 
+def _state_option_surface(page, post_state: dict, *, timeout_ms: int) -> dict:
+    metadata = post_state.get("metadata", {})
+    if metadata.get("role") != "combobox":
+        raise PermissionError("ADP_STATE_AFTER_COUNTRY_POST_STATE_NOT_COMBOBOX")
+    listbox_id = str(metadata.get("aria_controls", "") or "")
+    if listbox_id != f"{STATE_ID}__listbox":
+        raise PermissionError("ADP_STATE_AFTER_COUNTRY_LISTBOX_ID_DRIFT")
+
+    state = page.locator(f"#{STATE_ID}")
+    state.click(timeout=timeout_ms)
+    page.wait_for_timeout(250)
+
+    listbox = page.locator(f"#{listbox_id}")
+    if listbox.count() != 1 or not listbox.is_visible():
+        raise PermissionError("ADP_STATE_AFTER_COUNTRY_LISTBOX_NOT_VISIBLE")
+
+    options = listbox.locator("[role='option']")
+    count = int(options.count())
+    if count < 1 or count > 300:
+        raise PermissionError(
+            f"ADP_STATE_AFTER_COUNTRY_OPTION_COUNT_INVALID:{count}"
+        )
+
+    rows = []
+    for index in range(count):
+        option = options.nth(index)
+        if not option.is_visible():
+            continue
+        label = " ".join(str(option.inner_text() or "").split())
+        if not label:
+            raise PermissionError("ADP_STATE_AFTER_COUNTRY_OPTION_LABEL_EMPTY")
+        rows.append({
+            "ordinal": index,
+            "label": label,
+            "disabled": option.is_disabled(),
+            "id": str(option.get_attribute("id") or "")[:180],
+            "role": str(option.get_attribute("role") or "")[:40],
+            "value_attribute_read": False,
+            "property_value_read": False,
+        })
+
+    if not rows:
+        raise PermissionError("ADP_STATE_AFTER_COUNTRY_VISIBLE_OPTIONS_MISSING")
+    labels = [row["label"] for row in rows]
+    surface = {
+        "listbox_id": listbox_id,
+        "visible_option_count": len(rows),
+        "options": rows,
+        "unique_visible_labels": len(set(labels)) == len(labels),
+        "candidate_values_read": False,
+        "raw_candidate_values_exposed": False,
+    }
+    payload = json.dumps(
+        surface,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    surface["surface_fingerprint"] = hashlib.sha256(payload).hexdigest()
+
+    state.press("Escape", timeout=timeout_ms)
+    page.wait_for_timeout(100)
+    surface["close_escape_attempts"] = 1
+    return surface
+
+
 def _stable_descriptor(report: dict) -> dict:
     return {
         "contract_version": CONTRACT_VERSION,
@@ -61,6 +126,7 @@ def _stable_descriptor(report: dict) -> dict:
         ),
         "pre_state": report.get("pre_state", {}),
         "post_state": report.get("post_state", {}),
+        "state_option_surface": report.get("state_option_surface", {}),
     }
 
 
@@ -134,6 +200,11 @@ def inspect_after_reviewed_country_selection(
     # Allow ADP's country-dependent State component to rerender before snapshot.
     page.wait_for_timeout(750)
     post_state = _snapshot_state(page)
+    state_option_surface = _state_option_surface(
+        page,
+        post_state,
+        timeout_ms=timeout_ms,
+    )
 
     report = {
         "contract_version": CONTRACT_VERSION,
@@ -149,10 +220,13 @@ def inspect_after_reviewed_country_selection(
         },
         "pre_state": pre_state,
         "post_state": post_state,
+        "state_option_surface": state_option_surface,
         "form_value_write_attempts": counters["form_value_write_attempts"],
         "form_value_write_successes": counters["form_value_write_successes"],
         "country_selection_attempts": counters["country_selection_attempts"],
         "country_selection_successes": counters["country_selection_successes"],
+        "state_open_click_attempts": 1,
+        "state_open_click_successes": 1,
         "state_selection_attempts": 0,
         "phone_write_attempts": 0,
         "address_text_write_attempts": 0,
