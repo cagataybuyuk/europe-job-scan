@@ -49,12 +49,11 @@ class NextReadinessCanaryTests(unittest.TestCase):
             required[f"#{element_id}"] = loc
 
         next_button = MagicMock()
-        next_button.count.return_value = 1
         next_button.is_visible.return_value = True
         next_button.is_enabled.return_value = next_enabled
 
         page.locator.side_effect = lambda selector: required[selector]
-        page.get_by_role.return_value = next_button
+        page._test_next_button = next_button
         return page
 
     def request(self):
@@ -69,6 +68,25 @@ class NextReadinessCanaryTests(unittest.TestCase):
             canary,
             "_target_binding",
             return_value={"target_bound": True},
+        ), patch.object(
+            canary,
+            "_snapshot",
+            return_value={
+                "form": {
+                    "actions": [{
+                        "scope": "document",
+                        "observation_key": "document/button@7",
+                        "label": "Next",
+                        "type": "button",
+                        "visible": True,
+                        "disabled": False,
+                    }]
+                }
+            },
+        ), patch.object(
+            canary,
+            "_resolve_document_locator",
+            return_value=page._test_next_button,
         ), patch.object(
             canary,
             "_visible_validation_surface",
@@ -98,6 +116,25 @@ class NextReadinessCanaryTests(unittest.TestCase):
         page = self.make_page()
         with patch.object(canary, "_target_binding", return_value={"target_bound": True}), patch.object(
             canary,
+            "_snapshot",
+            return_value={
+                "form": {
+                    "actions": [{
+                        "scope": "document",
+                        "observation_key": "document/button@7",
+                        "label": "Continue",
+                        "type": "button",
+                        "visible": True,
+                        "disabled": False,
+                    }]
+                }
+            },
+        ), patch.object(
+            canary,
+            "_resolve_document_locator",
+            return_value=page._test_next_button,
+        ), patch.object(
+            canary,
             "_visible_validation_surface",
             return_value={
                 "visible_issue_node_count": 1,
@@ -115,6 +152,25 @@ class NextReadinessCanaryTests(unittest.TestCase):
         page = self.make_page(next_enabled=False)
         with patch.object(canary, "_target_binding", return_value={"target_bound": True}), patch.object(
             canary,
+            "_snapshot",
+            return_value={
+                "form": {
+                    "actions": [{
+                        "scope": "document",
+                        "observation_key": "document/input@9",
+                        "label": "Proceed",
+                        "type": "submit",
+                        "visible": True,
+                        "disabled": False,
+                    }]
+                }
+            },
+        ), patch.object(
+            canary,
+            "_resolve_document_locator",
+            return_value=page._test_next_button,
+        ), patch.object(
+            canary,
             "_visible_validation_surface",
             return_value={
                 "visible_issue_node_count": 0,
@@ -126,6 +182,16 @@ class NextReadinessCanaryTests(unittest.TestCase):
 
         self.assertEqual(report["readiness_status"], "blocked")
         self.assertFalse(report["next_enabled"])
+
+    def test_missing_reviewed_next_action_fails_closed(self):
+        page = self.make_page()
+        with patch.object(canary, "_target_binding", return_value={"target_bound": True}), patch.object(
+            canary,
+            "_snapshot",
+            return_value={"form": {"actions": []}},
+        ):
+            with self.assertRaisesRegex(PermissionError, "NEXT_ACTION_COUNT:0"):
+                inspect_on_verified_page(page, self.request(), safe_fill_report())
 
     def test_unverified_safe_fill_fails_closed(self):
         page = self.make_page()
