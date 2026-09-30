@@ -238,7 +238,7 @@ jobs:
           assert 'input_value(' not in country_probe_helper
           assert personal_info_safe_fill.count('.select_option(') == 1, personal_info_safe_fill.count('.select_option(')
           assert personal_info_safe_fill.count('.fill(') == 2, personal_info_safe_fill.count('.fill(')
-          assert personal_info_safe_fill.count('.click(') == 2, personal_info_safe_fill.count('.click(')
+          assert personal_info_safe_fill.count('.click(') == 4, personal_info_safe_fill.count('.click(')
           assert 'home_phone_write_attempts": 0' in personal_info_safe_fill
           assert 'consent_action_attempts": 0' in personal_info_safe_fill
           assert 'navigation_click_attempts": 0' in personal_info_safe_fill
