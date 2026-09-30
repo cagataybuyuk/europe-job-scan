@@ -50,6 +50,10 @@ from ejs.services.adp_same_page_state_selection_canary import (
     AdpSamePageStateSelectionRequest,
     run_on_verified_page as run_same_page_state_selection,
 )
+from ejs.services.adp_same_page_next_readiness_canary import (
+    AdpSamePageNextReadinessRequest,
+    inspect_on_verified_page as inspect_same_page_next_readiness,
+)
 
 BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v5"
 OTP_CONTROL_ID = "oneTimePassWord"
@@ -86,6 +90,7 @@ class AdpVerifiedSessionBootstrapRequest:
     same_page_personal_information_expected_country_surface_fingerprint: str = ""
     same_page_personal_information_expected_state_surface_fingerprint: str = ""
     same_page_personal_information_report_out: str = ""
+    same_page_personal_information_next_readiness_report_out: str = ""
     same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite: bool = False
     same_page_country_keyboard_selection_report_out: str = ""
     same_page_country_keyboard_expected_manifest_fingerprint: str = ""
@@ -149,6 +154,8 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
     )
     if any(personal_information_parts) and not all(personal_information_parts):
         raise ValueError("ADP_PERSONAL_INFORMATION_SAFE_FILL_REQUIRES_COMPLETE_CONFIGURATION")
+    if request.same_page_personal_information_next_readiness_report_out and not all(personal_information_parts):
+        raise ValueError("ADP_NEXT_READINESS_REQUIRES_PERSONAL_INFORMATION_SAFE_FILL")
     if all(personal_information_parts) and (
         all(safe_fill_parts) or all(country_probe_parts)
     ):
@@ -810,6 +817,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         if request.same_page_personal_information_report_out
         else None
     )
+    same_page_personal_information_next_readiness_report_path = (
+        Path(request.same_page_personal_information_next_readiness_report_out)
+        if request.same_page_personal_information_next_readiness_report_out
+        else None
+    )
     same_page_country_keyboard_selection_report_path = (
         Path(request.same_page_country_keyboard_selection_report_out)
         if request.same_page_country_keyboard_selection_report_out
@@ -1404,6 +1416,42 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                 ) + "\n",
                                 encoding="utf-8",
                             )
+                            if same_page_personal_information_next_readiness_report_path is not None:
+                                same_page_next_readiness = inspect_same_page_next_readiness(
+                                    page,
+                                    AdpSamePageNextReadinessRequest(
+                                        application_url=request.application_url,
+                                        expected_state_option_surface_fingerprint=(
+                                            request.same_page_personal_information_expected_state_surface_fingerprint
+                                        ),
+                                    ),
+                                    same_page_personal_information_safe_fill,
+                                )
+                                same_page_personal_information_next_readiness_report_path.write_text(
+                                    json.dumps(
+                                        same_page_next_readiness,
+                                        ensure_ascii=False,
+                                        sort_keys=True,
+                                        indent=2,
+                                    ) + "\n",
+                                    encoding="utf-8",
+                                )
+                                print(json.dumps({
+                                    "same_page_next_readiness": {
+                                        "canary_version": same_page_next_readiness.get("canary_version", ""),
+                                        "readiness_status": same_page_next_readiness.get("readiness_status", ""),
+                                        "invalid_required_control_count": same_page_next_readiness.get("invalid_required_control_count", 0),
+                                        "next_action_count": same_page_next_readiness.get("next_action_count", 0),
+                                        "next_visible": same_page_next_readiness.get("next_visible") is True,
+                                        "next_enabled": same_page_next_readiness.get("next_enabled") is True,
+                                        "visible_issue_node_count": same_page_next_readiness.get("visible_issue_node_count", 0),
+                                        "next_click_attempts": 0,
+                                        "form_value_write_attempts": 0,
+                                        "file_upload_attempts": 0,
+                                        "submit_attempts": 0,
+                                        "raw_values_exposed": False,
+                                    }
+                                }, sort_keys=True))
                             print(json.dumps({
                                 "same_page_personal_information_safe_fill": {
                                     "executor_version": same_page_personal_information_safe_fill.get("executor_version", ""),
@@ -1692,6 +1740,10 @@ def main() -> int:
     )
     parser.add_argument("--same-page-personal-information-report-out", default="")
     parser.add_argument(
+        "--same-page-personal-information-next-readiness-report-out",
+        default="",
+    )
+    parser.add_argument(
         "--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite",
         action="store_true",
     )
@@ -1816,6 +1868,9 @@ def main() -> int:
         ),
         same_page_personal_information_report_out=(
             args.same_page_personal_information_report_out
+        ),
+        same_page_personal_information_next_readiness_report_out=(
+            args.same_page_personal_information_next_readiness_report_out
         ),
         same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite=(
             args.same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite
