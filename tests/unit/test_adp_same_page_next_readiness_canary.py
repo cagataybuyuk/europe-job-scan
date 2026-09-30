@@ -94,6 +94,8 @@ class NextReadinessCanaryTests(unittest.TestCase):
                 "visible_issue_node_count": 0,
                 "visible_alert_count": 0,
                 "visible_aria_invalid_count": 0,
+                "visible_error_class_count": 0,
+                "structural_nodes": [],
             },
         ):
             report = inspect_on_verified_page(
@@ -140,6 +142,8 @@ class NextReadinessCanaryTests(unittest.TestCase):
                 "visible_issue_node_count": 1,
                 "visible_alert_count": 1,
                 "visible_aria_invalid_count": 0,
+                "visible_error_class_count": 0,
+                "structural_nodes": [],
             },
         ):
             report = inspect_on_verified_page(page, self.request(), safe_fill_report())
@@ -176,6 +180,8 @@ class NextReadinessCanaryTests(unittest.TestCase):
                 "visible_issue_node_count": 0,
                 "visible_alert_count": 0,
                 "visible_aria_invalid_count": 0,
+                "visible_error_class_count": 0,
+                "structural_nodes": [],
             },
         ):
             report = inspect_on_verified_page(page, self.request(), safe_fill_report())
