@@ -1648,6 +1648,24 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                             "verification_seen": verification_seen,
                             "verification_completed": verification_seen,
                             "verification_basis": basis,
+                            "entry_autopilot_executed": isinstance(entry_autopilot, dict),
+                            "entry_autopilot_apply_click_attempts": (
+                                int(entry_autopilot.get("apply_click_attempts", 0))
+                                if isinstance(entry_autopilot, dict) else 0
+                            ),
+                            "entry_autopilot_continue_click_attempts": (
+                                int(entry_autopilot.get("continue_click_attempts", 0))
+                                if isinstance(entry_autopilot, dict) else 0
+                            ),
+                            "entry_autopilot_verify_click_attempts": int(
+                                entry_autopilot_counters.get("verify_click_attempts", 0)
+                            ),
+                            "entry_autopilot_complete_application_click_attempts": int(
+                                entry_autopilot_counters.get(
+                                    "complete_application_click_attempts", 0
+                                )
+                            ),
+                            "entry_autopilot_otp_write_attempts": 0,
                             **authenticated,
                             "post_verification_surface_stable": True,
                             "visible_form_control_count": len(signature),
@@ -1802,6 +1820,8 @@ def main() -> int:
     parser.add_argument("--user-data-dir", default="")
     parser.add_argument("--live-handoff-report-out", default="")
     parser.add_argument("--same-page-manifest-out", default="")
+    parser.add_argument("--entry-autopilot-profile", default="")
+    parser.add_argument("--entry-autopilot-report-out", default="")
     parser.add_argument("--same-page-safe-fill-profile", default="")
     parser.add_argument("--same-page-safe-fill-expected-manifest-fingerprint", default="")
     parser.add_argument("--same-page-safe-fill-report-out", default="")
@@ -1930,6 +1950,8 @@ def main() -> int:
         user_data_dir=args.user_data_dir,
         live_handoff_report_out=args.live_handoff_report_out,
         same_page_manifest_out=args.same_page_manifest_out,
+        entry_autopilot_profile_path=args.entry_autopilot_profile,
+        entry_autopilot_report_out=args.entry_autopilot_report_out,
         same_page_safe_fill_profile_path=args.same_page_safe_fill_profile,
         same_page_safe_fill_expected_manifest_fingerprint=(
             args.same_page_safe_fill_expected_manifest_fingerprint
