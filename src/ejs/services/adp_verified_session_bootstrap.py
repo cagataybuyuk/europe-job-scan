@@ -54,6 +54,12 @@ from ejs.services.adp_same_page_next_readiness_canary import (
     AdpSamePageNextReadinessRequest,
     inspect_on_verified_page as inspect_same_page_next_readiness,
 )
+from ejs.services.adp_entry_autopilot import (
+    AdpEntryAutopilotRequest,
+    advance_to_otp_on_existing_page,
+    click_complete_application_on_portal,
+    click_verify_if_user_populated_otp,
+)
 
 BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v5"
 OTP_CONTROL_ID = "oneTimePassWord"
@@ -75,6 +81,8 @@ class AdpVerifiedSessionBootstrapRequest:
     user_data_dir: str = ""
     live_handoff_report_out: str = ""
     same_page_manifest_out: str = ""
+    entry_autopilot_profile_path: str = ""
+    entry_autopilot_report_out: str = ""
     same_page_safe_fill_profile_path: str = ""
     same_page_safe_fill_expected_manifest_fingerprint: str = ""
     same_page_safe_fill_report_out: str = ""
@@ -124,6 +132,8 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
         raise ValueError("ADP_SESSION_BOOTSTRAP_REQUIRES_REPORT_OUT")
     if request.timeout_seconds < 60 or request.timeout_seconds > 1800:
         raise ValueError("INVALID_ADP_SESSION_BOOTSTRAP_TIMEOUT")
+    if request.entry_autopilot_report_out and not request.entry_autopilot_profile_path:
+        raise ValueError("ADP_ENTRY_AUTOPILOT_REPORT_REQUIRES_PROFILE")
     safe_fill_parts = (
         bool(request.same_page_safe_fill_profile_path),
         bool(request.same_page_safe_fill_expected_manifest_fingerprint),
