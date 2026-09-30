@@ -1077,14 +1077,43 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
 
                 last_control_count = report["visible_control_count"]
                 authenticated_portal_seen = authenticated_portal_seen or authenticated["authenticated_portal_observed"]
-                if authenticated["authenticated_portal_observed"] and not authenticated["authenticated_form_observed"] and not portal_hint_announced:
-                    print("Signed-in portal observed. Open Complete Your Application manually to show Personal Information; do not edit fields or click Next.")
-                    portal_hint_announced = True
+                if authenticated["authenticated_portal_observed"] and not authenticated["authenticated_form_observed"]:
+                    if (
+                        entry_autopilot is not None
+                        and entry_autopilot_counters["complete_application_click_attempts"] == 0
+                    ):
+                        clicked_complete = click_complete_application_on_portal(
+                            page,
+                            request.application_url,
+                            entry_autopilot_counters,
+                        )
+                        if clicked_complete:
+                            print(
+                                "Signed-in portal observed. Complete Your Application clicked automatically; "
+                                "waiting for Personal Information."
+                            )
+                            page.wait_for_timeout(1_000)
+                            continue
+                    elif not portal_hint_announced:
+                        print("Signed-in portal observed. Open Complete Your Application manually to show Personal Information; do not edit fields or click Next.")
+                        portal_hint_announced = True
                 if stage["verification_code_visible"]:
                     verification_seen = True
                     last_otp_seen = now
                     stable_since = None
                     last_signature = None
+                    if entry_autopilot is not None:
+                        clicked_verify = click_verify_if_user_populated_otp(
+                            page,
+                            entry_autopilot_counters,
+                        )
+                        if clicked_verify:
+                            print(
+                                "Verification code shape accepted. Verify clicked automatically; "
+                                "waiting for authenticated portal."
+                            )
+                            page.wait_for_timeout(500)
+                            continue
                 elif (verification_seen or authenticated["authenticated_form_observed"]) and not stage["identity_surface_visible"]:
                     if not transition_announced:
                         if verification_seen:
