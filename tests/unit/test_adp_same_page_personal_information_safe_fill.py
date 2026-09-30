@@ -21,6 +21,7 @@ URL = (
 MANIFEST_FP = "a" * 64
 CONTACT_FP = "b" * 64
 COUNTRY_FP = "c" * 64
+STATE_FP = "d" * 64
 
 
 def contact_fixture():
@@ -152,13 +153,34 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
                 "#PersonalAddress_address_line2": ("", ""),
                 "#PersonalAddress_address_line3": ("", ""),
                 "#PersonalAddress_city": ("", "Istanbul"),
-                "#PersonalAddress_state": ("", "Istanbul"),
                 "#PersonalAddress_postalCode": ("", "34700"),
             }
             address_locators = {
                 selector: input_locator(before, after)
                 for selector, (before, after) in address_values.items()
             }
+
+            state = MagicMock()
+            state.count.return_value = 1
+            state.is_visible.return_value = True
+            state.is_enabled.return_value = True
+            state.get_attribute.side_effect = lambda key: {
+                "role": "combobox",
+                "aria-controls": "PersonalAddress_state__listbox",
+            }.get(key)
+            state.inner_text.side_effect = ["", "Istanbul"]
+
+            state_option = MagicMock()
+            state_option.is_visible.return_value = True
+            state_option.is_disabled.return_value = False
+            state_option.inner_text.return_value = "Istanbul"
+            state_options = MagicMock()
+            state_options.count.return_value = 1
+            state_options.nth.return_value = state_option
+            state_listbox = MagicMock()
+            state_listbox.count.return_value = 1
+            state_listbox.is_visible.return_value = True
+            state_listbox.locator.return_value = state_options
 
             hidden_collection = MagicMock()
             hidden_collection.count.return_value = 0
@@ -170,6 +192,10 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
                     return countries
                 if selector == "input[name='phone']":
                     return phones
+                if selector == "#PersonalAddress_state":
+                    return state
+                if selector == "#PersonalAddress_state__listbox":
+                    return state_listbox
                 if selector in {"[role='listbox']:visible", "[role='option']:visible"}:
                     return hidden_collection
                 return address_locators[selector]
@@ -227,6 +253,25 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
                 safe_fill,
                 "_unique_visible_option",
                 return_value=option,
+            ), patch.object(
+                safe_fill,
+                "_snapshot_state",
+                return_value={
+                    "metadata": {
+                        "role": "combobox",
+                        "aria_controls": "PersonalAddress_state__listbox",
+                    }
+                },
+            ), patch.object(
+                safe_fill,
+                "_state_option_surface",
+                return_value={
+                    "surface_fingerprint": STATE_FP,
+                    "unique_nonempty_labels": True,
+                    "options": [
+                        {"label": "Istanbul", "disabled": False},
+                    ],
+                },
             ):
                 report = run_on_verified_page(
                     page,
@@ -235,6 +280,7 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
                         expected_manifest_fingerprint=MANIFEST_FP,
                         expected_contact_contract_fingerprint=CONTACT_FP,
                         expected_country_option_surface_fingerprint=COUNTRY_FP,
+                        expected_state_option_surface_fingerprint=STATE_FP,
                         profile_json_path=profile_path,
                         allow_reviewed_turkish_ascii_name_overwrite=True,
                     ),
@@ -253,6 +299,9 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
         self.assertEqual(report["address_country_result"]["readback_mode"], "selected_label")
         self.assertEqual(report["address_write_attempts"], 5)
         self.assertEqual(report["address_write_successes"], 5)
+        self.assertEqual(report["state_selection_attempts"], 1)
+        self.assertEqual(report["state_selection_successes"], 1)
+        self.assertTrue(report["address_state_result"]["readback_match"])
         self.assertEqual(report["phone_write_attempts"], 0)
         self.assertEqual(report["home_phone_write_attempts"], 0)
         self.assertEqual(report["next_click_attempts"], 0)
@@ -382,6 +431,7 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
                             expected_manifest_fingerprint=MANIFEST_FP,
                             expected_contact_contract_fingerprint=CONTACT_FP,
                             expected_country_option_surface_fingerprint=COUNTRY_FP,
+                            expected_state_option_surface_fingerprint=STATE_FP,
                             profile_json_path=profile_path,
                         ),
                     )
