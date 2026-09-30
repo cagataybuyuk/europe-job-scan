@@ -16,6 +16,8 @@ from ejs.services.adp_same_page_manifest import _target_binding
 CANARY_VERSION = "adp-same-page-next-readiness-v1"
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 
+EXPECTED_DISABLED_IDS = {"personalInfomationEmail"}
+
 REVIEWED_REQUIRED_IDS = (
     "personalInfomationFirstName",
     "personalInfomationLastName",
@@ -60,6 +62,7 @@ def _required_control_status(page) -> list[dict]:
         rows.append({
             "id": element_id,
             "enabled": locator.is_enabled(),
+            "expected_disabled": element_id in EXPECTED_DISABLED_IDS,
             "browser_valid": valid,
             "aria_invalid": str(locator.get_attribute("aria-invalid") or "").casefold(),
             "value_read": False,
@@ -110,6 +113,19 @@ def inspect_on_verified_page(
     ):
         raise PermissionError("ADP_NEXT_READINESS_STATE_SURFACE_FINGERPRINT_MISMATCH")
 
+    identity = safe_fill_report.get("identity_result", {})
+    mobile = safe_fill_report.get("mobile_phone_result", {})
+    country = safe_fill_report.get("address_country_result", {})
+    state = safe_fill_report.get("address_state_result", {})
+    if identity.get("email_readback_match") is not True:
+        raise PermissionError("ADP_NEXT_READINESS_EMAIL_READBACK_REQUIRED")
+    if mobile.get("phone_readback_match") is not True:
+        raise PermissionError("ADP_NEXT_READINESS_PHONE_READBACK_REQUIRED")
+    if country.get("readback_match") is not True:
+        raise PermissionError("ADP_NEXT_READINESS_COUNTRY_READBACK_REQUIRED")
+    if state.get("readback_match") is not True:
+        raise PermissionError("ADP_NEXT_READINESS_STATE_READBACK_REQUIRED")
+
     binding = _target_binding(str(page.url), request.application_url)
     if binding.get("target_bound") is not True:
         raise PermissionError("ADP_NEXT_READINESS_TARGET_MISMATCH")
@@ -117,9 +133,11 @@ def inspect_on_verified_page(
     required = _required_control_status(page)
     invalid_required = [
         row for row in required
-        if row["enabled"] is not True
-        or row["browser_valid"] is not True
-        or row["aria_invalid"] == "true"
+        if (
+            (row["expected_disabled"] is not True and row["enabled"] is not True)
+            or row["browser_valid"] is not True
+            or row["aria_invalid"] == "true"
+        )
     ]
 
     next_button = page.get_by_role("button", name="Next", exact=True)
