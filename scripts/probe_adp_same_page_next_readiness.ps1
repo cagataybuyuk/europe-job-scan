@@ -5,6 +5,8 @@ param(
   [string]$ExpectedCountrySurfaceFingerprint = '7b4b13d36c10eb0be71cfe5154de1e80c06c5395a3a00098127d9a9efcf0515f',
   [string]$ExpectedStateSurfaceFingerprint = '33e4bba11523aeb783c47335d9764d6785eccfa9b6da3aaa4e09b59674a2a4aa',
   [switch]$AllowReviewedTurkishAsciiNameOverwrite,
+  [string]$LocalProfilePath = (Join-Path (Get-Location) '.ejs-local\candidate-profile.json'),
+  [switch]$PromptForProfile,
   [int]$TimeoutSeconds = 900
 )
 
@@ -72,57 +74,78 @@ try {
   $python = Resolve-EjsPython3
   $pythonPrefixArgs = @($python.PrefixArgs)
   Write-Host "Using Python launcher: $($python.DisplayName)"
-  Write-Host 'Enter exact Personal Information values locally. Raw values will not be printed in the result.'
-
-  $first = Read-ExactLocalText 'First name' 'First name'
-  $last = Read-ExactLocalText 'Last name' 'Last name'
-  $email = Read-ExactLocalText 'Email' 'Email'
-  if ($email -notmatch '^[^ @]+@[^ @]+[.][^ @]+$') {
-    throw 'Email format is invalid.'
-  }
-
-  $phoneCountry = (Read-ExactLocalText 'Mobile phone country ISO-2 (for example TR)' 'Mobile phone country').ToUpperInvariant()
-  if ($phoneCountry -notmatch '^[A-Z]{2}$') {
-    throw 'Mobile phone country must be exactly two uppercase ASCII letters.'
-  }
-  $phone = Read-ExactLocalText 'Mobile national number - digits only, without country code' 'Mobile national number'
-  if ($phone -notmatch '^[0-9]{4,20}$') {
-    throw 'Mobile national number must contain 4-20 digits only.'
-  }
-  if ($phoneCountry -eq 'TR' -and $phone -notmatch '^5[0-9]{9}$') {
-    throw 'For TR mobile, enter 10 digits starting with 5, without +90 and without a leading 0.'
-  }
-
-  $addressCountry = (Read-ExactLocalText 'Address country ISO-2 (reviewed runtime currently supports TR)' 'Address country').ToUpperInvariant()
-  if ($addressCountry -ne 'TR') {
-    throw 'This reviewed ADP canary currently supports address country TR only.'
-  }
-  $line1 = Read-ExactLocalText 'Address Line 1' 'Address Line 1'
-  $line2 = Read-ExactLocalText 'Address Line 2 (optional; press Enter if empty)' 'Address Line 2' $false
-  $line3 = Read-ExactLocalText 'Address Line 3 (optional; press Enter if empty)' 'Address Line 3' $false
-  $city = Read-ExactLocalText 'City' 'City'
-  $state = Read-ExactLocalText 'State / Territory (enter the exact ADP visible label, e.g. İstanbul)' 'State / Territory'
-  $postal = Read-ExactLocalText 'Postal Code' 'Postal Code'
-
-  $profileJson = @{
-    profile_version = 'adp-personal-information-local-canary-v1'
-    first_name = $first
-    last_name = $last
-    email = $email
-    phone_country_iso2 = $phoneCountry
-    phone_national_number = $phone
-    adp_ascii_name_policy_approved = [bool]$AllowReviewedTurkishAsciiNameOverwrite
-    address_country_iso2 = $addressCountry
-    address_line1 = $line1
-    address_line2 = $line2
-    address_line3 = $line3
-    city = $city
-    state_or_territory = $state
-    postal_code = $postal
-  } | ConvertTo-Json -Compress
-
   $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
-  [IO.File]::WriteAllText($profilePath, $profileJson, $utf8NoBom)
+
+  if (-not $PromptForProfile -and (Test-Path -LiteralPath $LocalProfilePath)) {
+    $profileJson = [IO.File]::ReadAllText($LocalProfilePath, [Text.Encoding]::UTF8)
+    $profile = $profileJson | ConvertFrom-Json
+    foreach ($requiredName in @(
+      'first_name','last_name','email','phone_country_iso2','phone_national_number',
+      'address_country_iso2','address_line1','city','state_or_territory','postal_code'
+    )) {
+      if ($null -eq $profile.PSObject.Properties[$requiredName] -or
+          [string]::IsNullOrWhiteSpace([string]$profile.$requiredName)) {
+        throw "Local candidate profile is missing required field: $requiredName"
+      }
+    }
+    if ([string]$profile.address_country_iso2 -ne 'TR') {
+      throw 'This reviewed ADP canary currently supports address country TR only.'
+    }
+    [IO.File]::WriteAllText($profilePath, $profileJson, $utf8NoBom)
+    Write-Host "Using local private candidate profile: $LocalProfilePath"
+  } elseif (-not $PromptForProfile) {
+    throw "Local candidate profile not found at $LocalProfilePath. Run .\scripts\init_ejs_local_candidate_profile.ps1 once, or pass -PromptForProfile."
+  } else {
+    Write-Host 'Enter exact Personal Information values locally. Raw values will not be printed in the result.'
+
+    $first = Read-ExactLocalText 'First name' 'First name'
+    $last = Read-ExactLocalText 'Last name' 'Last name'
+    $email = Read-ExactLocalText 'Email' 'Email'
+    if ($email -notmatch '^[^ @]+@[^ @]+[.][^ @]+$') {
+      throw 'Email format is invalid.'
+    }
+
+    $phoneCountry = (Read-ExactLocalText 'Mobile phone country ISO-2 (for example TR)' 'Mobile phone country').ToUpperInvariant()
+    if ($phoneCountry -notmatch '^[A-Z]{2}$') {
+      throw 'Mobile phone country must be exactly two uppercase ASCII letters.'
+    }
+    $phone = Read-ExactLocalText 'Mobile national number - digits only, without country code' 'Mobile national number'
+    if ($phone -notmatch '^[0-9]{4,20}$') {
+      throw 'Mobile national number must contain 4-20 digits only.'
+    }
+    if ($phoneCountry -eq 'TR' -and $phone -notmatch '^5[0-9]{9}$') {
+      throw 'For TR mobile, enter 10 digits starting with 5, without +90 and without a leading 0.'
+    }
+
+    $addressCountry = (Read-ExactLocalText 'Address country ISO-2 (reviewed runtime currently supports TR)' 'Address country').ToUpperInvariant()
+    if ($addressCountry -ne 'TR') {
+      throw 'This reviewed ADP canary currently supports address country TR only.'
+    }
+    $line1 = Read-ExactLocalText 'Address Line 1' 'Address Line 1'
+    $line2 = Read-ExactLocalText 'Address Line 2 (optional; press Enter if empty)' 'Address Line 2' $false
+    $line3 = Read-ExactLocalText 'Address Line 3 (optional; press Enter if empty)' 'Address Line 3' $false
+    $city = Read-ExactLocalText 'City' 'City'
+    $state = Read-ExactLocalText 'State / Territory (enter the exact ADP visible label, e.g. İstanbul)' 'State / Territory'
+    $postal = Read-ExactLocalText 'Postal Code' 'Postal Code'
+
+    $profileJson = @{
+      profile_version = 'adp-personal-information-local-canary-v1'
+      first_name = $first
+      last_name = $last
+      email = $email
+      phone_country_iso2 = $phoneCountry
+      phone_national_number = $phone
+      adp_ascii_name_policy_approved = [bool]$AllowReviewedTurkishAsciiNameOverwrite
+      address_country_iso2 = $addressCountry
+      address_line1 = $line1
+      address_line2 = $line2
+      address_line3 = $line3
+      city = $city
+      state_or_territory = $state
+      postal_code = $postal
+    } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($profilePath, $profileJson, $utf8NoBom)
+  }
 
   Write-Host 'A verified ADP browser will open.'
   Write-Host 'Complete Apply / identity / verification manually.'
