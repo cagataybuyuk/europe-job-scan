@@ -95,6 +95,9 @@ class NextReadinessCanaryTests(unittest.TestCase):
                 "visible_alert_count": 0,
                 "visible_aria_invalid_count": 0,
                 "visible_error_class_count": 0,
+                "explicit_address_error_count": 0,
+                "blocking_issue_node_count": 0,
+                "informational_alert_count": 0,
                 "structural_nodes": [],
             },
         ):
@@ -143,6 +146,9 @@ class NextReadinessCanaryTests(unittest.TestCase):
                 "visible_alert_count": 1,
                 "visible_aria_invalid_count": 0,
                 "visible_error_class_count": 0,
+                "explicit_address_error_count": 0,
+                "blocking_issue_node_count": 0,
+                "informational_alert_count": 0,
                 "structural_nodes": [],
             },
         ):
@@ -150,6 +156,51 @@ class NextReadinessCanaryTests(unittest.TestCase):
 
         self.assertEqual(report["readiness_status"], "blocked")
         self.assertEqual(report["visible_issue_node_count"], 1)
+        self.assertEqual(report["next_click_attempts"], 0)
+
+    def test_informational_alerts_do_not_block_readiness(self):
+        page = self.make_page()
+        with patch.object(canary, "_target_binding", return_value={"target_bound": True}), patch.object(
+            canary,
+            "_snapshot",
+            return_value={
+                "form": {
+                    "actions": [{
+                        "scope": "document",
+                        "observation_key": "document/button@7",
+                        "label": "Next",
+                        "type": "button",
+                        "visible": True,
+                        "disabled": False,
+                    }]
+                }
+            },
+        ), patch.object(
+            canary,
+            "_resolve_document_locator",
+            return_value=page._test_next_button,
+        ), patch.object(
+            canary,
+            "_visible_validation_surface",
+            return_value={
+                "visible_issue_node_count": 2,
+                "visible_alert_count": 2,
+                "visible_aria_invalid_count": 0,
+                "visible_error_class_count": 0,
+                "explicit_address_error_count": 0,
+                "blocking_issue_node_count": 0,
+                "informational_alert_count": 2,
+                "structural_nodes": [
+                    {"ordinal": 0, "tag": "sdf-alert", "role": "alert"},
+                    {"ordinal": 1, "tag": "sdf-alert", "role": "alert"},
+                ],
+            },
+        ):
+            report = inspect_on_verified_page(page, self.request(), safe_fill_report())
+
+        self.assertEqual(report["readiness_status"], "ready")
+        self.assertEqual(report["blocking_issue_node_count"], 0)
+        self.assertEqual(report["informational_alert_count"], 2)
         self.assertEqual(report["next_click_attempts"], 0)
 
     def test_disabled_next_blocks_readiness(self):
@@ -181,6 +232,9 @@ class NextReadinessCanaryTests(unittest.TestCase):
                 "visible_alert_count": 0,
                 "visible_aria_invalid_count": 0,
                 "visible_error_class_count": 0,
+                "explicit_address_error_count": 0,
+                "blocking_issue_node_count": 0,
+                "informational_alert_count": 0,
                 "structural_nodes": [],
             },
         ):
