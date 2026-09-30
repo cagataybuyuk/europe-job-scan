@@ -59,3 +59,34 @@ The full executor now:
 Because the Country selection intentionally changes the State DOM from a text input into a combobox, the old post-write assertion that the entire pre-country contact fingerprint must remain identical is no longer valid. Post-write assurance is instead composed from exact per-field readbacks, the reviewed Country readback, the reviewed State option-surface fingerprint, exact State label readback, and the existing phone readback contract.
 
 No semantic conversion is allowed for State labels. For example, if ADP exposes `İstanbul`, the local reviewed profile must provide that exact visible label; the executor does not silently convert `Istanbul` to `İstanbul`.
+
+
+## Live Personal Information safe-fill checkpoint — 30 Sep 2026
+
+The full Personal Information safe-fill was validated live after explicit approval of the reviewed Turkish-to-ASCII name overwrite policy.
+
+Observed bounded result:
+- `safe_fill_status=verified`;
+- `form_value_write_attempts=8`, `form_value_write_successes=8`;
+- `address_write_attempts=7`, `address_write_successes=7`;
+- Country selection `1/1`;
+- State selection `1/1`;
+- Email readback matched;
+- Home Phone, Next, upload and Submit attempts remained zero;
+- raw values were not exposed in the report.
+
+The phone write count was zero because the existing Mobile Number already matched the reviewed profile semantically; the executor correctly avoided an unnecessary rewrite.
+
+## Next readiness stage
+
+The next stage is deliberately read-only. `adp_same_page_next_readiness_canary.py` runs only after a verified Personal Information safe-fill and does not click Next.
+
+It requires:
+- target URL binding to remain exact;
+- verified safe-fill evidence for Email, Mobile Phone, Country and State readbacks;
+- the reviewed State option-surface fingerprint to match the safe-fill report;
+- reviewed required controls to remain visible and browser-valid;
+- exactly one visible Next button;
+- no visible validation/error surface.
+
+The report may return `readiness_status=ready` or `blocked`, but `next_click_allowed=false` in both cases. A separate future canary is required before granting one Next click.
