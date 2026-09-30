@@ -807,6 +807,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
     postlogin_url_path = Path(request.postlogin_url_out) if request.postlogin_url_out else None
     live_handoff_report_path = Path(request.live_handoff_report_out) if request.live_handoff_report_out else None
     same_page_manifest_path = Path(request.same_page_manifest_out) if request.same_page_manifest_out else None
+    entry_autopilot_report_path = (
+        Path(request.entry_autopilot_report_out)
+        if request.entry_autopilot_report_out
+        else None
+    )
     same_page_safe_fill_report_path = (
         Path(request.same_page_safe_fill_report_out)
         if request.same_page_safe_fill_report_out
@@ -867,6 +872,8 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
         live_handoff_report_path.parent.mkdir(parents=True, exist_ok=True)
     if same_page_manifest_path is not None:
         same_page_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    if entry_autopilot_report_path is not None:
+        entry_autopilot_report_path.parent.mkdir(parents=True, exist_ok=True)
     if same_page_safe_fill_report_path is not None:
         same_page_safe_fill_report_path.parent.mkdir(parents=True, exist_ok=True)
     if same_page_contact_address_contract_path is not None:
