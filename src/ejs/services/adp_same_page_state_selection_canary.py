@@ -10,13 +10,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-import unicodedata
 
 from ejs.services.adp_live_inspector import validate_adp_live_url
 from ejs.services.adp_same_page_state_after_country_contract import (
-    STATE_ID,
     contract_fingerprint as state_contract_fingerprint,
     inspect_after_reviewed_country_selection,
+)
+from ejs.services.adp_same_page_state_surface import (
+    STATE_ID,
+    normalize_state_label as _normalize_label,
 )
 
 CANARY_VERSION = "adp-same-page-state-selection-v1"
@@ -35,9 +37,6 @@ class AdpSamePageStateSelectionRequest:
     timeout_ms: int = 20_000
     render_wait_ms: int = 5_000
 
-
-def _normalize_label(value: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", str(value or "")).split())
 
 
 def _validate(request: AdpSamePageStateSelectionRequest) -> None:
