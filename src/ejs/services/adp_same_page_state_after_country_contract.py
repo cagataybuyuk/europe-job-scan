@@ -29,7 +29,7 @@ from ejs.services.adp_same_page_state_dom_contract import (
     _sibling_metadata,
 )
 
-CONTRACT_VERSION = "adp-same-page-state-after-country-contract-v2"
+CONTRACT_VERSION = "adp-same-page-state-after-country-contract-v3"
 
 
 def _snapshot_state(page) -> dict:
@@ -60,8 +60,24 @@ def _state_option_surface(page, post_state: dict, *, timeout_ms: int) -> dict:
 
     state = page.locator(f"#{STATE_ID}")
     state.click(timeout=timeout_ms)
-    page.wait_for_timeout(250)
+    try:
+        surface = _read_state_options(page, listbox_id)
+    except Exception:
+        # Preserve the inspection failure even if cleanup also fails.
+        try:
+            state.press("Escape", timeout=timeout_ms)
+        except Exception:
+            pass
+        raise
 
+    state.press("Escape", timeout=timeout_ms)
+    page.wait_for_timeout(100)
+    surface["close_escape_attempts"] = 1
+    return surface
+
+
+def _read_state_options(page, listbox_id: str) -> dict:
+    page.wait_for_timeout(250)
     listbox = page.locator(f"#{listbox_id}")
     if listbox.count() != 1 or not listbox.is_visible():
         raise PermissionError("ADP_STATE_AFTER_COUNTRY_LISTBOX_NOT_VISIBLE")
@@ -79,11 +95,12 @@ def _state_option_surface(page, post_state: dict, *, timeout_ms: int) -> dict:
         if not option.is_visible():
             continue
         label = " ".join(str(option.inner_text() or "").split())
-        if not label:
-            raise PermissionError("ADP_STATE_AFTER_COUNTRY_OPTION_LABEL_EMPTY")
+        # This is an observation contract, not a selection allowlist. Retain
+        # blank rows without assuming they are placeholders or selectable states.
         rows.append({
             "ordinal": index,
             "label": label,
+            "label_empty": not bool(label),
             "disabled": option.is_disabled(),
             "id": str(option.get_attribute("id") or "")[:180],
             "role": str(option.get_attribute("role") or "")[:40],
@@ -94,11 +111,17 @@ def _state_option_surface(page, post_state: dict, *, timeout_ms: int) -> dict:
     if not rows:
         raise PermissionError("ADP_STATE_AFTER_COUNTRY_VISIBLE_OPTIONS_MISSING")
     labels = [row["label"] for row in rows]
+    nonempty_labels = [label for label in labels if label]
     surface = {
         "listbox_id": listbox_id,
         "visible_option_count": len(rows),
+        "nonempty_label_count": len(nonempty_labels),
+        "empty_label_count": len(labels) - len(nonempty_labels),
         "options": rows,
         "unique_visible_labels": len(set(labels)) == len(labels),
+        "unique_nonempty_labels": len(set(nonempty_labels)) == len(nonempty_labels),
+        "label_observation_complete": len(nonempty_labels) == len(labels),
+        "state_selection_authorized": False,
         "candidate_values_read": False,
         "raw_candidate_values_exposed": False,
     }
@@ -108,10 +131,6 @@ def _state_option_surface(page, post_state: dict, *, timeout_ms: int) -> dict:
         separators=(",", ":"),
     ).encode()
     surface["surface_fingerprint"] = hashlib.sha256(payload).hexdigest()
-
-    state.press("Escape", timeout=timeout_ms)
-    page.wait_for_timeout(100)
-    surface["close_escape_attempts"] = 1
     return surface
 
 

@@ -281,5 +281,126 @@ class StateAfterCountryContractTests(unittest.TestCase):
         self.assertEqual(snapshot.call_count, 1)
 
 
+class StateOptionObservationRegressionTests(unittest.TestCase):
+    def make_surface(self, labels):
+        page = MagicMock()
+        state = MagicMock()
+        listbox = MagicMock()
+        listbox.count.return_value = 1
+        listbox.is_visible.return_value = True
+        options = []
+        for index, label in enumerate(labels):
+            option = MagicMock()
+            option.is_visible.return_value = True
+            option.inner_text.return_value = label
+            option.is_disabled.return_value = index == 0
+            def attribute(key, index=index):
+                if key not in ("id", "role"):
+                    raise AssertionError(f"Unexpected attribute read: {key}")
+                return f"state-option-{index}" if key == "id" else "option"
+            option.get_attribute.side_effect = attribute
+            options.append(option)
+        collection = listbox.locator.return_value
+        collection.count.return_value = len(options)
+        collection.nth.side_effect = options.__getitem__
+        page.locator.side_effect = {
+            "#PersonalAddress_state": state,
+            "#PersonalAddress_state__listbox": listbox,
+        }.__getitem__
+        self.post_state = {"metadata": {
+            "role": "combobox",
+            "aria_controls": "PersonalAddress_state__listbox",
+        }}
+        return page, state, listbox, options
+
+    def inspect(self, page):
+        return contract._state_option_surface(page, self.post_state, timeout_ms=100)
+
+    def assert_no_selection_or_value_read(self, options):
+        for option in options:
+            option.click.assert_not_called()
+            option.press.assert_not_called()
+            option.input_value.assert_not_called()
+            option.evaluate.assert_not_called()
+            option.select_option.assert_not_called()
+
+    def test_blank_row_is_retained_without_losing_following_labels(self):
+        page, state, _, options = self.make_surface([" \n ", "Adana", "Istanbul"])
+        surface = self.inspect(page)
+        self.assertEqual([r["label"] for r in surface["options"]], ["", "Adana", "Istanbul"])
+        self.assertEqual(surface["visible_option_count"], 3)
+        self.assertEqual(surface["empty_label_count"], 1)
+        self.assertEqual(surface["nonempty_label_count"], 2)
+        self.assertTrue(surface["options"][0]["label_empty"])
+        self.assertTrue(surface["options"][0]["disabled"])
+        self.assertFalse(surface["label_observation_complete"])
+        self.assertFalse(surface["state_selection_authorized"])
+        state.press.assert_called_once_with("Escape", timeout=100)
+        self.assert_no_selection_or_value_read(options)
+        fingerprint = surface["surface_fingerprint"]
+        options[0].inner_text.return_value = "Choose a state"
+        self.assertNotEqual(self.inspect(page)["surface_fingerprint"], fingerprint)
+
+    def test_all_blank_rows_are_reported_as_incomplete_not_valid_states(self):
+        page, _, _, options = self.make_surface(["", " "])
+        surface = self.inspect(page)
+        self.assertEqual(surface["nonempty_label_count"], 0)
+        self.assertEqual(surface["empty_label_count"], 2)
+        self.assertFalse(surface["label_observation_complete"])
+        self.assertFalse(surface["unique_visible_labels"])
+        self.assertFalse(surface["state_selection_authorized"])
+        self.assert_no_selection_or_value_read(options)
+
+    def test_duplicate_nonempty_labels_remain_detectable(self):
+        page, _, _, _ = self.make_surface(["", "Istanbul", "Istanbul"])
+        self.assertFalse(self.inspect(page)["unique_nonempty_labels"])
+
+    def test_hidden_blank_row_is_not_counted(self):
+        page, _, _, options = self.make_surface(["", "Adana"])
+        options[0].is_visible.return_value = False
+        surface = self.inspect(page)
+        self.assertEqual(surface["visible_option_count"], 1)
+        self.assertEqual(surface["empty_label_count"], 0)
+        self.assertTrue(surface["label_observation_complete"])
+        options[0].inner_text.assert_not_called()
+
+    def test_count_and_visibility_failures_still_attempt_escape(self):
+        for mode in ("invisible", "empty", "too_many", "hidden_options"):
+            with self.subTest(mode=mode):
+                page, state, listbox, options = self.make_surface(["Adana"])
+                if mode == "invisible":
+                    listbox.is_visible.return_value = False
+                elif mode == "empty":
+                    listbox.locator.return_value.count.return_value = 0
+                elif mode == "too_many":
+                    listbox.locator.return_value.count.return_value = 301
+                else:
+                    options[0].is_visible.return_value = False
+                with self.assertRaises(PermissionError):
+                    self.inspect(page)
+                state.press.assert_called_once_with("Escape", timeout=100)
+                self.assert_no_selection_or_value_read(options)
+
+    def test_cleanup_failure_preserves_original_inspection_error(self):
+        page, state, listbox, _ = self.make_surface(["Adana"])
+        listbox.is_visible.return_value = False
+        state.press.side_effect = RuntimeError("cleanup failed")
+        with self.assertRaisesRegex(PermissionError, "LISTBOX_NOT_VISIBLE"):
+            self.inspect(page)
+
+    def test_cleanup_failure_cannot_produce_success_report(self):
+        page, state, _, _ = self.make_surface(["Adana"])
+        state.press.side_effect = RuntimeError("cleanup failed")
+        with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+            self.inspect(page)
+
+    def test_listbox_drift_blocks_before_open(self):
+        page, state, _, _ = self.make_surface(["Adana"])
+        self.post_state["metadata"]["aria_controls"] = "other-listbox"
+        with self.assertRaisesRegex(PermissionError, "LISTBOX_ID_DRIFT"):
+            self.inspect(page)
+        state.click.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
