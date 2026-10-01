@@ -2,6 +2,12 @@
 
 Status: bootstrap and inspector implemented; live session reuse not yet proven
 
+## 2026-10-01 entry-strategy decision
+
+AWLI is now the candidate primary/fast-path, subject to the [MacBook Air M2 feasibility spike](ADP_AWLI_FEASIBILITY_SPIKE.md). The existing native bootstrap/replay work remains fallback and diagnostic evidence. AWLI has not been implemented or live-proven; neither ADP OTP removal nor session reuse is established. First compare both entry routes before investing further in native session transport. Historical replay instructions below remain valid for native fallback, not a prerequisite for assuming AWLI works.
+
+LinkedIn sessions/MFA/challenges fail closed or enter `human_review`; no social sign-in authority is added to existing canaries. Returned ADP prefills must match the canonical candidate profile under reviewed normalization/correction policy. Questions, CV/upload, SUBMIT-1, submit and confirmation remain ADP adapter responsibilities.
+
 ## 2026-09-25 resumption: authenticated form without an observed OTP
 
 The September 22 handover reached the signed-in `postLogin.html` job-detail /
@@ -176,7 +182,7 @@ The canonical human-review reason is `verification_required`.
 
 ## Production strategy
 
-The preferred ADP production path is **verified-session reuse**:
+For the **native ATS fallback**, the proposed production optimization remains **verified-session reuse** (live reuse not yet proven):
 
 1. establish a verified ADP guest session with explicit user participation;
 2. capture only browser session state required for reuse;
@@ -236,6 +242,8 @@ Before using the session for any new mutation authority:
 - CAPTCHA/MFA/security-verification appears -> stop; no bypass.
 
 ## Next live validation
+
+First execute the planned [AWLI feasibility comparison](ADP_AWLI_FEASIBILITY_SPIKE.md) on the personal MacBook Air M2. Do not treat existing PowerShell helpers as validated macOS tooling. The native fallback validation sequence remains:
 
 1. rerun the corrected local/headful bootstrap with user-entered verification;
 2. inspect the fresh local replay result;

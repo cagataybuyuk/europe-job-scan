@@ -8,6 +8,12 @@ The first production launch target is a **daily multi-ATS autonomous application
 
 Canonical launch plan: [`docs/PRODUCTION_MULTI_ATS_LAUNCH_PLAN.md`](docs/PRODUCTION_MULTI_ATS_LAUNCH_PLAN.md).
 
+## Planned AWLI fast-path
+
+Evaluate Apply with LinkedIn (AWLI) as the primary entry/prefill route where reviewed and session-ready; retain native ATS fallback. LinkedIn is never the source-of-truth: verify returned prefills against the canonical candidate profile. Session/MFA/challenges fail closed or enter `human_review`. Screening, CV, SUBMIT-1, submit and confirmation remain with the underlying ATS adapter. AWLI is distinct from Easy Apply and is not yet implemented/live-proven.
+
+Next: [MacBook Air M2 ADP native vs AWLI feasibility spike](docs/ADP_AWLI_FEASIBILITY_SPIKE.md).
+
 ## Source ownership
 
 - **Code:** this private GitHub repository (`main` after an approved PR is merged).
