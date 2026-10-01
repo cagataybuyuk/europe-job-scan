@@ -1,9 +1,11 @@
 """Local/headful bootstrap for a user-verified ADP guest session.
 
 This tool never reads or enters the verification code. The user drives the
-browser manually. Once an observed verification surface has been completed and
-both the OTP control and guest-identity surface disappear, the tool exports
-Playwright storage state for protected secret provisioning.
+browser manually. Disappearing OTP/identity fields alone are not success: a
+stable, non-empty form surface must follow. Exported state is only a candidate;
+the PowerShell helper must prove fresh-browser reuse before provisioning it.
+An already authenticated, target-matched Personal Information surface can also
+yield candidate state without falsely claiming an observed OTP transition.
 """
 from __future__ import annotations
 
@@ -13,13 +15,60 @@ import json
 from pathlib import Path
 import sys
 import time
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from ejs.services.adp_live_inspector import validate_adp_live_url
+from ejs.services.adp_same_page_manifest import extract_same_page_manifest
+from ejs.services.adp_same_page_safe_fill import (
+    AdpSamePageSafeFillRequest,
+    run_on_verified_page as run_same_page_safe_fill,
+)
+from ejs.services.adp_same_page_contact_address_contract import (
+    inspect_on_verified_page as inspect_same_page_contact_address_contract,
+)
+from ejs.services.adp_same_page_country_combobox_probe import (
+    inspect_country_combobox_on_verified_page,
+)
+from ejs.services.adp_same_page_personal_information_safe_fill import (
+    AdpSamePagePersonalInformationSafeFillRequest,
+    run_on_verified_page as run_same_page_personal_information_safe_fill,
+)
+from ejs.services.adp_same_page_country_keyboard_selection_canary import (
+    AdpSamePageCountryKeyboardSelectionRequest,
+    run_on_verified_page as run_same_page_country_keyboard_selection,
+)
+from ejs.services.adp_same_page_country_dom_contract import (
+    inspect_on_verified_page as inspect_same_page_country_dom_contract,
+)
+from ejs.services.adp_same_page_state_dom_contract import (
+    inspect_on_verified_page as inspect_same_page_state_dom_contract,
+)
+from ejs.services.adp_same_page_state_after_country_contract import (
+    inspect_after_reviewed_country_selection,
+)
+from ejs.services.adp_same_page_state_selection_canary import (
+    AdpSamePageStateSelectionRequest,
+    run_on_verified_page as run_same_page_state_selection,
+)
+from ejs.services.adp_same_page_next_readiness_canary import (
+    AdpSamePageNextReadinessRequest,
+    inspect_on_verified_page as inspect_same_page_next_readiness,
+)
+from ejs.services.adp_entry_autopilot import (
+    AdpEntryAutopilotRequest,
+    AdpEntryNavigationSurfaceDrift,
+    advance_to_otp_on_existing_page,
+    click_complete_application_on_portal,
+    click_verify_if_user_populated_otp,
+)
 
-BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v1"
+BOOTSTRAP_VERSION = "adp-verified-session-bootstrap-v5"
 OTP_CONTROL_ID = "oneTimePassWord"
 IDENTITY_CONTROL_IDS = ("guestFirstName", "guestLastName", "guestEmail")
 DEFAULT_TIMEOUT_SECONDS = 900
+MIN_POST_VERIFICATION_SECONDS = 10
+MIN_STABLE_SURFACE_SECONDS = 5
+REVIEWED_POSTLOGIN_PATH = "/mascsr/applicant/mdf/recruitment/postLogin.html"
 
 
 @dataclass(frozen=True)
@@ -28,6 +77,52 @@ class AdpVerifiedSessionBootstrapRequest:
     storage_state_out: str
     report_out: str
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
+    session_storage_out: str = ""
+    postlogin_url_out: str = ""
+    user_data_dir: str = ""
+    live_handoff_report_out: str = ""
+    same_page_manifest_out: str = ""
+    entry_autopilot_profile_path: str = ""
+    entry_autopilot_report_out: str = ""
+    same_page_safe_fill_profile_path: str = ""
+    same_page_safe_fill_expected_manifest_fingerprint: str = ""
+    same_page_safe_fill_report_out: str = ""
+    same_page_safe_fill_allow_reviewed_turkish_ascii_name_overwrite: bool = False
+    same_page_contact_address_contract_out: str = ""
+    same_page_contact_address_expected_manifest_fingerprint: str = ""
+    same_page_country_combobox_probe_out: str = ""
+    same_page_country_expected_manifest_fingerprint: str = ""
+    same_page_country_expected_contact_contract_fingerprint: str = ""
+    same_page_personal_information_profile_path: str = ""
+    same_page_personal_information_expected_manifest_fingerprint: str = ""
+    same_page_personal_information_expected_contact_contract_fingerprint: str = ""
+    same_page_personal_information_expected_country_surface_fingerprint: str = ""
+    same_page_personal_information_expected_state_surface_fingerprint: str = ""
+    same_page_personal_information_report_out: str = ""
+    same_page_personal_information_next_readiness_report_out: str = ""
+    same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite: bool = False
+    same_page_country_keyboard_selection_report_out: str = ""
+    same_page_country_keyboard_expected_manifest_fingerprint: str = ""
+    same_page_country_keyboard_expected_contact_contract_fingerprint: str = ""
+    same_page_country_keyboard_expected_option_surface_fingerprint: str = ""
+    same_page_country_dom_contract_out: str = ""
+    same_page_country_dom_expected_manifest_fingerprint: str = ""
+    same_page_country_dom_expected_contact_contract_fingerprint: str = ""
+    same_page_country_dom_expected_option_surface_fingerprint: str = ""
+    same_page_state_dom_contract_out: str = ""
+    same_page_state_dom_expected_manifest_fingerprint: str = ""
+    same_page_state_dom_expected_contact_contract_fingerprint: str = ""
+    same_page_state_after_country_contract_out: str = ""
+    same_page_state_after_country_expected_manifest_fingerprint: str = ""
+    same_page_state_after_country_expected_contact_contract_fingerprint: str = ""
+    same_page_state_after_country_expected_option_surface_fingerprint: str = ""
+    same_page_state_selection_report_out: str = ""
+    same_page_state_selection_expected_manifest_fingerprint: str = ""
+    same_page_state_selection_expected_contact_contract_fingerprint: str = ""
+    same_page_state_selection_expected_country_surface_fingerprint: str = ""
+    same_page_state_selection_expected_contract_fingerprint: str = ""
+    same_page_state_selection_expected_option_surface_fingerprint: str = ""
+    same_page_state_selection_reviewed_label: str = ""
 
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
@@ -38,14 +133,166 @@ def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
         raise ValueError("ADP_SESSION_BOOTSTRAP_REQUIRES_REPORT_OUT")
     if request.timeout_seconds < 60 or request.timeout_seconds > 1800:
         raise ValueError("INVALID_ADP_SESSION_BOOTSTRAP_TIMEOUT")
+    if request.entry_autopilot_report_out and not request.entry_autopilot_profile_path:
+        raise ValueError("ADP_ENTRY_AUTOPILOT_REPORT_REQUIRES_PROFILE")
+    safe_fill_parts = (
+        bool(request.same_page_safe_fill_profile_path),
+        bool(request.same_page_safe_fill_expected_manifest_fingerprint),
+        bool(request.same_page_safe_fill_report_out),
+    )
+    if any(safe_fill_parts) and not all(safe_fill_parts):
+        raise ValueError("ADP_SAME_PAGE_SAFE_FILL_REQUIRES_COMPLETE_CONFIGURATION")
+    contact_contract_parts = (
+        bool(request.same_page_contact_address_contract_out),
+        bool(request.same_page_contact_address_expected_manifest_fingerprint),
+    )
+    if any(contact_contract_parts) and not all(contact_contract_parts):
+        raise ValueError("ADP_CONTACT_ADDRESS_CONTRACT_REQUIRES_COMPLETE_CONFIGURATION")
+    country_probe_parts = (
+        bool(request.same_page_country_combobox_probe_out),
+        bool(request.same_page_country_expected_manifest_fingerprint),
+        bool(request.same_page_country_expected_contact_contract_fingerprint),
+    )
+    if any(country_probe_parts) and not all(country_probe_parts):
+        raise ValueError("ADP_COUNTRY_COMBOBOX_PROBE_REQUIRES_COMPLETE_CONFIGURATION")
+    personal_information_parts = (
+        bool(request.same_page_personal_information_profile_path),
+        bool(request.same_page_personal_information_expected_manifest_fingerprint),
+        bool(request.same_page_personal_information_expected_contact_contract_fingerprint),
+        bool(request.same_page_personal_information_expected_country_surface_fingerprint),
+        bool(request.same_page_personal_information_expected_state_surface_fingerprint),
+        bool(request.same_page_personal_information_report_out),
+    )
+    if any(personal_information_parts) and not all(personal_information_parts):
+        raise ValueError("ADP_PERSONAL_INFORMATION_SAFE_FILL_REQUIRES_COMPLETE_CONFIGURATION")
+    if request.same_page_personal_information_next_readiness_report_out and not all(personal_information_parts):
+        raise ValueError("ADP_NEXT_READINESS_REQUIRES_PERSONAL_INFORMATION_SAFE_FILL")
+    if all(personal_information_parts) and (
+        all(safe_fill_parts) or all(country_probe_parts)
+    ):
+        raise ValueError("ADP_PERSONAL_INFORMATION_SAFE_FILL_MUST_RUN_EXCLUSIVELY")
+    country_keyboard_parts = (
+        bool(request.same_page_country_keyboard_selection_report_out),
+        bool(request.same_page_country_keyboard_expected_manifest_fingerprint),
+        bool(request.same_page_country_keyboard_expected_contact_contract_fingerprint),
+        bool(request.same_page_country_keyboard_expected_option_surface_fingerprint),
+    )
+    if any(country_keyboard_parts) and not all(country_keyboard_parts):
+        raise ValueError("ADP_COUNTRY_KEYBOARD_CANARY_REQUIRES_COMPLETE_CONFIGURATION")
+    if all(country_keyboard_parts) and (
+        all(personal_information_parts) or all(country_probe_parts) or all(safe_fill_parts)
+    ):
+        raise ValueError("ADP_COUNTRY_KEYBOARD_CANARY_MUST_RUN_EXCLUSIVELY")
+    country_dom_parts = (
+        bool(request.same_page_country_dom_contract_out),
+        bool(request.same_page_country_dom_expected_manifest_fingerprint),
+        bool(request.same_page_country_dom_expected_contact_contract_fingerprint),
+        bool(request.same_page_country_dom_expected_option_surface_fingerprint),
+    )
+    if any(country_dom_parts) and not all(country_dom_parts):
+        raise ValueError("ADP_COUNTRY_DOM_CONTRACT_REQUIRES_COMPLETE_CONFIGURATION")
+    if all(country_dom_parts) and (
+        all(country_keyboard_parts)
+        or all(personal_information_parts)
+        or all(country_probe_parts)
+        or all(safe_fill_parts)
+    ):
+        raise ValueError("ADP_COUNTRY_DOM_CONTRACT_MUST_RUN_EXCLUSIVELY")
+    state_dom_parts = (
+        bool(request.same_page_state_dom_contract_out),
+        bool(request.same_page_state_dom_expected_manifest_fingerprint),
+        bool(request.same_page_state_dom_expected_contact_contract_fingerprint),
+    )
+    if any(state_dom_parts) and not all(state_dom_parts):
+        raise ValueError("ADP_STATE_DOM_CONTRACT_REQUIRES_COMPLETE_CONFIGURATION")
+    if all(state_dom_parts) and (
+        all(country_dom_parts)
+        or all(country_keyboard_parts)
+        or all(personal_information_parts)
+        or all(country_probe_parts)
+        or all(safe_fill_parts)
+    ):
+        raise ValueError("ADP_STATE_DOM_CONTRACT_MUST_RUN_EXCLUSIVELY")
+    state_after_country_parts = (
+        bool(request.same_page_state_after_country_contract_out),
+        bool(request.same_page_state_after_country_expected_manifest_fingerprint),
+        bool(request.same_page_state_after_country_expected_contact_contract_fingerprint),
+        bool(request.same_page_state_after_country_expected_option_surface_fingerprint),
+    )
+    if any(state_after_country_parts) and not all(state_after_country_parts):
+        raise ValueError("ADP_STATE_AFTER_COUNTRY_CONTRACT_REQUIRES_COMPLETE_CONFIGURATION")
+    if all(state_after_country_parts) and (
+        all(state_dom_parts)
+        or all(country_dom_parts)
+        or all(country_keyboard_parts)
+        or all(personal_information_parts)
+        or all(country_probe_parts)
+        or all(safe_fill_parts)
+    ):
+        raise ValueError("ADP_STATE_AFTER_COUNTRY_CONTRACT_MUST_RUN_EXCLUSIVELY")
+    state_selection_parts = (
+        bool(request.same_page_state_selection_report_out),
+        bool(request.same_page_state_selection_expected_manifest_fingerprint),
+        bool(request.same_page_state_selection_expected_contact_contract_fingerprint),
+        bool(request.same_page_state_selection_expected_country_surface_fingerprint),
+        bool(request.same_page_state_selection_expected_contract_fingerprint),
+        bool(request.same_page_state_selection_expected_option_surface_fingerprint),
+        bool(request.same_page_state_selection_reviewed_label),
+    )
+    if any(state_selection_parts) and not all(state_selection_parts):
+        raise ValueError("ADP_STATE_SELECTION_CANARY_REQUIRES_COMPLETE_CONFIGURATION")
+    if all(state_selection_parts) and (
+        all(state_after_country_parts)
+        or all(state_dom_parts)
+        or all(country_dom_parts)
+        or all(country_keyboard_parts)
+        or all(personal_information_parts)
+        or all(country_probe_parts)
+        or all(safe_fill_parts)
+    ):
+        raise ValueError("ADP_STATE_SELECTION_CANARY_MUST_RUN_EXCLUSIVELY")
+
+
+def _open_reviewed_adp_target(page, application_url: str) -> dict:
+    """Open the reviewed target without requiring ADP's full DOMContentLoaded event."""
+    last_error = None
+    for attempt in range(1, 3):
+        try:
+            page.goto(application_url, wait_until="commit", timeout=45_000)
+            validate_adp_live_url(str(page.url))
+            return {
+                "navigation_attempts": attempt,
+                "navigation_commit_observed": True,
+                "navigation_timeout_tolerated": False,
+            }
+        except Exception as exc:
+            last_error = exc
+            # ADP can keep loading long after the reviewed document has already
+            # committed. Only tolerate a timeout when the current page is still
+            # on the reviewed ADP origin; never tolerate another origin.
+            if type(exc).__name__ == "TimeoutError":
+                try:
+                    validate_adp_live_url(str(page.url))
+                except ValueError:
+                    pass
+                else:
+                    if str(page.url) not in {"", "about:blank"}:
+                        return {
+                            "navigation_attempts": attempt,
+                            "navigation_commit_observed": False,
+                            "navigation_timeout_tolerated": True,
+                        }
+            if attempt < 2:
+                page.wait_for_timeout(2_000)
+                continue
+            break
+    raise RuntimeError("ADP_SESSION_BOOTSTRAP_INITIAL_NAVIGATION_FAILED") from last_error
 
 
 def _visible(page, selector: str) -> bool:
-    try:
-        locator = page.locator(selector)
-        return locator.count() == 1 and locator.is_visible()
-    except Exception:
-        return False
+    # Detached/loading DOM errors must reset readiness, never mean "absent".
+    locator = page.locator(selector)
+    return any(locator.nth(i).is_visible() for i in range(locator.count()))
 
 
 def bootstrap_stage(page) -> dict:
@@ -62,15 +309,139 @@ def bootstrap_stage(page) -> dict:
     }
 
 
+def _authenticated_form_diagnostics(page, application_url: str) -> dict:
+    """Return value-free evidence explaining authenticated-form classification."""
+    evidence = {
+        "reviewed_origin_valid": False,
+        "postlogin_path_match": False,
+        "cid_match": False,
+        "ccid_match": False,
+        "jobid_match": False,
+        "sign_out_visible": False,
+        "my_applications_visible": False,
+        "personal_information_visible": False,
+        "resume_visible": False,
+        "questions_visible": False,
+        "review_application_visible": False,
+        "self_attest_submit_visible": False,
+        "authenticated_portal_observed": False,
+        "authenticated_application_steps_observed": False,
+        "authenticated_form_observed": False,
+        "observation_succeeded": False,
+        "raw_values_exposed": False,
+    }
+    try:
+        validate_adp_live_url(str(page.url))
+        evidence["reviewed_origin_valid"] = True
+        current = urlsplit(str(page.url))
+        expected = urlsplit(application_url)
+        evidence["postlogin_path_match"] = (
+            current.netloc == expected.netloc and current.path == REVIEWED_POSTLOGIN_PATH
+        )
+
+        def query_parameters(query: str) -> dict:
+            result = {}
+            for key, values in parse_qs(query, keep_blank_values=True).items():
+                result.setdefault(key.casefold(), []).extend(values)
+            return result
+
+        actual_query = query_parameters(current.query)
+        expected_query = query_parameters(expected.query)
+        query_matches = {}
+        for key in ("cid", "ccid", "jobid"):
+            target_values = expected_query.get(key, [])
+            actual_values = actual_query.get(key, [])
+            target_unique = {value for value in target_values if value}
+            actual_unique = {value for value in actual_values if value}
+            query_matches[key] = (
+                len(target_unique) == 1
+                and len(actual_values) >= 1
+                and len(actual_unique) == 1
+                and actual_unique == target_unique
+                and all(bool(value) for value in actual_values)
+            )
+            evidence[f"{key}_match"] = query_matches[key]
+
+        def visible_label(label: str) -> bool:
+            exact = page.get_by_text(label, exact=True)
+            if any(exact.nth(i).is_visible() for i in range(exact.count())):
+                return True
+
+            # ADP can split a step label across nested elements/whitespace.
+            # Fall back only to visible nodes whose normalized inner text still
+            # exactly matches the reviewed label; broad substring matches do
+            # not establish authenticated-form evidence.
+            target = " ".join(label.split())
+            candidates = page.get_by_text(label, exact=False)
+            for index in range(candidates.count()):
+                item = candidates.nth(index)
+                if not item.is_visible():
+                    continue
+                normalized = " ".join(str(item.inner_text() or "").split())
+                if normalized == target:
+                    return True
+            return False
+
+        labels = {
+            "sign_out_visible": "Sign Out",
+            "my_applications_visible": "My Applications",
+            "personal_information_visible": "Personal Information",
+            "resume_visible": "Resume",
+            "questions_visible": "Questions",
+            "review_application_visible": "Review Your Application",
+            "self_attest_submit_visible": "Self-Attest & Submit",
+        }
+        if evidence["postlogin_path_match"] and all(query_matches.values()):
+            for key, label in labels.items():
+                evidence[key] = visible_label(label)
+
+        portal = evidence["sign_out_visible"] and evidence["my_applications_visible"]
+        application_steps = all(
+            evidence[key]
+            for key in (
+                "resume_visible",
+                "questions_visible",
+                "review_application_visible",
+                "self_attest_submit_visible",
+            )
+        )
+        evidence["authenticated_portal_observed"] = portal
+        evidence["authenticated_application_steps_observed"] = application_steps
+        evidence["authenticated_form_observed"] = (
+            evidence["postlogin_path_match"]
+            and all(query_matches.values())
+            and evidence["personal_information_visible"]
+            and (portal or application_steps)
+        )
+        evidence["observation_succeeded"] = True
+        return evidence
+    except Exception:
+        return evidence
+
+
+def _authenticated_form_evidence(page, application_url: str) -> dict:
+    diagnostics = _authenticated_form_diagnostics(page, application_url)
+    return {
+        "authenticated_portal_observed": diagnostics["authenticated_portal_observed"],
+        "authenticated_application_steps_observed": diagnostics["authenticated_application_steps_observed"],
+        "authenticated_form_observed": diagnostics["authenticated_form_observed"],
+    }
+
+
 def _sanitized_post_verification_report(page, verification_seen: bool) -> dict:
     controls = []
     try:
         locator = page.locator("input, select, textarea, button, sdf-button, input[type=file]")
-        for index in range(min(locator.count(), 80)):
+        count = locator.count()
+        if count > 500:
+            raise RuntimeError("ADP_SESSION_BOOTSTRAP_SURFACE_TOO_LARGE")
+        for index in range(count):
             item = locator.nth(index)
             try:
                 if not item.is_visible():
                     continue
+                if len(controls) >= 80:
+                    raise RuntimeError("ADP_SESSION_BOOTSTRAP_SURFACE_TOO_LARGE")
                 tag = str(item.evaluate("el => el.tagName.toLowerCase()") or "")
                 control_type = str(item.get_attribute("type") or "")
                 control_id = str(item.get_attribute("id") or "")[:120]
@@ -84,22 +455,344 @@ def _sanitized_post_verification_report(page, verification_seen: bool) -> dict:
                     "aria_label": aria_label,
                     "required": item.get_attribute("required") is not None,
                     "disabled": item.is_disabled(),
+                    "readonly": item.get_attribute("readonly") is not None,
                     "file_control": control_type.casefold() == "file",
                 })
             except Exception:
-                continue
+                raise RuntimeError("ADP_SESSION_BOOTSTRAP_SURFACE_UNAVAILABLE") from None
     except Exception:
-        controls = []
+        raise RuntimeError("ADP_SESSION_BOOTSTRAP_SURFACE_UNAVAILABLE") from None
+    parsed = urlsplit(str(page.url))
     return {
         "bootstrap_version": BOOTSTRAP_VERSION,
         "verification_seen": verification_seen,
-        "verification_completed": True,
-        "post_verification_url": str(page.url),
+        "verification_completed": False,
+        "post_verification_url": urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")),
         "visible_control_count": len(controls),
         "visible_controls": controls,
         "raw_values_exposed": False,
-        "storage_state_exported": True,
+        "storage_state_exported": False,
     }
+
+
+def _capture_session_storage(page) -> tuple[dict[str, str], dict]:
+    """Capture tab-scoped state locally without exposing keys or values in diagnostics."""
+    raw = page.evaluate(
+        """() => {
+          const out = {};
+          for (let i = 0; i < window.sessionStorage.length; i += 1) {
+            const key = window.sessionStorage.key(i);
+            if (key !== null) out[key] = window.sessionStorage.getItem(key) ?? "";
+          }
+          return out;
+        }"""
+    )
+    if not isinstance(raw, dict) or len(raw) > 200:
+        raise RuntimeError("ADP_SESSION_BOOTSTRAP_SESSION_STORAGE_INVALID")
+    normalized: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise RuntimeError("ADP_SESSION_BOOTSTRAP_SESSION_STORAGE_INVALID")
+        normalized[key] = value
+    payload = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+    byte_count = len(payload.encode("utf-8"))
+    if byte_count > 47_000:
+        raise RuntimeError("ADP_SESSION_BOOTSTRAP_SESSION_STORAGE_TOO_LARGE")
+    return normalized, {
+        "session_storage_entry_count": len(normalized),
+        "session_storage_byte_count": byte_count,
+        "session_storage_values_exposed": False,
+    }
+
+
+def _sanitized_cookie_metadata(cookies: list[dict]) -> dict:
+    """Report known OneTrust persistence markers without exposing cookie values."""
+    consent = []
+    alert_closed = []
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name", ""))
+        if name == "OptanonConsent":
+            consent.append(cookie)
+        elif name == "OptanonAlertBoxClosed":
+            alert_closed.append(cookie)
+
+    def scopes(items: list[dict]) -> dict:
+        return {
+            "count": len(items),
+            "domain_count": len({str(item.get("domain", "")) for item in items}),
+            "root_path_count": sum(1 for item in items if str(item.get("path", "")) == "/"),
+        }
+
+    consent_scope = scopes(consent)
+    alert_scope = scopes(alert_closed)
+    return {
+        "onetrust_consent_cookie_present": bool(consent),
+        "onetrust_consent_cookie_count": consent_scope["count"],
+        "onetrust_consent_cookie_domain_count": consent_scope["domain_count"],
+        "onetrust_consent_cookie_root_path_count": consent_scope["root_path_count"],
+        "onetrust_alert_closed_cookie_present": bool(alert_closed),
+        "onetrust_alert_closed_cookie_count": alert_scope["count"],
+        "onetrust_alert_closed_cookie_domain_count": alert_scope["domain_count"],
+        "onetrust_alert_closed_cookie_root_path_count": alert_scope["root_path_count"],
+        "cookie_values_exposed": False,
+    }
+
+
+def _export_storage_state(context, path: Path) -> dict:
+    """Export cookies/localStorage plus IndexedDB without exposing raw values."""
+    try:
+        state = context.storage_state(path=str(path), indexed_db=True)
+    except TypeError as exc:
+        raise RuntimeError("PLAYWRIGHT_INDEXED_DB_STORAGE_STATE_UNAVAILABLE") from exc
+    if not isinstance(state, dict):
+        raise RuntimeError("ADP_SESSION_BOOTSTRAP_STORAGE_STATE_INVALID")
+    cookies = state.get("cookies", [])
+    origins = state.get("origins", [])
+    if not isinstance(cookies, list) or not isinstance(origins, list):
+        raise RuntimeError("ADP_SESSION_BOOTSTRAP_STORAGE_STATE_INVALID")
+    local_storage_count = 0
+    indexed_db_database_count = 0
+    indexed_db_origin_count = 0
+    for origin in origins:
+        if not isinstance(origin, dict):
+            continue
+        local_storage = origin.get("localStorage", [])
+        if isinstance(local_storage, list):
+            local_storage_count += len(local_storage)
+        indexed_db = origin.get("indexedDB", [])
+        if isinstance(indexed_db, list) and indexed_db:
+            indexed_db_origin_count += 1
+            indexed_db_database_count += len(indexed_db)
+    return {
+        "storage_cookie_count": len(cookies),
+        "storage_origin_count": len(origins),
+        "storage_local_storage_entry_count": local_storage_count,
+        "storage_indexed_db_origin_count": indexed_db_origin_count,
+        "storage_indexed_db_database_count": indexed_db_database_count,
+        **_sanitized_cookie_metadata(cookies),
+        "storage_raw_values_exposed": False,
+    }
+
+
+def _session_storage_restore_script(
+    application_url: str,
+    session_storage: dict[str, str],
+) -> str:
+    hostname = urlsplit(application_url).hostname or ""
+    return (
+        "(() => {"
+        f"if (window.location.hostname !== {json.dumps(hostname, ensure_ascii=False)}) return;"
+        f"const restored = {json.dumps(session_storage, ensure_ascii=False, sort_keys=True)};"
+        "for (const [key, value] of Object.entries(restored)) "
+        "window.sessionStorage.setItem(key, value);"
+        "})();"
+    )
+
+
+def _probe_authenticated_page(page, application_url: str, budget_ms: int) -> dict:
+    hostname = urlsplit(application_url).hostname or ""
+    elapsed = 0
+    stable_ms = 0
+    last_key = None
+    while elapsed <= budget_ms:
+        try:
+            stage = bootstrap_stage(page)
+            authenticated = _authenticated_form_evidence(page, application_url)
+            report = _sanitized_post_verification_report(page, verification_seen=False)
+            signature = _form_surface_signature(report)
+        except Exception:
+            stage = {
+                "verification_code_visible": False,
+                "identity_surface_visible": False,
+            }
+            authenticated = {"authenticated_form_observed": False}
+            signature = ()
+
+        valid = (
+            authenticated.get("authenticated_form_observed") is True
+            and stage.get("verification_code_visible") is not True
+            and stage.get("identity_surface_visible") is not True
+            and bool(signature)
+        )
+        key = (str(page.url), signature)
+        if valid:
+            if key == last_key:
+                stable_ms += 250
+            else:
+                stable_ms = 0
+                last_key = key
+            if stable_ms >= 1_000:
+                return {
+                    "reuse_proven": True,
+                    "visible_form_control_count": len(signature),
+                    "final_reviewed_origin": (urlsplit(str(page.url)).hostname or "") == hostname,
+                    "navigation_click_attempts": 0,
+                    "form_value_write_attempts": 0,
+                    "credential_entry_attempts": 0,
+                    "file_upload_attempts": 0,
+                    "submit_attempts": 0,
+                    "raw_values_exposed": False,
+                }
+        else:
+            stable_ms = 0
+            last_key = None
+
+        if elapsed >= budget_ms:
+            break
+        interval = min(250, budget_ms - elapsed)
+        page.wait_for_timeout(interval)
+        elapsed += interval
+
+    return {
+        "reuse_proven": False,
+        "visible_form_control_count": 0,
+        "final_reviewed_origin": (urlsplit(str(page.url)).hostname or "") == hostname,
+        "navigation_click_attempts": 0,
+        "form_value_write_attempts": 0,
+        "credential_entry_attempts": 0,
+        "file_upload_attempts": 0,
+        "submit_attempts": 0,
+        "raw_values_exposed": False,
+    }
+
+
+def _navigate_and_probe(
+    page,
+    application_url: str,
+    canonical_postlogin_url: str,
+    session_storage: dict[str, str],
+    budget_ms: int,
+) -> dict:
+    page.set_default_timeout(max(1_000, budget_ms))
+    page.set_default_navigation_timeout(max(1_000, budget_ms))
+    if session_storage:
+        page.add_init_script(
+            script=_session_storage_restore_script(application_url, session_storage)
+        )
+    page.goto(
+        canonical_postlogin_url,
+        wait_until="domcontentloaded",
+        timeout=max(1_000, budget_ms),
+    )
+    result = _probe_authenticated_page(page, application_url, budget_ms)
+    return {
+        **result,
+        "session_storage_entry_count": len(session_storage),
+    }
+
+
+def _live_handoff_probe(
+    playwright,
+    source_browser,
+    source_context,
+    application_url: str,
+    storage_state_path: Path,
+    session_storage: dict[str, str],
+    canonical_postlogin_url: str,
+    *,
+    budget_ms: int = 10_000,
+) -> dict:
+    """Compare reuse scopes while the verified source page stays alive."""
+    matrix = {}
+
+    same_context_page = source_context.new_page()
+    try:
+        matrix["same_context_new_page"] = _navigate_and_probe(
+            same_context_page,
+            application_url,
+            canonical_postlogin_url,
+            session_storage,
+            budget_ms,
+        )
+    finally:
+        same_context_page.close()
+
+    if source_browser is not None:
+        same_browser_context = source_browser.new_context(
+            accept_downloads=False,
+            storage_state=str(storage_state_path),
+        )
+        try:
+            same_browser_page = same_browser_context.new_page()
+            matrix["same_browser_new_context"] = _navigate_and_probe(
+                same_browser_page,
+                application_url,
+                canonical_postlogin_url,
+                session_storage,
+                budget_ms,
+            )
+        finally:
+            same_browser_context.close()
+    else:
+        matrix["same_browser_new_context"] = {
+            "reuse_proven": False,
+            "not_tested_reason": "persistent_source_context",
+            "raw_values_exposed": False,
+        }
+
+    separate_browser = playwright.chromium.launch(headless=False)
+    separate_context = separate_browser.new_context(
+        accept_downloads=False,
+        storage_state=str(storage_state_path),
+    )
+    try:
+        separate_page = separate_context.new_page()
+        matrix["separate_browser_process"] = _navigate_and_probe(
+            separate_page,
+            application_url,
+            canonical_postlogin_url,
+            session_storage,
+            budget_ms,
+        )
+    finally:
+        separate_context.close()
+        separate_browser.close()
+
+    if matrix["separate_browser_process"].get("reuse_proven") is True:
+        scope = "separate_browser_process"
+    elif matrix["same_browser_new_context"].get("reuse_proven") is True:
+        scope = "same_browser_process"
+    elif matrix["same_context_new_page"].get("reuse_proven") is True:
+        scope = "same_context"
+    else:
+        scope = "none"
+
+    return {
+        "live_handoff_reuse_proven": scope != "none",
+        "strongest_reusable_scope": scope,
+        "same_context_reuse_proven": matrix["same_context_new_page"].get("reuse_proven") is True,
+        "same_browser_process_reuse_proven": matrix["same_browser_new_context"].get("reuse_proven") is True,
+        "separate_browser_reuse_proven": matrix["separate_browser_process"].get("reuse_proven") is True,
+        "reuse_matrix": matrix,
+        "session_storage_entry_count": len(session_storage),
+        "navigation_click_attempts": 0,
+        "form_value_write_attempts": 0,
+        "credential_entry_attempts": 0,
+        "file_upload_attempts": 0,
+        "submit_attempts": 0,
+        "raw_values_exposed": False,
+    }
+
+
+def _form_surface_signature(report: dict) -> tuple:
+    """A readiness signal, not a reviewed application manifest or write grant."""
+    controls = report["visible_controls"]
+    if any(c["type"].casefold() == "password" for c in controls):
+        return ()
+    excluded_types = {"hidden", "button", "submit", "reset", "image", "search"}
+    excluded_ids = {OTP_CONTROL_ID, *IDENTITY_CONTROL_IDS}
+    return tuple(sorted(
+        (c["tag"], c["type"], c["id"], c["name"])
+        for c in controls
+        if c["tag"] in {"input", "select", "textarea"}
+        and c["type"].casefold() not in excluded_types
+        and c["id"] not in excluded_ids
+        and not c["id"].casefold().startswith(("onetrust", "ot-"))
+        and not c["disabled"]
+        and not c.get("readonly", False)
+    ))
 
 
 def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
@@ -111,53 +804,1036 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
 
     storage_path = Path(request.storage_state_out)
     report_path = Path(request.report_out)
+    session_storage_path = Path(request.session_storage_out) if request.session_storage_out else None
+    postlogin_url_path = Path(request.postlogin_url_out) if request.postlogin_url_out else None
+    live_handoff_report_path = Path(request.live_handoff_report_out) if request.live_handoff_report_out else None
+    same_page_manifest_path = Path(request.same_page_manifest_out) if request.same_page_manifest_out else None
+    entry_autopilot_report_path = (
+        Path(request.entry_autopilot_report_out)
+        if request.entry_autopilot_report_out
+        else None
+    )
+    same_page_safe_fill_report_path = (
+        Path(request.same_page_safe_fill_report_out)
+        if request.same_page_safe_fill_report_out
+        else None
+    )
+    same_page_contact_address_contract_path = (
+        Path(request.same_page_contact_address_contract_out)
+        if request.same_page_contact_address_contract_out
+        else None
+    )
+    same_page_country_combobox_probe_path = (
+        Path(request.same_page_country_combobox_probe_out)
+        if request.same_page_country_combobox_probe_out
+        else None
+    )
+    same_page_personal_information_report_path = (
+        Path(request.same_page_personal_information_report_out)
+        if request.same_page_personal_information_report_out
+        else None
+    )
+    same_page_personal_information_next_readiness_report_path = (
+        Path(request.same_page_personal_information_next_readiness_report_out)
+        if request.same_page_personal_information_next_readiness_report_out
+        else None
+    )
+    same_page_country_keyboard_selection_report_path = (
+        Path(request.same_page_country_keyboard_selection_report_out)
+        if request.same_page_country_keyboard_selection_report_out
+        else None
+    )
+    same_page_country_dom_contract_path = (
+        Path(request.same_page_country_dom_contract_out)
+        if request.same_page_country_dom_contract_out
+        else None
+    )
+    same_page_state_dom_contract_path = (
+        Path(request.same_page_state_dom_contract_out)
+        if request.same_page_state_dom_contract_out
+        else None
+    )
+    same_page_state_after_country_contract_path = (
+        Path(request.same_page_state_after_country_contract_out)
+        if request.same_page_state_after_country_contract_out
+        else None
+    )
+    same_page_state_selection_report_path = (
+        Path(request.same_page_state_selection_report_out)
+        if request.same_page_state_selection_report_out
+        else None
+    )
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    if session_storage_path is not None:
+        session_storage_path.parent.mkdir(parents=True, exist_ok=True)
+    if postlogin_url_path is not None:
+        postlogin_url_path.parent.mkdir(parents=True, exist_ok=True)
+    if live_handoff_report_path is not None:
+        live_handoff_report_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_manifest_path is not None:
+        same_page_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    if entry_autopilot_report_path is not None:
+        entry_autopilot_report_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_safe_fill_report_path is not None:
+        same_page_safe_fill_report_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_contact_address_contract_path is not None:
+        same_page_contact_address_contract_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_country_combobox_probe_path is not None:
+        same_page_country_combobox_probe_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_personal_information_report_path is not None:
+        same_page_personal_information_report_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_personal_information_next_readiness_report_path is not None:
+        same_page_personal_information_next_readiness_report_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_country_keyboard_selection_report_path is not None:
+        same_page_country_keyboard_selection_report_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_country_dom_contract_path is not None:
+        same_page_country_dom_contract_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_state_dom_contract_path is not None:
+        same_page_state_dom_contract_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_state_after_country_contract_path is not None:
+        same_page_state_after_country_contract_path.parent.mkdir(parents=True, exist_ok=True)
+    if same_page_state_selection_report_path is not None:
+        same_page_state_selection_report_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context(accept_downloads=False)
-        try:
-            page = context.new_page()
-            page.goto(request.application_url, wait_until="domcontentloaded", timeout=60_000)
-            print(
-                "ADP browser opened. Complete the application-entry steps manually. "
-                "When the email verification code appears, enter it directly in the browser "
-                "and click Verify. Do not paste the code into this terminal."
+        browser = None
+        if request.user_data_dir:
+            context = p.chromium.launch_persistent_context(
+                request.user_data_dir,
+                headless=False,
+                accept_downloads=False,
             )
+            pages = list(context.pages)
+            if len(pages) > 1:
+                context.close()
+                raise RuntimeError("ADP_SESSION_BOOTSTRAP_UNREVIEWED_NEW_PAGE")
+            page = pages[0] if pages else context.new_page()
+        else:
+            browser = p.chromium.launch(headless=False)
+            context = browser.new_context(accept_downloads=False)
+            page = context.new_page()
+        try:
+            navigation = _open_reviewed_adp_target(page, request.application_url)
+            if navigation["navigation_attempts"] > 1 or navigation["navigation_timeout_tolerated"]:
+                print(json.dumps({
+                    "initial_navigation_attempts": navigation["navigation_attempts"],
+                    "initial_navigation_timeout_tolerated": navigation["navigation_timeout_tolerated"],
+                    "raw_values_exposed": False,
+                }, sort_keys=True))
+            entry_autopilot = None
+            entry_autopilot_counters = {
+                "verify_click_attempts": 0,
+                "verify_click_successes": 0,
+                "complete_application_click_attempts": 0,
+                "complete_application_click_successes": 0,
+            }
+            if request.entry_autopilot_profile_path:
+                try:
+                    entry_autopilot = advance_to_otp_on_existing_page(
+                        page,
+                        AdpEntryAutopilotRequest(
+                            application_url=request.application_url,
+                            profile_json_path=request.entry_autopilot_profile_path,
+                        ),
+                    )
+                except AdpEntryNavigationSurfaceDrift as exc:
+                    diagnostic = {
+                        "autopilot_version": "adp-entry-autopilot-v1",
+                        "autopilot_status": "blocked_navigation_surface_drift",
+                        "error_code": exc.code,
+                        **exc.evidence,
+                        "apply_click_attempts": 0,
+                        "form_value_write_attempts": 0,
+                        "continue_click_attempts": 0,
+                        "otp_write_attempts": 0,
+                        "verify_click_attempts": 0,
+                        "complete_application_click_attempts": 0,
+                        "next_click_attempts": 0,
+                        "file_upload_attempts": 0,
+                        "submit_attempts": 0,
+                        "raw_values_exposed": False,
+                    }
+                    if entry_autopilot_report_path is not None:
+                        entry_autopilot_report_path.write_text(
+                            json.dumps(diagnostic, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+                    print(json.dumps({"entry_autopilot_diagnostic": diagnostic}, sort_keys=True))
+                    raise
+                if entry_autopilot_report_path is not None:
+                    entry_autopilot_report_path.write_text(
+                        json.dumps(
+                            entry_autopilot,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            indent=2,
+                        ) + "\n",
+                        encoding="utf-8",
+                    )
+                print(json.dumps({
+                    "entry_autopilot": {
+                        "autopilot_version": entry_autopilot.get("autopilot_version", ""),
+                        "autopilot_status": entry_autopilot.get("autopilot_status", ""),
+                        "apply_click_attempts": entry_autopilot.get("apply_click_attempts", 0),
+                        "apply_click_successes": entry_autopilot.get("apply_click_successes", 0),
+                        "form_value_write_attempts": entry_autopilot.get("form_value_write_attempts", 0),
+                        "form_value_write_successes": entry_autopilot.get("form_value_write_successes", 0),
+                        "continue_click_attempts": entry_autopilot.get("continue_click_attempts", 0),
+                        "continue_click_successes": entry_autopilot.get("continue_click_successes", 0),
+                        "otp_write_attempts": 0,
+                        "next_click_attempts": 0,
+                        "file_upload_attempts": 0,
+                        "submit_attempts": 0,
+                        "raw_values_exposed": False,
+                    }
+                }, sort_keys=True))
+                print(
+                    "ADP Apply, identity/phone safe-fill and Continue completed automatically. "
+                    "Enter the verification code in the browser; Verify will be clicked automatically."
+                )
+            else:
+                print(
+                    "ADP browser opened. Complete the application-entry steps manually. "
+                    "When the email verification code appears, enter it directly in the browser "
+                    "and click Verify. Do not paste the code into this terminal."
+                )
 
             deadline = time.monotonic() + request.timeout_seconds
             verification_seen = False
-            stable_verified_polls = 0
+            stable_since = None
+            last_signature = None
+            last_otp_seen = None
+            last_control_count = 0
+            transition_announced = False
+            portal_hint_announced = False
+            authenticated_portal_seen = False
+            last_live_diagnostic = None
             while time.monotonic() < deadline:
                 if page.is_closed():
                     raise RuntimeError("ADP_SESSION_BOOTSTRAP_BROWSER_CLOSED")
-                stage = bootstrap_stage(page)
+                if len(context.pages) != 1:
+                    raise RuntimeError("ADP_SESSION_BOOTSTRAP_UNREVIEWED_NEW_PAGE")
+                try:
+                    validate_adp_live_url(str(page.url))
+                except ValueError:
+                    raise RuntimeError("ADP_SESSION_BOOTSTRAP_UNREVIEWED_ORIGIN") from None
+                try:
+                    stage = bootstrap_stage(page)
+                    stage_observation_succeeded = True
+                except Exception:
+                    stage = {
+                        "verification_code_visible": False,
+                        "identity_surface_visible": False,
+                        "identity_controls_visible_count": 0,
+                        "raw_values_exposed": False,
+                    }
+                    stage_observation_succeeded = False
+
+                authenticated_diagnostics = {
+                    "authenticated_portal_observed": False,
+                    "authenticated_application_steps_observed": False,
+                    "authenticated_form_observed": False,
+                    "observation_succeeded": False,
+                    "raw_values_exposed": False,
+                }
+                if (
+                    stage_observation_succeeded
+                    and not stage["verification_code_visible"]
+                    and not stage["identity_surface_visible"]
+                ):
+                    authenticated_diagnostics = _authenticated_form_diagnostics(
+                        page,
+                        request.application_url,
+                    )
+                authenticated = {
+                    "authenticated_portal_observed": authenticated_diagnostics.get(
+                        "authenticated_portal_observed", False
+                    ),
+                    "authenticated_application_steps_observed": authenticated_diagnostics.get(
+                        "authenticated_application_steps_observed", False
+                    ),
+                    "authenticated_form_observed": authenticated_diagnostics.get(
+                        "authenticated_form_observed", False
+                    ),
+                }
+
+                try:
+                    report = _sanitized_post_verification_report(page, verification_seen)
+                    report_observation_succeeded = True
+                    report_error_type = ""
+                except Exception as exc:
+                    report = None
+                    report_observation_succeeded = False
+                    report_error_type = type(exc).__name__
+
+                now = time.monotonic()
+                live_diagnostic = {
+                    "stage_observation_succeeded": stage_observation_succeeded,
+                    "verification_code_visible": stage.get("verification_code_visible") is True,
+                    "identity_surface_visible": stage.get("identity_surface_visible") is True,
+                    **authenticated_diagnostics,
+                    "form_report_observation_succeeded": report_observation_succeeded,
+                    "form_report_error_type": report_error_type,
+                    "visible_control_count": (
+                        report.get("visible_control_count", 0) if report is not None else 0
+                    ),
+                    "raw_values_exposed": False,
+                }
+                if (
+                    live_diagnostic != last_live_diagnostic
+                    and (
+                        authenticated_diagnostics.get("postlogin_path_match") is True
+                        or authenticated_diagnostics.get("authenticated_form_observed") is True
+                        or not stage_observation_succeeded
+                        or not report_observation_succeeded
+                    )
+                ):
+                    print(json.dumps(
+                        {"authenticated_surface_diagnostic": live_diagnostic},
+                        sort_keys=True,
+                    ))
+                    last_live_diagnostic = live_diagnostic
+
+                if not stage_observation_succeeded or report is None:
+                    stable_since = None
+                    last_signature = None
+                    page.wait_for_timeout(1_000)
+                    continue
+
+                last_control_count = report["visible_control_count"]
+                authenticated_portal_seen = authenticated_portal_seen or authenticated["authenticated_portal_observed"]
+                if authenticated["authenticated_portal_observed"] and not authenticated["authenticated_form_observed"]:
+                    if (
+                        entry_autopilot is not None
+                        and entry_autopilot_counters["complete_application_click_attempts"] == 0
+                    ):
+                        clicked_complete = click_complete_application_on_portal(
+                            page,
+                            request.application_url,
+                            entry_autopilot_counters,
+                        )
+                        if clicked_complete:
+                            print(
+                                "Signed-in portal observed. Complete Your Application clicked automatically; "
+                                "waiting for Personal Information."
+                            )
+                            page.wait_for_timeout(1_000)
+                            continue
+                    elif not portal_hint_announced:
+                        print("Signed-in portal observed. Open Complete Your Application manually to show Personal Information; do not edit fields or click Next.")
+                        portal_hint_announced = True
                 if stage["verification_code_visible"]:
                     verification_seen = True
-                    stable_verified_polls = 0
-                elif verification_seen and not stage["identity_surface_visible"]:
-                    stable_verified_polls += 1
-                    if stable_verified_polls >= 2:
-                        context.storage_state(path=str(storage_path))
-                        report = _sanitized_post_verification_report(page, verification_seen=True)
+                    last_otp_seen = now
+                    stable_since = None
+                    last_signature = None
+                    if entry_autopilot is not None:
+                        clicked_verify = click_verify_if_user_populated_otp(
+                            page,
+                            entry_autopilot_counters,
+                        )
+                        if clicked_verify:
+                            print(
+                                "Verification code shape accepted. Verify clicked automatically; "
+                                "waiting for authenticated portal."
+                            )
+                            page.wait_for_timeout(500)
+                            continue
+                elif (verification_seen or authenticated["authenticated_form_observed"]) and not stage["identity_surface_visible"]:
+                    if not transition_announced:
+                        if verification_seen:
+                            print("Verification screen closed. Waiting for a stable form; keep the browser open.")
+                        else:
+                            print("Authenticated Personal Information surface observed without an OTP observation. Waiting for a stable form; keep the browser open.")
+                        transition_announced = True
+                    signature = _form_surface_signature(report)
+                    basis = "observed_otp_transition" if verification_seen else "authenticated_postlogin_form"
+                    surface_key = (str(page.url), signature, basis)
+                    if not signature:
+                        stable_since = None
+                        last_signature = None
+                    elif surface_key != last_signature:
+                        stable_since = now
+                        last_signature = surface_key
+                    elif (
+                        stable_since is not None
+                        and now - stable_since >= (MIN_STABLE_SURFACE_SECONDS if verification_seen else MIN_POST_VERIFICATION_SECONDS)
+                        and (not verification_seen or (
+                            last_otp_seen is not None and now - last_otp_seen >= MIN_POST_VERIFICATION_SECONDS
+                        ))
+                    ):
+                        session_storage = {}
+                        session_storage_evidence = {
+                            "session_storage_entry_count": 0,
+                            "session_storage_byte_count": 0,
+                            "session_storage_values_exposed": False,
+                        }
+                        if session_storage_path is not None:
+                            session_storage, session_storage_evidence = _capture_session_storage(page)
+                            session_storage_path.write_text(
+                                json.dumps(session_storage, ensure_ascii=False, sort_keys=True) + "\n",
+                                encoding="utf-8",
+                            )
+                        canonical_url_evidence = _authenticated_form_diagnostics(
+                            page,
+                            request.application_url,
+                        )
+                        canonical_url_exported = False
+                        if postlogin_url_path is not None:
+                            if not (
+                                canonical_url_evidence.get("postlogin_path_match") is True
+                                and canonical_url_evidence.get("cid_match") is True
+                                and canonical_url_evidence.get("ccid_match") is True
+                                and canonical_url_evidence.get("jobid_match") is True
+                            ):
+                                raise RuntimeError("ADP_SESSION_BOOTSTRAP_CANONICAL_POSTLOGIN_URL_INVALID")
+                            postlogin_url_path.write_text(str(page.url) + "\n", encoding="utf-8")
+                            canonical_url_exported = True
+
+                        storage_evidence = _export_storage_state(context, storage_path)
+
+                        same_page_manifest = None
+                        same_page_safe_fill = None
+                        same_page_contact_address_contract = None
+                        same_page_country_combobox_probe = None
+                        same_page_personal_information_safe_fill = None
+                        same_page_country_keyboard_selection = None
+                        same_page_country_dom_contract = None
+                        same_page_state_dom_contract = None
+                        same_page_state_after_country_contract = None
+                        same_page_state_selection = None
+                        if same_page_manifest_path is not None:
+                            same_page_manifest = extract_same_page_manifest(
+                                page,
+                                request.application_url,
+                                timeout_ms=20_000,
+                                render_wait_ms=5_000,
+                            )
+                            same_page_manifest_path.write_text(
+                                json.dumps(
+                                    same_page_manifest,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_manifest": {
+                                    "manifest_version": same_page_manifest.get("manifest_version", ""),
+                                    "surface_fingerprint": same_page_manifest.get("surface_fingerprint", ""),
+                                    "visible_control_count": same_page_manifest.get("visible_control_count", 0),
+                                    "visible_action_count": same_page_manifest.get("visible_action_count", 0),
+                                    "file_control_count": same_page_manifest.get("file_control_count", 0),
+                                    "password_control_count": same_page_manifest.get("password_control_count", 0),
+                                    "form_value_write_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "raw_values_exposed": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_contact_address_contract_path is not None:
+                            same_page_contact_address_contract = (
+                                inspect_same_page_contact_address_contract(
+                                    page,
+                                    request.application_url,
+                                    request.same_page_contact_address_expected_manifest_fingerprint,
+                                    timeout_ms=20_000,
+                                    render_wait_ms=5_000,
+                                )
+                            )
+                            same_page_contact_address_contract_path.write_text(
+                                json.dumps(
+                                    same_page_contact_address_contract,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_contact_address_contract": {
+                                    "contract_version": same_page_contact_address_contract.get("contract_version", ""),
+                                    "contract_fingerprint": same_page_contact_address_contract.get("contract_fingerprint", ""),
+                                    "address_control_count": same_page_contact_address_contract.get("address_control_count", 0),
+                                    "phone_country_control_count": same_page_contact_address_contract.get("phone_country_control_count", 0),
+                                    "phone_input_control_count": same_page_contact_address_contract.get("phone_input_control_count", 0),
+                                    "form_value_write_attempts": 0,
+                                    "phone_write_attempts": 0,
+                                    "address_write_attempts": 0,
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "raw_values_exposed": False,
+                                    "input_values_read": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_country_combobox_probe_path is not None:
+                            same_page_country_combobox_probe = (
+                                inspect_country_combobox_on_verified_page(
+                                    page,
+                                    request.application_url,
+                                    request.same_page_country_expected_manifest_fingerprint,
+                                    request.same_page_country_expected_contact_contract_fingerprint,
+                                    timeout_ms=20_000,
+                                    render_wait_ms=5_000,
+                                )
+                            )
+                            same_page_country_combobox_probe_path.write_text(
+                                json.dumps(
+                                    same_page_country_combobox_probe,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_country_combobox_probe": {
+                                    "canary_version": same_page_country_combobox_probe.get("canary_version", ""),
+                                    "option_surface_fingerprint": same_page_country_combobox_probe.get("option_surface_fingerprint", ""),
+                                    "visible_option_count": same_page_country_combobox_probe.get("option_surface", {}).get("visible_option_count", 0),
+                                    "turkey_candidate_count": same_page_country_combobox_probe.get("option_surface", {}).get("turkey_candidate_count", 0),
+                                    "combobox_open_click_attempts": same_page_country_combobox_probe.get("combobox_open_click_attempts", 0),
+                                    "country_selection_attempts": 0,
+                                    "form_value_write_attempts": 0,
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "raw_values_exposed": False,
+                                    "input_values_read": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_state_after_country_contract_path is not None:
+                            same_page_state_after_country_contract = (
+                                inspect_after_reviewed_country_selection(
+                                    page,
+                                    request.application_url,
+                                    request.same_page_state_after_country_expected_manifest_fingerprint,
+                                    request.same_page_state_after_country_expected_contact_contract_fingerprint,
+                                    request.same_page_state_after_country_expected_option_surface_fingerprint,
+                                    timeout_ms=20_000,
+                                    render_wait_ms=5_000,
+                                )
+                            )
+                            same_page_state_after_country_contract_path.write_text(
+                                json.dumps(
+                                    same_page_state_after_country_contract,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_state_after_country_contract": {
+                                    "contract_version": same_page_state_after_country_contract.get("contract_version", ""),
+                                    "contract_fingerprint": same_page_state_after_country_contract.get("contract_fingerprint", ""),
+                                    "country_selection_attempts": same_page_state_after_country_contract.get("country_selection_attempts", 0),
+                                    "country_selection_successes": same_page_state_after_country_contract.get("country_selection_successes", 0),
+                                    "state_selection_attempts": 0,
+                                    "phone_write_attempts": 0,
+                                    "address_text_write_attempts": 0,
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "state_candidate_values_read": False,
+                                    "raw_values_exposed": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_state_selection_report_path is not None:
+                            same_page_state_selection = run_same_page_state_selection(
+                                page,
+                                AdpSamePageStateSelectionRequest(
+                                    application_url=request.application_url,
+                                    expected_manifest_fingerprint=request.same_page_state_selection_expected_manifest_fingerprint,
+                                    expected_contact_contract_fingerprint=request.same_page_state_selection_expected_contact_contract_fingerprint,
+                                    expected_country_option_surface_fingerprint=request.same_page_state_selection_expected_country_surface_fingerprint,
+                                    expected_state_after_country_contract_fingerprint=request.same_page_state_selection_expected_contract_fingerprint,
+                                    expected_state_option_surface_fingerprint=request.same_page_state_selection_expected_option_surface_fingerprint,
+                                    reviewed_state_label=request.same_page_state_selection_reviewed_label,
+                                    timeout_ms=20_000,
+                                    render_wait_ms=5_000,
+                                ),
+                            )
+                            same_page_state_selection_report_path.write_text(
+                                json.dumps(
+                                    same_page_state_selection,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_state_selection": {
+                                    "canary_version": same_page_state_selection.get("canary_version", ""),
+                                    "selection_status": same_page_state_selection.get("selection_status", ""),
+                                    "state_selection_attempts": same_page_state_selection.get("state_selection_attempts", 0),
+                                    "state_selection_successes": same_page_state_selection.get("state_selection_successes", 0),
+                                    "state_readback_match": same_page_state_selection.get("state_readback_match") is True,
+                                    "phone_write_attempts": 0,
+                                    "address_text_write_attempts": 0,
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "raw_values_exposed": False,
+                                }
+                            }, sort_keys=True, ensure_ascii=False))
+
+                        if same_page_state_dom_contract_path is not None:
+                            same_page_state_dom_contract = (
+                                inspect_same_page_state_dom_contract(
+                                    page,
+                                    request.application_url,
+                                    request.same_page_state_dom_expected_manifest_fingerprint,
+                                    request.same_page_state_dom_expected_contact_contract_fingerprint,
+                                    timeout_ms=20_000,
+                                    render_wait_ms=5_000,
+                                )
+                            )
+                            same_page_state_dom_contract_path.write_text(
+                                json.dumps(
+                                    same_page_state_dom_contract,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_state_dom_contract": {
+                                    "contract_version": same_page_state_dom_contract.get("contract_version", ""),
+                                    "contract_fingerprint": same_page_state_dom_contract.get("contract_fingerprint", ""),
+                                    "interactive_descendant_count": same_page_state_dom_contract.get("interactive_descendant_count", 0),
+                                    "form_value_write_attempts": 0,
+                                    "state_selection_attempts": 0,
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "candidate_values_read": False,
+                                    "raw_values_exposed": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_country_dom_contract_path is not None:
+                            same_page_country_dom_contract = (
+                                inspect_same_page_country_dom_contract(
+                                    page,
+                                    request.application_url,
+                                    request.same_page_country_dom_expected_manifest_fingerprint,
+                                    request.same_page_country_dom_expected_contact_contract_fingerprint,
+                                    request.same_page_country_dom_expected_option_surface_fingerprint,
+                                    timeout_ms=20_000,
+                                    render_wait_ms=5_000,
+                                )
+                            )
+                            same_page_country_dom_contract_path.write_text(
+                                json.dumps(
+                                    same_page_country_dom_contract,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_country_dom_contract": {
+                                    "contract_version": same_page_country_dom_contract.get("contract_version", ""),
+                                    "contract_fingerprint": same_page_country_dom_contract.get("contract_fingerprint", ""),
+                                    "combobox_open_click_attempts": same_page_country_dom_contract.get("combobox_open_click_attempts", 0),
+                                    "country_selection_attempts": 0,
+                                    "form_value_write_attempts": 0,
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "candidate_values_read": False,
+                                    "raw_values_exposed": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_country_keyboard_selection_report_path is not None:
+                            same_page_country_keyboard_selection = (
+                                run_same_page_country_keyboard_selection(
+                                    page,
+                                    AdpSamePageCountryKeyboardSelectionRequest(
+                                        application_url=request.application_url,
+                                        expected_manifest_fingerprint=(
+                                            request.same_page_country_keyboard_expected_manifest_fingerprint
+                                        ),
+                                        expected_contact_contract_fingerprint=(
+                                            request.same_page_country_keyboard_expected_contact_contract_fingerprint
+                                        ),
+                                        expected_country_option_surface_fingerprint=(
+                                            request.same_page_country_keyboard_expected_option_surface_fingerprint
+                                        ),
+                                    ),
+                                )
+                            )
+                            same_page_country_keyboard_selection_report_path.write_text(
+                                json.dumps(
+                                    same_page_country_keyboard_selection,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_country_keyboard_selection": {
+                                    "canary_version": same_page_country_keyboard_selection.get("canary_version", ""),
+                                    "selection_status": same_page_country_keyboard_selection.get("selection_status", ""),
+                                    "open_click_attempts": same_page_country_keyboard_selection.get("open_click_attempts", 0),
+                                    "text_write_attempts": same_page_country_keyboard_selection.get("text_write_attempts", 0),
+                                    "keyboard_commit_attempts": same_page_country_keyboard_selection.get("keyboard_commit_attempts", 0),
+                                    "country_selection_successes": same_page_country_keyboard_selection.get("country_selection_successes", 0),
+                                    "phone_write_attempts": 0,
+                                    "address_text_write_attempts": 0,
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "raw_values_exposed": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_personal_information_report_path is not None:
+                            same_page_personal_information_safe_fill = (
+                                run_same_page_personal_information_safe_fill(
+                                    page,
+                                    AdpSamePagePersonalInformationSafeFillRequest(
+                                        application_url=request.application_url,
+                                        expected_manifest_fingerprint=(
+                                            request.same_page_personal_information_expected_manifest_fingerprint
+                                        ),
+                                        expected_contact_contract_fingerprint=(
+                                            request.same_page_personal_information_expected_contact_contract_fingerprint
+                                        ),
+                                        expected_country_option_surface_fingerprint=(
+                                            request.same_page_personal_information_expected_country_surface_fingerprint
+                                        ),
+                                        expected_state_option_surface_fingerprint=(
+                                            request.same_page_personal_information_expected_state_surface_fingerprint
+                                        ),
+                                        profile_json_path=(
+                                            request.same_page_personal_information_profile_path
+                                        ),
+                                        allow_reviewed_turkish_ascii_name_overwrite=(
+                                            request.same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite
+                                        ),
+                                    ),
+                                )
+                            )
+                            same_page_personal_information_report_path.write_text(
+                                json.dumps(
+                                    same_page_personal_information_safe_fill,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            if same_page_personal_information_next_readiness_report_path is not None:
+                                same_page_next_readiness = inspect_same_page_next_readiness(
+                                    page,
+                                    AdpSamePageNextReadinessRequest(
+                                        application_url=request.application_url,
+                                        expected_state_option_surface_fingerprint=(
+                                            request.same_page_personal_information_expected_state_surface_fingerprint
+                                        ),
+                                    ),
+                                    same_page_personal_information_safe_fill,
+                                )
+                                same_page_personal_information_next_readiness_report_path.write_text(
+                                    json.dumps(
+                                        same_page_next_readiness,
+                                        ensure_ascii=False,
+                                        sort_keys=True,
+                                        indent=2,
+                                    ) + "\n",
+                                    encoding="utf-8",
+                                )
+                                print(json.dumps({
+                                    "same_page_next_readiness": {
+                                        "canary_version": same_page_next_readiness.get("canary_version", ""),
+                                        "readiness_status": same_page_next_readiness.get("readiness_status", ""),
+                                        "invalid_required_control_count": same_page_next_readiness.get("invalid_required_control_count", 0),
+                                        "next_action_count": same_page_next_readiness.get("next_action_count", 0),
+                                        "next_visible": same_page_next_readiness.get("next_visible") is True,
+                                        "next_enabled": same_page_next_readiness.get("next_enabled") is True,
+                                        "visible_issue_node_count": same_page_next_readiness.get("visible_issue_node_count", 0),
+                                        "visible_alert_count": same_page_next_readiness.get("visible_alert_count", 0),
+                                        "visible_aria_invalid_count": same_page_next_readiness.get("visible_aria_invalid_count", 0),
+                                        "visible_error_class_count": same_page_next_readiness.get("visible_error_class_count", 0),
+                                        "explicit_address_error_count": same_page_next_readiness.get("explicit_address_error_count", 0),
+                                        "blocking_issue_node_count": same_page_next_readiness.get("blocking_issue_node_count", 0),
+                                        "informational_alert_count": same_page_next_readiness.get("informational_alert_count", 0),
+                                        "validation_structural_nodes": same_page_next_readiness.get("validation_structural_nodes", []),
+                                        "next_click_attempts": 0,
+                                        "form_value_write_attempts": 0,
+                                        "file_upload_attempts": 0,
+                                        "submit_attempts": 0,
+                                        "raw_values_exposed": False,
+                                    }
+                                }, sort_keys=True))
+                            print(json.dumps({
+                                "same_page_personal_information_safe_fill": {
+                                    "executor_version": same_page_personal_information_safe_fill.get("executor_version", ""),
+                                    "safe_fill_status": same_page_personal_information_safe_fill.get("safe_fill_status", ""),
+                                    "form_value_write_attempts": same_page_personal_information_safe_fill.get("form_value_write_attempts", 0),
+                                    "form_value_write_successes": same_page_personal_information_safe_fill.get("form_value_write_successes", 0),
+                                    "phone_write_attempts": same_page_personal_information_safe_fill.get("phone_write_attempts", 0),
+                                    "address_write_attempts": same_page_personal_information_safe_fill.get("address_write_attempts", 0),
+                                    "country_selection_attempts": same_page_personal_information_safe_fill.get("country_selection_attempts", 0),
+                                    "state_selection_attempts": same_page_personal_information_safe_fill.get("state_selection_attempts", 0),
+                                    "state_selection_successes": same_page_personal_information_safe_fill.get("state_selection_successes", 0),
+                                    "home_phone_write_attempts": same_page_personal_information_safe_fill.get("home_phone_write_attempts", 0),
+                                    "next_click_attempts": 0,
+                                    "file_upload_attempts": 0,
+                                    "submit_attempts": 0,
+                                    "raw_values_exposed": False,
+                                }
+                            }, sort_keys=True))
+
+                        if same_page_safe_fill_report_path is not None:
+                            same_page_safe_fill = run_same_page_safe_fill(
+                                page,
+                                AdpSamePageSafeFillRequest(
+                                    application_url=request.application_url,
+                                    expected_manifest_fingerprint=(
+                                        request.same_page_safe_fill_expected_manifest_fingerprint
+                                    ),
+                                    profile_json_path=request.same_page_safe_fill_profile_path,
+                                    allow_reviewed_turkish_ascii_name_overwrite=(
+                                        request.same_page_safe_fill_allow_reviewed_turkish_ascii_name_overwrite
+                                    ),
+                                ),
+                            )
+                            same_page_safe_fill_report_path.write_text(
+                                json.dumps(
+                                    same_page_safe_fill,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps({
+                                "same_page_safe_fill": {
+                                    "executor_version": same_page_safe_fill.get("executor_version", ""),
+                                    "safe_fill_status": same_page_safe_fill.get("safe_fill_status", ""),
+                                    "form_value_write_attempts": same_page_safe_fill.get("form_value_write_attempts", 0),
+                                    "form_value_write_successes": same_page_safe_fill.get("form_value_write_successes", 0),
+                                    "email_readback_match": (
+                                        same_page_safe_fill.get("email_readback_only", {}).get("readback_match") is True
+                                    ),
+                                    "phone_write_attempts": same_page_safe_fill.get("phone_write_attempts", 0),
+                                    "address_write_attempts": same_page_safe_fill.get("address_write_attempts", 0),
+                                    "next_click_attempts": same_page_safe_fill.get("next_click_attempts", 0),
+                                    "file_upload_attempts": same_page_safe_fill.get("file_upload_attempts", 0),
+                                    "submit_attempts": same_page_safe_fill.get("submit_attempts", 0),
+                                    "reviewed_turkish_ascii_name_overwrite_allowed": (
+                                        same_page_safe_fill.get(
+                                            "reviewed_turkish_ascii_name_overwrite_allowed"
+                                        ) is True
+                                    ),
+                                    "raw_values_exposed": False,
+                                }
+                            }, sort_keys=True))
+
+                        live_handoff = None
+                        if live_handoff_report_path is not None:
+                            live_handoff = _live_handoff_probe(
+                                p,
+                                browser,
+                                context,
+                                request.application_url,
+                                storage_path,
+                                session_storage,
+                                str(page.url),
+                            )
+                            live_handoff_report_path.write_text(
+                                json.dumps(
+                                    live_handoff,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(json.dumps(
+                                {"live_handoff_probe": live_handoff},
+                                sort_keys=True,
+                            ))
+
+                        report.update({
+                            "verification_seen": verification_seen,
+                            "verification_completed": verification_seen,
+                            "verification_basis": basis,
+                            "entry_autopilot_executed": isinstance(entry_autopilot, dict),
+                            "entry_autopilot_apply_click_attempts": (
+                                int(entry_autopilot.get("apply_click_attempts", 0))
+                                if isinstance(entry_autopilot, dict) else 0
+                            ),
+                            "entry_autopilot_continue_click_attempts": (
+                                int(entry_autopilot.get("continue_click_attempts", 0))
+                                if isinstance(entry_autopilot, dict) else 0
+                            ),
+                            "entry_autopilot_verify_click_attempts": int(
+                                entry_autopilot_counters.get("verify_click_attempts", 0)
+                            ),
+                            "entry_autopilot_complete_application_click_attempts": int(
+                                entry_autopilot_counters.get(
+                                    "complete_application_click_attempts", 0
+                                )
+                            ),
+                            "entry_autopilot_otp_write_attempts": 0,
+                            **authenticated,
+                            "post_verification_surface_stable": True,
+                            "visible_form_control_count": len(signature),
+                            "storage_state_exported": True,
+                            "canonical_postlogin_url_exported": canonical_url_exported,
+                            **storage_evidence,
+                            "session_storage_exported": session_storage_path is not None,
+                            **session_storage_evidence,
+                            "session_reuse_proven": False,
+                            "same_page_manifest_exported": isinstance(same_page_manifest, dict),
+                            "same_page_manifest_fingerprint": (
+                                str(same_page_manifest.get("surface_fingerprint", ""))
+                                if isinstance(same_page_manifest, dict)
+                                else ""
+                            ),
+                            "same_page_manifest_visible_control_count": (
+                                int(same_page_manifest.get("visible_control_count", 0))
+                                if isinstance(same_page_manifest, dict)
+                                else 0
+                            ),
+                            "same_page_manifest_file_control_count": (
+                                int(same_page_manifest.get("file_control_count", 0))
+                                if isinstance(same_page_manifest, dict)
+                                else 0
+                            ),
+                            "same_page_contact_address_contract_exported": isinstance(
+                                same_page_contact_address_contract, dict
+                            ),
+                            "same_page_contact_address_contract_fingerprint": (
+                                str(same_page_contact_address_contract.get("contract_fingerprint", ""))
+                                if isinstance(same_page_contact_address_contract, dict)
+                                else ""
+                            ),
+                            "same_page_country_combobox_probe_exported": isinstance(
+                                same_page_country_combobox_probe, dict
+                            ),
+                            "same_page_country_option_surface_fingerprint": (
+                                str(same_page_country_combobox_probe.get("option_surface_fingerprint", ""))
+                                if isinstance(same_page_country_combobox_probe, dict)
+                                else ""
+                            ),
+                            "same_page_personal_information_safe_fill_executed": isinstance(
+                                same_page_personal_information_safe_fill, dict
+                            ),
+                            "same_page_personal_information_write_attempts": (
+                                int(same_page_personal_information_safe_fill.get("form_value_write_attempts", 0))
+                                if isinstance(same_page_personal_information_safe_fill, dict)
+                                else 0
+                            ),
+                            "same_page_personal_information_write_successes": (
+                                int(same_page_personal_information_safe_fill.get("form_value_write_successes", 0))
+                                if isinstance(same_page_personal_information_safe_fill, dict)
+                                else 0
+                            ),
+                            "same_page_country_keyboard_selection_executed": isinstance(
+                                same_page_country_keyboard_selection, dict
+                            ),
+                            "same_page_country_keyboard_selection_status": (
+                                str(same_page_country_keyboard_selection.get("selection_status", ""))
+                                if isinstance(same_page_country_keyboard_selection, dict)
+                                else ""
+                            ),
+                            "same_page_country_dom_contract_exported": isinstance(
+                                same_page_country_dom_contract, dict
+                            ),
+                            "same_page_country_dom_contract_fingerprint": (
+                                str(same_page_country_dom_contract.get("contract_fingerprint", ""))
+                                if isinstance(same_page_country_dom_contract, dict)
+                                else ""
+                            ),
+                            "same_page_state_dom_contract_exported": isinstance(
+                                same_page_state_dom_contract, dict
+                            ),
+                            "same_page_state_dom_contract_fingerprint": (
+                                str(same_page_state_dom_contract.get("contract_fingerprint", ""))
+                                if isinstance(same_page_state_dom_contract, dict)
+                                else ""
+                            ),
+                            "same_page_state_after_country_contract_exported": isinstance(
+                                same_page_state_after_country_contract, dict
+                            ),
+                            "same_page_state_after_country_contract_fingerprint": (
+                                str(same_page_state_after_country_contract.get("contract_fingerprint", ""))
+                                if isinstance(same_page_state_after_country_contract, dict)
+                                else ""
+                            ),
+                            "same_page_state_selection_executed": isinstance(
+                                same_page_state_selection, dict
+                            ),
+                            "same_page_state_selection_status": (
+                                str(same_page_state_selection.get("selection_status", ""))
+                                if isinstance(same_page_state_selection, dict)
+                                else ""
+                            ),
+                            "same_page_safe_fill_executed": isinstance(same_page_safe_fill, dict),
+                            "same_page_safe_fill_write_attempts": (
+                                int(same_page_safe_fill.get("form_value_write_attempts", 0))
+                                if isinstance(same_page_safe_fill, dict)
+                                else 0
+                            ),
+                            "same_page_safe_fill_write_successes": (
+                                int(same_page_safe_fill.get("form_value_write_successes", 0))
+                                if isinstance(same_page_safe_fill, dict)
+                                else 0
+                            ),
+                            "live_handoff_reuse_proven": (
+                                live_handoff.get("live_handoff_reuse_proven") is True
+                                if isinstance(live_handoff, dict)
+                                else False
+                            ),
+                            "live_handoff_strongest_reusable_scope": (
+                                str(live_handoff.get("strongest_reusable_scope", ""))
+                                if isinstance(live_handoff, dict)
+                                else ""
+                            ),
+                        })
                         report_path.write_text(
                             json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                             encoding="utf-8",
                         )
-                        print(
-                            "ADP verification transition observed. Session state exported locally "
-                            "for protected secret provisioning."
-                        )
+                        label = "post-verification" if verification_seen else "authenticated Personal Information"
+                        print(f"Stable {label} form observed. Candidate session exported locally; fresh-browser reuse must pass before secret provisioning.")
                         return report
                 else:
-                    stable_verified_polls = 0
+                    stable_since = None
+                    last_signature = None
                 page.wait_for_timeout(1_000)
 
-            raise TimeoutError("ADP_SESSION_BOOTSTRAP_VERIFICATION_TIMEOUT")
+            print(json.dumps({
+                "verification_seen": verification_seen,
+                "authenticated_portal_seen": authenticated_portal_seen,
+                "verification_completed": False,
+                "visible_control_count": last_control_count,
+                "storage_state_exported": False,
+                "raw_values_exposed": False,
+            }, sort_keys=True))
+            reason = "FORM_NOT_READY" if verification_seen or authenticated_portal_seen else "VERIFICATION_TIMEOUT"
+            raise TimeoutError(f"ADP_SESSION_BOOTSTRAP_{reason}")
         finally:
             context.close()
-            browser.close()
+            if browser is not None:
+                browser.close()
 
 
 def main() -> int:
@@ -165,19 +1841,333 @@ def main() -> int:
     parser.add_argument("--url", required=True, dest="application_url")
     parser.add_argument("--storage-state-out", required=True)
     parser.add_argument("--report-out", required=True)
+    parser.add_argument("--session-storage-out", default="")
+    parser.add_argument("--postlogin-url-out", default="")
+    parser.add_argument("--user-data-dir", default="")
+    parser.add_argument("--live-handoff-report-out", default="")
+    parser.add_argument("--same-page-manifest-out", default="")
+    parser.add_argument("--entry-autopilot-profile", default="")
+    parser.add_argument("--entry-autopilot-report-out", default="")
+    parser.add_argument("--same-page-safe-fill-profile", default="")
+    parser.add_argument("--same-page-safe-fill-expected-manifest-fingerprint", default="")
+    parser.add_argument("--same-page-safe-fill-report-out", default="")
+    parser.add_argument(
+        "--same-page-safe-fill-allow-reviewed-turkish-ascii-name-overwrite",
+        action="store_true",
+    )
+    parser.add_argument("--same-page-contact-address-contract-out", default="")
+    parser.add_argument(
+        "--same-page-contact-address-expected-manifest-fingerprint",
+        default="",
+    )
+    parser.add_argument("--same-page-country-combobox-probe-out", default="")
+    parser.add_argument(
+        "--same-page-country-expected-manifest-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-country-expected-contact-contract-fingerprint",
+        default="",
+    )
+    parser.add_argument("--same-page-personal-information-profile", default="")
+    parser.add_argument(
+        "--same-page-personal-information-expected-manifest-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-personal-information-expected-contact-contract-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-personal-information-expected-country-surface-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-personal-information-expected-state-surface-fingerprint",
+        default="",
+    )
+    parser.add_argument("--same-page-personal-information-report-out", default="")
+    parser.add_argument(
+        "--same-page-personal-information-next-readiness-report-out",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-personal-information-allow-reviewed-turkish-ascii-name-overwrite",
+        action="store_true",
+    )
+    parser.add_argument("--same-page-country-keyboard-selection-report-out", default="")
+    parser.add_argument(
+        "--same-page-country-keyboard-expected-manifest-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-country-keyboard-expected-contact-contract-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-country-keyboard-expected-option-surface-fingerprint",
+        default="",
+    )
+    parser.add_argument("--same-page-country-dom-contract-out", default="")
+    parser.add_argument(
+        "--same-page-country-dom-expected-manifest-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-country-dom-expected-contact-contract-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-country-dom-expected-option-surface-fingerprint",
+        default="",
+    )
+    parser.add_argument("--same-page-state-dom-contract-out", default="")
+    parser.add_argument(
+        "--same-page-state-dom-expected-manifest-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-state-dom-expected-contact-contract-fingerprint",
+        default="",
+    )
+    parser.add_argument("--same-page-state-after-country-contract-out", default="")
+    parser.add_argument(
+        "--same-page-state-after-country-expected-manifest-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-state-after-country-expected-contact-contract-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-state-after-country-expected-option-surface-fingerprint",
+        default="",
+    )
+    parser.add_argument("--same-page-state-selection-report-out", default="")
+    parser.add_argument(
+        "--same-page-state-selection-expected-manifest-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-state-selection-expected-contact-contract-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-state-selection-expected-country-surface-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-state-selection-expected-contract-fingerprint",
+        default="",
+    )
+    parser.add_argument(
+        "--same-page-state-selection-expected-option-surface-fingerprint",
+        default="",
+    )
+    parser.add_argument("--same-page-state-selection-reviewed-label", default="")
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
     report = run_bootstrap(AdpVerifiedSessionBootstrapRequest(
         application_url=args.application_url,
         storage_state_out=args.storage_state_out,
         report_out=args.report_out,
+        session_storage_out=args.session_storage_out,
+        postlogin_url_out=args.postlogin_url_out,
+        user_data_dir=args.user_data_dir,
+        live_handoff_report_out=args.live_handoff_report_out,
+        same_page_manifest_out=args.same_page_manifest_out,
+        entry_autopilot_profile_path=args.entry_autopilot_profile,
+        entry_autopilot_report_out=args.entry_autopilot_report_out,
+        same_page_safe_fill_profile_path=args.same_page_safe_fill_profile,
+        same_page_safe_fill_expected_manifest_fingerprint=(
+            args.same_page_safe_fill_expected_manifest_fingerprint
+        ),
+        same_page_safe_fill_report_out=args.same_page_safe_fill_report_out,
+        same_page_safe_fill_allow_reviewed_turkish_ascii_name_overwrite=(
+            args.same_page_safe_fill_allow_reviewed_turkish_ascii_name_overwrite
+        ),
+        same_page_contact_address_contract_out=(
+            args.same_page_contact_address_contract_out
+        ),
+        same_page_contact_address_expected_manifest_fingerprint=(
+            args.same_page_contact_address_expected_manifest_fingerprint
+        ),
+        same_page_country_combobox_probe_out=(
+            args.same_page_country_combobox_probe_out
+        ),
+        same_page_country_expected_manifest_fingerprint=(
+            args.same_page_country_expected_manifest_fingerprint
+        ),
+        same_page_country_expected_contact_contract_fingerprint=(
+            args.same_page_country_expected_contact_contract_fingerprint
+        ),
+        same_page_personal_information_profile_path=(
+            args.same_page_personal_information_profile
+        ),
+        same_page_personal_information_expected_manifest_fingerprint=(
+            args.same_page_personal_information_expected_manifest_fingerprint
+        ),
+        same_page_personal_information_expected_contact_contract_fingerprint=(
+            args.same_page_personal_information_expected_contact_contract_fingerprint
+        ),
+        same_page_personal_information_expected_country_surface_fingerprint=(
+            args.same_page_personal_information_expected_country_surface_fingerprint
+        ),
+        same_page_personal_information_expected_state_surface_fingerprint=(
+            args.same_page_personal_information_expected_state_surface_fingerprint
+        ),
+        same_page_personal_information_report_out=(
+            args.same_page_personal_information_report_out
+        ),
+        same_page_personal_information_next_readiness_report_out=(
+            args.same_page_personal_information_next_readiness_report_out
+        ),
+        same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite=(
+            args.same_page_personal_information_allow_reviewed_turkish_ascii_name_overwrite
+        ),
+        same_page_country_keyboard_selection_report_out=(
+            args.same_page_country_keyboard_selection_report_out
+        ),
+        same_page_country_keyboard_expected_manifest_fingerprint=(
+            args.same_page_country_keyboard_expected_manifest_fingerprint
+        ),
+        same_page_country_keyboard_expected_contact_contract_fingerprint=(
+            args.same_page_country_keyboard_expected_contact_contract_fingerprint
+        ),
+        same_page_country_keyboard_expected_option_surface_fingerprint=(
+            args.same_page_country_keyboard_expected_option_surface_fingerprint
+        ),
+        same_page_country_dom_contract_out=(
+            args.same_page_country_dom_contract_out
+        ),
+        same_page_country_dom_expected_manifest_fingerprint=(
+            args.same_page_country_dom_expected_manifest_fingerprint
+        ),
+        same_page_country_dom_expected_contact_contract_fingerprint=(
+            args.same_page_country_dom_expected_contact_contract_fingerprint
+        ),
+        same_page_country_dom_expected_option_surface_fingerprint=(
+            args.same_page_country_dom_expected_option_surface_fingerprint
+        ),
+        same_page_state_dom_contract_out=(
+            args.same_page_state_dom_contract_out
+        ),
+        same_page_state_dom_expected_manifest_fingerprint=(
+            args.same_page_state_dom_expected_manifest_fingerprint
+        ),
+        same_page_state_dom_expected_contact_contract_fingerprint=(
+            args.same_page_state_dom_expected_contact_contract_fingerprint
+        ),
+        same_page_state_after_country_contract_out=(
+            args.same_page_state_after_country_contract_out
+        ),
+        same_page_state_after_country_expected_manifest_fingerprint=(
+            args.same_page_state_after_country_expected_manifest_fingerprint
+        ),
+        same_page_state_after_country_expected_contact_contract_fingerprint=(
+            args.same_page_state_after_country_expected_contact_contract_fingerprint
+        ),
+        same_page_state_after_country_expected_option_surface_fingerprint=(
+            args.same_page_state_after_country_expected_option_surface_fingerprint
+        ),
+        same_page_state_selection_report_out=(
+            args.same_page_state_selection_report_out
+        ),
+        same_page_state_selection_expected_manifest_fingerprint=(
+            args.same_page_state_selection_expected_manifest_fingerprint
+        ),
+        same_page_state_selection_expected_contact_contract_fingerprint=(
+            args.same_page_state_selection_expected_contact_contract_fingerprint
+        ),
+        same_page_state_selection_expected_country_surface_fingerprint=(
+            args.same_page_state_selection_expected_country_surface_fingerprint
+        ),
+        same_page_state_selection_expected_contract_fingerprint=(
+            args.same_page_state_selection_expected_contract_fingerprint
+        ),
+        same_page_state_selection_expected_option_surface_fingerprint=(
+            args.same_page_state_selection_expected_option_surface_fingerprint
+        ),
+        same_page_state_selection_reviewed_label=(
+            args.same_page_state_selection_reviewed_label
+        ),
         timeout_seconds=args.timeout_seconds,
     ))
     print(json.dumps({
         "verification_seen": report.get("verification_seen") is True,
         "verification_completed": report.get("verification_completed") is True,
+        "verification_basis": report.get("verification_basis", ""),
+        "authenticated_form_observed": report.get("authenticated_form_observed") is True,
         "visible_control_count": report.get("visible_control_count", 0),
         "storage_state_exported": report.get("storage_state_exported") is True,
+        "canonical_postlogin_url_exported": report.get("canonical_postlogin_url_exported") is True,
+        "same_page_manifest_exported": report.get("same_page_manifest_exported") is True,
+        "same_page_manifest_fingerprint": report.get("same_page_manifest_fingerprint", ""),
+        "same_page_manifest_visible_control_count": report.get("same_page_manifest_visible_control_count", 0),
+        "same_page_manifest_file_control_count": report.get("same_page_manifest_file_control_count", 0),
+        "same_page_safe_fill_executed": report.get("same_page_safe_fill_executed") is True,
+        "same_page_safe_fill_write_attempts": report.get("same_page_safe_fill_write_attempts", 0),
+        "same_page_contact_address_contract_exported": (
+            report.get("same_page_contact_address_contract_exported") is True
+        ),
+        "same_page_contact_address_contract_fingerprint": (
+            report.get("same_page_contact_address_contract_fingerprint", "")
+        ),
+        "same_page_country_combobox_probe_exported": (
+            report.get("same_page_country_combobox_probe_exported") is True
+        ),
+        "same_page_country_option_surface_fingerprint": (
+            report.get("same_page_country_option_surface_fingerprint", "")
+        ),
+        "same_page_personal_information_safe_fill_executed": (
+            report.get("same_page_personal_information_safe_fill_executed") is True
+        ),
+        "same_page_personal_information_write_attempts": (
+            report.get("same_page_personal_information_write_attempts", 0)
+        ),
+        "same_page_personal_information_write_successes": (
+            report.get("same_page_personal_information_write_successes", 0)
+        ),
+        "same_page_country_keyboard_selection_executed": (
+            report.get("same_page_country_keyboard_selection_executed") is True
+        ),
+        "same_page_country_keyboard_selection_status": (
+            report.get("same_page_country_keyboard_selection_status", "")
+        ),
+        "same_page_country_dom_contract_exported": (
+            report.get("same_page_country_dom_contract_exported") is True
+        ),
+        "same_page_country_dom_contract_fingerprint": (
+            report.get("same_page_country_dom_contract_fingerprint", "")
+        ),
+        "same_page_state_dom_contract_exported": (
+            report.get("same_page_state_dom_contract_exported") is True
+        ),
+        "same_page_state_dom_contract_fingerprint": (
+            report.get("same_page_state_dom_contract_fingerprint", "")
+        ),
+        "same_page_state_after_country_contract_exported": (
+            report.get("same_page_state_after_country_contract_exported") is True
+        ),
+        "same_page_state_after_country_contract_fingerprint": (
+            report.get("same_page_state_after_country_contract_fingerprint", "")
+        ),
+        "same_page_state_selection_executed": (
+            report.get("same_page_state_selection_executed") is True
+        ),
+        "same_page_state_selection_status": (
+            report.get("same_page_state_selection_status", "")
+        ),
+        "same_page_safe_fill_write_successes": report.get("same_page_safe_fill_write_successes", 0),
+        "live_handoff_reuse_proven": report.get("live_handoff_reuse_proven") is True,
+        "live_handoff_strongest_reusable_scope": report.get("live_handoff_strongest_reusable_scope", ""),
+        "storage_indexed_db_database_count": report.get("storage_indexed_db_database_count", 0),
+        "storage_indexed_db_origin_count": report.get("storage_indexed_db_origin_count", 0),
+        "onetrust_consent_cookie_present": report.get("onetrust_consent_cookie_present") is True,
+        "onetrust_alert_closed_cookie_present": report.get("onetrust_alert_closed_cookie_present") is True,
+        "session_storage_exported": report.get("session_storage_exported") is True,
+        "session_storage_entry_count": report.get("session_storage_entry_count", 0),
+        "session_storage_values_exposed": False,
         "raw_values_exposed": report.get("raw_values_exposed") is True,
     }, sort_keys=True))
     return 0

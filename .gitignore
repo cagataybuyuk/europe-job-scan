@@ -31,3 +31,6 @@ artifacts/
 .vscode/
 .idea/
 google_native/apps_script_zero_cost/EjsDeploymentV1.gs
+
+# EJS local private candidate profile
+.ejs-local/

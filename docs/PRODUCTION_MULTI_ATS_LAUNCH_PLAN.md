@@ -1,7 +1,7 @@
 # Europe Job Scan — Multi-ATS Production Launch Plan
 
 Status: approved target scope, implementation in progress  
-Plan version: 2026-09-18 / v2.0
+Plan version: 2026-10-01 / v2.1 (AWLI entry-strategy planning)
 
 ## Launch objective
 
@@ -80,6 +80,22 @@ Each adapter publishes a capability manifest containing at minimum:
 
 Unknown hosts or ambiguous fingerprints route to `human_review`, not to a generic click strategy.
 
+### 2a. Application entry strategy — AWLI fast-path
+
+Apply with LinkedIn (AWLI) is a planned application-entry/prefill strategy on the underlying ATS, distinct from LinkedIn Easy Apply and LinkedIn external-apply source resolution. Evaluate it as the primary/fast-path when the exact target offers it, the LinkedIn session is ready, and the route has reviewed live evidence. Keep the native ATS authenticated/guest flow as fallback. Availability is employer/target-specific; detection alone grants no capability or runtime authority.
+
+LinkedIn is never the source-of-truth. Inspect the returned ATS form and verify every AWLI-prefilled field against the canonical candidate profile and approved policy answers. Apply only reviewed normalization/corrections with current safe-fill authority and readback; unresolved mismatches, missing provenance, locked incorrect fields or unknown required answers route to `human_review`. Never import AWLI values into the canonical profile automatically.
+
+Missing/expired LinkedIn sessions, MFA, CAPTCHA/security challenges, unexpected authorization scopes or return-target drift fail closed. No automated credential entry, challenge bypass or retry loop is introduced. Use native fallback only after a fresh inspection proves a clean, reviewed target and no ambiguous application side effects; otherwise stop for `human_review`. Preserve opportunity/application identity and dedupe across route changes.
+
+AWLI accelerates entry/prefill only. Screening, work-right/sponsorship/salary/consent policy, approved CV selection/upload verification, remaining steps, SUBMIT-1, adapter-scoped submit canary, confirmation reconciliation and history remain the underlying ATS adapter's responsibility. AWLI success or a Submit click is never Applied/Confirmed evidence.
+
+Planned sequence:
+
+`resolve -> ATS classify -> entry inspection -> reviewed AWLI + ready session OR native fallback -> returned ATS manifest -> canonical-profile verification -> adapter preparation -> SUBMIT-1 -> submit -> confirmation -> history`
+
+AWLI is not implemented/live-proven yet and does not change the dated capability baseline. Route promotion requires the [MacBook Air M2 feasibility spike](ADP_AWLI_FEASIBILITY_SPIKE.md); no OTP removal, session persistence or time saving is assumed.
+
 ### 3. Canonical application schema
 
 All adapters map observed fields to platform-independent canonical fields. Verified user facts, approved policy answers and approved document artifacts are resolved before adapter mutation.
@@ -131,11 +147,15 @@ No external browser authority change is introduced by L0.
 
 ### L1 — Finish ADP vertical
 
-Complete the current ADP path end to end:
+First run the bounded AWLI feasibility spike on the personal MacBook Air M2 before committing further engineering effort to native entry/session reuse. Compare native and AWLI DOM/screen sequences to the same stable Personal Information boundary, then decide whether AWLI earns primary-route implementation. Retain the existing native evidence and fallback; ADP remains the reference adapter.
+
+Complete the selected reviewed entry path and the shared ADP application flow end to end:
 
 `entry -> cookie policy -> Apply -> identity/phone -> email verification boundary -> verified session -> application manifest -> safe answers -> CV -> pre-submit -> Submit canary -> confirmation`
 
-ADP becomes the reference implementation for adapter evidence and fail-closed behavior.
+AWLI candidate path: `entry -> cookie policy -> reviewed Apply with LinkedIn -> session/authorization boundary -> returned ADP application manifest -> canonical-profile verification -> shared ADP safe answers/CV/pre-submit/submit/confirmation gates`.
+
+Spike status and acceptance criteria: `ADP_AWLI_FEASIBILITY_SPIKE.md`. Native verified-session reuse remains unproven; a local AWLI result would not prove GitHub-runner readiness.
 
 ### L2 — SmartRecruiters production vertical
 
@@ -196,7 +216,7 @@ Release sequence:
 
 ## Estimated active work
 
-Planning estimate for the current baseline and current collaboration model:
+Historical planning estimate for the 2026-09-18 baseline and collaboration model (excludes the new AWLI spike; re-estimate L1 after evidence, with no assumed savings):
 
 | Phase | Active work estimate |
 | --- | ---: |

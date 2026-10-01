@@ -10,6 +10,17 @@ $AdpHelperRelativePaths = @(
   '../../scripts/set_adp_base_profile.ps1',
   '../../scripts/set_adp_profile_v2_extension.ps1',
   '../../scripts/bootstrap_adp_verified_session.ps1',
+  '../../scripts/probe_adp_persistent_profile.ps1',
+  '../../scripts/probe_adp_live_handoff.ps1',
+  '../../scripts/probe_adp_same_page_manifest.ps1',
+  '../../scripts/probe_adp_same_page_safe_fill.ps1',
+  '../../scripts/probe_adp_same_page_contact_address.ps1',
+  '../../scripts/probe_adp_same_page_country_combobox.ps1',
+  '../../scripts/probe_adp_same_page_personal_information_safe_fill.ps1',
+  '../../scripts/probe_adp_same_page_country_keyboard_selection.ps1',
+  '../../scripts/probe_adp_same_page_country_dom_contract.ps1',
+  '../../scripts/probe_adp_same_page_state_dom_contract.ps1',
+  '../../scripts/probe_adp_same_page_state_after_country.ps1',
   '../../scripts/lib/invoke_native_utf8_stdin.ps1'
 )
 foreach ($RelativePath in $AdpHelperRelativePaths) {
@@ -45,6 +56,309 @@ if ($VerifiedSessionHelperText -match 'Get-Command python -CommandType Applicati
   throw 'Verified-session helper must not hard-bind to the Windows Store python alias'
 }
 Write-Host 'PASS: ADP verified-session helper resolves a real Python 3 launcher fail-closed'
+
+$PersistentProbeHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_persistent_profile.ps1')
+foreach ($RequiredSnippet in @(
+  'ejs.services.adp_persistent_profile_probe',
+  '--user-data-dir $profilePath',
+  'No GitHub secret was changed'
+)) {
+  if ($PersistentProbeHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Persistent-profile helper is missing diagnostic contract: $RequiredSnippet"
+  }
+}
+if ($PersistentProbeHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Persistent-profile diagnostic must never provision GitHub secrets'
+}
+Write-Host 'PASS: ADP persistent-profile helper is diagnostic-only and secret-write-free'
+
+$LiveHandoffHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_live_handoff.ps1')
+foreach ($RequiredSnippet in @(
+  '--live-handoff-report-out $handoffReportPath',
+  'No GitHub secret was changed',
+  'same-context, same-browser-process, and separate-browser scopes'
+)) {
+  if ($LiveHandoffHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Live-handoff helper is missing diagnostic contract: $RequiredSnippet"
+  }
+}
+if ($LiveHandoffHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Live-handoff diagnostic must never provision GitHub secrets'
+}
+Write-Host 'PASS: ADP live-handoff helper is diagnostic-only and secret-write-free'
+
+$SamePageManifestHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_manifest.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-manifest-out $manifestPath',
+  'No GitHub secret was changed',
+  'do not edit fields and do not click Next'
+)) {
+  if ($SamePageManifestHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Same-page manifest helper is missing diagnostic contract: $RequiredSnippet"
+  }
+}
+if ($SamePageManifestHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Same-page manifest diagnostic must never provision GitHub secrets'
+}
+if ($SamePageManifestHelperText -match '\.click\(|\.fill\(|set_input_files|select_option') {
+  throw 'Same-page manifest helper must not contain browser mutation calls'
+}
+Write-Host 'PASS: ADP same-page manifest helper is read-only and secret-write-free'
+
+$SamePageSafeFillHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_safe_fill.ps1')
+foreach ($RequiredSnippet in @(
+  "'--same-page-safe-fill-profile'",
+  "'--same-page-safe-fill-expected-manifest-fingerprint'",
+  "'--same-page-safe-fill-report-out'",
+  '--same-page-safe-fill-allow-reviewed-turkish-ascii-name-overwrite',
+  'A non-empty browser value that differs from your input will block instead of being overwritten.',
+  'No navigation, phone/address, upload, or submit action was performed.'
+)) {
+  if ($SamePageSafeFillHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Same-page safe-fill helper is missing reviewed contract: $RequiredSnippet"
+  }
+}
+if ($SamePageSafeFillHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Same-page safe-fill helper must not provision GitHub secrets'
+}
+if ($SamePageSafeFillHelperText -match 'set_input_files|\.click\(|select_option') {
+  throw 'Same-page safe-fill helper must not contain navigation/upload/select browser calls'
+}
+Write-Host 'PASS: ADP same-page safe-fill helper stays inside reviewed local authority'
+
+$SamePageContactAddressHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_contact_address.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-contact-address-contract-out $contractPath',
+  '--same-page-contact-address-expected-manifest-fingerprint $ExpectedManifestFingerprint',
+  'No candidate field value will be read or written by this probe.'
+)) {
+  if ($SamePageContactAddressHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Same-page contact/address helper is missing read-only contract: $RequiredSnippet"
+  }
+}
+if ($SamePageContactAddressHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Same-page contact/address helper must not provision GitHub secrets'
+}
+if ($SamePageContactAddressHelperText -match 'set_input_files|\.click\(|\.fill\(|select_option|input_value\(') {
+  throw 'Same-page contact/address helper must not contain browser mutation or value-read calls'
+}
+Write-Host 'PASS: ADP same-page contact/address helper is read-only and value-free'
+
+$SamePageCountryHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_country_combobox.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-country-combobox-probe-out $probePath',
+  '--same-page-country-expected-manifest-fingerprint $ExpectedManifestFingerprint',
+  '--same-page-country-expected-contact-contract-fingerprint $ExpectedContactContractFingerprint',
+  'will not select an option or write any candidate value'
+)) {
+  if ($SamePageCountryHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Same-page Country helper is missing one-click read-only contract: $RequiredSnippet"
+  }
+}
+if ($SamePageCountryHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Same-page Country helper must not provision GitHub secrets'
+}
+if ($SamePageCountryHelperText -match 'set_input_files|\.fill\(|select_option|input_value\(') {
+  throw 'Same-page Country helper must not contain browser mutation/value-read calls'
+}
+Write-Host 'PASS: ADP same-page Country helper stays one-click and selection-free'
+
+$PersonalInfoHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_personal_information_safe_fill.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-personal-information-profile',
+  '--same-page-personal-information-expected-manifest-fingerprint',
+  '--same-page-personal-information-expected-contact-contract-fingerprint',
+  '--same-page-personal-information-expected-country-surface-fingerprint',
+  '--same-page-personal-information-report-out',
+  'Home Phone, consent, Next, upload and submit remain disabled.',
+  'Raw values will not be printed in the result.'
+)) {
+  if ($PersonalInfoHelperText -notlike ('*' + $RequiredSnippet + '*')) {
+    throw "Personal Information safe-fill helper is missing reviewed contract: $RequiredSnippet"
+  }
+}
+if ($PersonalInfoHelperText -match 'Invoke-GhSecretSetUtf8|gh secret') {
+  throw 'Personal Information safe-fill helper must not provision GitHub secrets'
+}
+if ($PersonalInfoHelperText -match 'set_input_files') {
+  throw 'Personal Information safe-fill helper must not contain upload calls'
+}
+Write-Host 'PASS: ADP Personal Information helper stays local, bounded and submit-free'
+
+foreach ($RequiredValidationRegex in @(
+  "'^[^ @]+@[^ @]+[.][^ @]+$'",
+  "'^[0-9]{4,20}$'",
+  "'^5[0-9]{9}$'"
+)) {
+  if (-not $PersonalInfoHelperText.Contains($RequiredValidationRegex)) {
+    throw "Personal Information helper is missing preserved validation regex: $RequiredValidationRegex"
+  }
+}
+foreach ($BrokenValidationRegex in @(
+  "'^[^s@]+@[^s@]+.[^s@]+$'",
+  "'^d{4,20}$'",
+  "'^5d{9}$'"
+)) {
+  if ($PersonalInfoHelperText.Contains($BrokenValidationRegex)) {
+    throw "Personal Information helper contains escape-damaged validation regex: $BrokenValidationRegex"
+  }
+}
+Write-Host 'PASS: ADP Personal Information local validators reject escape-damaged regexes'
+
+$CountryKeyboardHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_country_keyboard_selection.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-country-keyboard-selection-report-out',
+  '--same-page-country-keyboard-expected-manifest-fingerprint',
+  '--same-page-country-keyboard-expected-contact-contract-fingerprint',
+  '--same-page-country-keyboard-expected-option-surface-fingerprint',
+  'Phone, address text, consent, Next, upload and submit remain disabled.'
+)) {
+  if (-not $CountryKeyboardHelperText.Contains($RequiredSnippet)) {
+    throw "Country keyboard helper is missing reviewed contract: $RequiredSnippet"
+  }
+}
+if ($CountryKeyboardHelperText -match 'Invoke-GhSecretSetUtf8|gh secret|set_input_files') {
+  throw 'Country keyboard helper must not provision secrets or upload files'
+}
+Write-Host 'PASS: ADP Country keyboard helper stays isolated and submit-free'
+
+$CountryDomHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_country_dom_contract.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-country-dom-contract-out',
+  '--same-page-country-dom-expected-manifest-fingerprint',
+  '--same-page-country-dom-expected-contact-contract-fingerprint',
+  '--same-page-country-dom-expected-option-surface-fingerprint',
+  'will not select an option or read candidate values'
+)) {
+  if (-not $CountryDomHelperText.Contains($RequiredSnippet)) {
+    throw "Country DOM helper is missing reviewed read-only contract: $RequiredSnippet"
+  }
+}
+if ($CountryDomHelperText -match 'Invoke-GhSecretSetUtf8|gh secret|set_input_files') {
+  throw 'Country DOM helper must not provision secrets or upload files'
+}
+Write-Host 'PASS: ADP Country DOM helper stays read-only and value-free'
+
+$StateDomHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_state_dom_contract.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-state-dom-contract-out',
+  '--same-page-state-dom-expected-manifest-fingerprint',
+  '--same-page-state-dom-expected-contact-contract-fingerprint',
+  'will not select State, read candidate values, or modify any candidate field'
+)) {
+  if (-not $StateDomHelperText.Contains($RequiredSnippet)) {
+    throw "State DOM helper is missing reviewed read-only contract: $RequiredSnippet"
+  }
+}
+if ($StateDomHelperText -match 'Invoke-GhSecretSetUtf8|gh secret|set_input_files') {
+  throw 'State DOM helper must not provision secrets or upload files'
+}
+Write-Host 'PASS: ADP State DOM helper stays read-only and value-free'
+
+$StateAfterCountryHelperText = Get-Content -Raw (Join-Path $PSScriptRoot '../../scripts/probe_adp_same_page_state_after_country.ps1')
+foreach ($RequiredSnippet in @(
+  '--same-page-state-after-country-contract-out',
+  '--same-page-state-after-country-expected-manifest-fingerprint',
+  '--same-page-state-after-country-expected-contact-contract-fingerprint',
+  '--same-page-state-after-country-expected-option-surface-fingerprint',
+  'Phone, address text, consent, Next, upload and submit remain disabled.'
+)) {
+  if (-not $StateAfterCountryHelperText.Contains($RequiredSnippet)) {
+    throw "State-after-Country helper is missing reviewed contract: $RequiredSnippet"
+  }
+}
+if ($StateAfterCountryHelperText -match 'Invoke-GhSecretSetUtf8|gh secret|set_input_files') {
+  throw 'State-after-Country helper must not provision secrets or upload files'
+}
+Write-Host 'PASS: ADP State-after-Country helper stays Country-only and State-read-only'
+
+# Execute the actual helper body with a fake native Python boundary. A failed
+# local replay must never call the secret writer; all temporary paths are cleaned.
+& {
+  $HelperAst = [System.Management.Automation.Language.Parser]::ParseInput($VerifiedSessionHelperText, [ref]$null, [ref]$null)
+  $TryStatement = $HelperAst.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.TryStatementAst] } | Select-Object -Last 1
+  $HelperBody = [scriptblock]::Create($TryStatement.Extent.Text)
+  function Resolve-EjsPython3 {
+    return [pscustomobject]@{ Source = 'Invoke-FakeAdpPython'; PrefixArgs = @(); DisplayName = 'fake python' }
+  }
+  function Invoke-FakeAdpPython {
+    $global:LASTEXITCODE = 0
+    if ($args -contains '-c') { return }
+    if ($args -contains 'ejs.services.adp_verified_session_bootstrap') {
+      if ($script:AdpTestMode -eq 'bootstrap-failure') { $global:LASTEXITCODE = 2; return }
+      [IO.File]::WriteAllText($statePath, '{"cookies":[],"origins":[]}')
+      [IO.File]::WriteAllText($postLoginUrlPath, 'https://workforcenow.adp.com/mascsr/applicant/mdf/recruitment/postLogin.html?cid=test&ccId=test&jobId=test')
+      if ($script:AdpTestMode -in @('session-replay-required', 'cookie-session-replay-required')) {
+        [IO.File]::WriteAllText($sessionStoragePath, '{"adp-session":"opaque-value"}')
+        [IO.File]::WriteAllText($reportPath, '{"visible_control_count":3,"session_storage_entry_count":1}')
+      } else {
+        [IO.File]::WriteAllText($reportPath, '{"visible_control_count":3}')
+      }
+      return
+    }
+    if ($args -contains 'ejs.services.adp_verified_session_inspector') {
+      if ($args -notcontains '--playwright-managed') { throw 'Local replay must use Playwright-managed fallback' }
+      if ($args -notcontains '--direct-reuse-url-file') { throw 'Local replay must receive captured canonical postLogin URL' }
+      if ($script:AdpTestMode -eq 'replay-failure') { $global:LASTEXITCODE = 2; return }
+      if ($script:AdpTestMode -in @('session-replay-required', 'cookie-session-replay-required')) {
+        if ($args -contains '--session-storage-json') {
+          [IO.File]::WriteAllText($sessionReuseReportPath, '{"inspector_status":"inspected","session_reused":true}')
+          $global:LASTEXITCODE = 0
+        } else {
+          $ErrorCode = if ($script:AdpTestMode -eq 'cookie-session-replay-required') {
+            'ADP_VERIFIED_SESSION_COOKIE_STATE_NOT_REUSED'
+          } else {
+            'ADP_VERIFIED_SESSION_NOT_RECOGNIZED_IDENTITY_SURFACE'
+          }
+          [IO.File]::WriteAllText($reuseReportPath, ('{"inspector_status":"blocked","error_code":"' + $ErrorCode + '","session_reused":false}'))
+          $global:LASTEXITCODE = 2
+        }
+        return
+      }
+      $ReportJson = if ($script:AdpTestMode -eq 'false-success') {
+        '{"inspector_status":"blocked","session_reused":false}'
+      } elseif ($script:AdpTestMode -eq 'canonical-url-success') {
+        '{"inspector_status":"inspected","session_reused":true,"reuse_route":"authenticated_postlogin_direct","direct_reuse_url_evidence":{"direct_reuse_url_source":"captured_post_verification"}}'
+      } else { '{"inspector_status":"inspected","session_reused":true}' }
+      [IO.File]::WriteAllText($reuseReportPath, $ReportJson)
+      return
+    }
+    throw 'Unexpected Python command'
+  }
+  function Invoke-GhSecretSetUtf8 { $script:AdpTestSecretWrites += 1 }
+  function Remove-EjsTempFile { param($Path, [switch]$Sensitive) Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+  $Repo = 'test/repo'
+  $Environment = 'test'
+  $ApplicationUrl = 'https://workforcenow.adp.com/test'
+  $ExpectedNavigationSurfaceFingerprint = 'a' * 64
+  $EntryOrdinal = 0
+  $TimeoutSeconds = 60
+  foreach ($Mode in @('bootstrap-failure', 'replay-failure', 'false-success', 'session-replay-required', 'cookie-session-replay-required', 'canonical-url-success', 'success')) {
+    $script:AdpTestMode = $Mode
+    $script:AdpTestSecretWrites = 0
+    $Prefix = Join-Path ([IO.Path]::GetTempPath()) ('ejs-adp-test-' + [Guid]::NewGuid().ToString('N'))
+    $statePath = $Prefix + '-state.json'
+    $reportPath = $Prefix + '-bootstrap.json'
+    $reuseReportPath = $Prefix + '-reuse.json'
+    $Caught = $false
+    try { & $HelperBody } catch {
+      $Caught = $true
+      if ($Mode -eq 'success') { throw }
+      if ($_.Exception.Message -notmatch 'bootstrap failed|not reusable|not proven|sessionStorage|canonical postLogin URL') { throw }
+    }
+    if ($Mode -ne 'success' -and -not $Caught) { throw "Failed open in $Mode" }
+    $ExpectedWrites = if ($Mode -eq 'success') { 1 } else { 0 }
+    if ($script:AdpTestSecretWrites -ne $ExpectedWrites) { throw "Incorrect secret write count for $Mode" }
+    $sessionStoragePath = "$statePath.session-storage.json"
+    $sessionReuseReportPath = "$reuseReportPath.session-storage.json"
+    $postLoginUrlPath = "$statePath.postlogin-url.txt"
+    foreach ($Path in @($statePath, $sessionStoragePath, $postLoginUrlPath, $reportPath, $reuseReportPath, $sessionReuseReportPath)) {
+      if (Test-Path -LiteralPath $Path) { throw "Temporary file not cleaned in $Mode" }
+    }
+  }
+  $global:LASTEXITCODE = 0
+}
+Write-Host 'PASS: local ADP replay gates secret provisioning and cleans temporary files'
 
 foreach ($RelativePath in @(
   '../../scripts/set_adp_base_profile.ps1',
