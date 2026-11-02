@@ -1,10 +1,10 @@
 """TEST-only negative and positive schema tests. Never dispatch a task."""
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, asdict, replace
 import json
 
 import pytest
 
-from ejs.services.offline_task_manifest import validate_manifest_json
+from ejs.services.offline_task_manifest import ManifestValidation, validate_manifest_json
 
 
 SHA = "a" * 40
@@ -135,3 +135,30 @@ def test_max_wall_time_bounded_and_review_only():
         report = validate({"max_wall_seconds": value})
         assert report.schema_valid
         assert report.execution_authorized is False
+
+
+def test_authorization_cannot_be_injected_in_result_construction_or_replace():
+    with pytest.raises(TypeError):
+        ManifestValidation(True, "schema_valid_not_authorized",
+                           execution_authorized=True)
+    with pytest.raises(TypeError):
+        ManifestValidation(True, "schema_valid_not_authorized",
+                           permitted_actions=("submit",))
+    result = validate()
+    with pytest.raises(TypeError):
+        replace(result, execution_authorized=True)
+    with pytest.raises(TypeError):
+        replace(result, permitted_actions=("submit",))
+    assert asdict(result) == {
+        "schema_valid": True, "reason": "schema_valid_not_authorized"
+    }
+
+
+def test_result_properties_cannot_be_force_assigned_or_shadowed():
+    result = validate()
+    with pytest.raises((AttributeError, FrozenInstanceError)):
+        object.__setattr__(result, "execution_authorized", True)
+    with pytest.raises((AttributeError, FrozenInstanceError)):
+        object.__setattr__(result, "permitted_actions", ("submit",))
+    assert result.execution_authorized is False
+    assert result.permitted_actions == ()
