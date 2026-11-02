@@ -85,35 +85,17 @@ def _visible_validation_surface(page) -> dict:
               && rect.width > 0 && rect.height > 0;
           };
           const nodes = Array.from(document.querySelectorAll(
-            '[role="alert"], [aria-invalid="true"], .vdl-form-group--error, .vdl-validation-error'
+            '[role="alert"], [aria-invalid="true"], .vdl-form-group--error, .vdl-validation-error, #addressErrorMessage'
           )).filter(visible).slice(0, 80);
           const structural = nodes.map((el, ordinal) => {
             const attr = (name) => el.getAttribute(name) || '';
-            const parent = el.parentElement;
-            const closestGroup = el.closest('.vdl-form-group, [data-component], [role="group"]');
-            const isMessageNode =
-              el.getAttribute('role') === 'alert'
-              || el.id === 'addressErrorMessage'
-              || el.classList.contains('label-error');
-            const messageText = isMessageNode
-              ? String(el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 240)
-              : '';
             return {
               ordinal,
               tag: el.tagName.toLowerCase(),
               id: attr('id'),
               role: attr('role'),
               aria_invalid: attr('aria-invalid'),
-              aria_live: attr('aria-live'),
-              aria_atomic: attr('aria-atomic'),
-              class_name: String(el.className || '').slice(0, 280),
-              parent_tag: parent ? parent.tagName.toLowerCase() : '',
-              parent_id: parent ? (parent.getAttribute('id') || '') : '',
-              parent_class_name: parent ? String(parent.className || '').slice(0, 280) : '',
-              closest_group_id: closestGroup ? (closestGroup.getAttribute('id') || '') : '',
-              closest_group_class_name: closestGroup ? String(closestGroup.className || '').slice(0, 280) : '',
-              validation_message_text: messageText,
-              text_read: isMessageNode,
+              text_read: false,
               value_read: false,
             };
           });
@@ -145,6 +127,19 @@ def _visible_validation_surface(page) -> dict:
           };
         }"""
     )
+
+
+def _validation_node_evidence(nodes: list[dict]) -> list[dict]:
+    """Expose reviewed structural tokens only; no message or arbitrary DOM text."""
+    reviewed_ids = {*REVIEWED_REQUIRED_IDS, "addressErrorMessage"}
+    return [{
+        "ordinal": index,
+        "id": node.get("id") if node.get("id") in reviewed_ids else "unreviewed",
+        "role": "alert" if node.get("role") == "alert" else "",
+        "aria_invalid": node.get("aria_invalid") == "true",
+        "text_read": False,
+        "value_read": False,
+    } for index, node in enumerate(nodes[:80])]
 
 
 def inspect_on_verified_page(
@@ -184,6 +179,15 @@ def inspect_on_verified_page(
     if binding.get("target_bound") is not True:
         raise PermissionError("ADP_NEXT_READINESS_TARGET_MISMATCH")
 
+    snapshot = _snapshot(
+        page,
+        requested_url=request.application_url,
+        timeout_ms=request.timeout_ms,
+        render_wait_ms=min(5_000, request.timeout_ms),
+    )
+    if snapshot.get("captcha_observed") is not False or snapshot.get("auth_observed") is not False:
+        raise PermissionError("ADP_NEXT_READINESS_AUTH_OR_CHALLENGE_BOUNDARY")
+
     required = _required_control_status(page)
     invalid_required = [
         row for row in required
@@ -194,12 +198,6 @@ def inspect_on_verified_page(
         )
     ]
 
-    snapshot = _snapshot(
-        page,
-        requested_url=request.application_url,
-        timeout_ms=request.timeout_ms,
-        render_wait_ms=min(5_000, request.timeout_ms),
-    )
     actions = snapshot.get("form", {}).get("actions", [])
     candidates = [
         action for action in actions
@@ -248,7 +246,7 @@ def inspect_on_verified_page(
         "explicit_address_error_count": int(validation.get("explicit_address_error_count", 0)),
         "blocking_issue_node_count": int(validation.get("blocking_issue_node_count", 0)),
         "informational_alert_count": int(validation.get("informational_alert_count", 0)),
-        "validation_structural_nodes": validation.get("structural_nodes", []),
+        "validation_structural_nodes": _validation_node_evidence(validation.get("structural_nodes", [])),
         "next_click_attempts": 0,
         "form_value_write_attempts": 0,
         "file_upload_attempts": 0,

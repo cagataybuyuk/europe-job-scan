@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import json
+import shutil
+import subprocess
 from unittest.mock import MagicMock, patch
 
 from ejs.services import adp_same_page_next_readiness_canary as canary
@@ -72,6 +75,8 @@ class NextReadinessCanaryTests(unittest.TestCase):
             canary,
             "_snapshot",
             return_value={
+                "auth_observed": False,
+                "captcha_observed": False,
                 "form": {
                     "actions": [{
                         "scope": "document",
@@ -123,6 +128,8 @@ class NextReadinessCanaryTests(unittest.TestCase):
             canary,
             "_snapshot",
             return_value={
+                "auth_observed": False,
+                "captcha_observed": False,
                 "form": {
                     "actions": [{
                         "scope": "document",
@@ -153,7 +160,8 @@ class NextReadinessCanaryTests(unittest.TestCase):
                     "ordinal": 0,
                     "id": "addressErrorMessage",
                     "role": "alert",
-                    "validation_message_text": "Correct the information in highlighted fields.",
+                    "validation_message_text": "SYNTHETIC_PRIVATE_MESSAGE",
+                    "parent_id": "SYNTHETIC_PRIVATE_ATTRIBUTE",
                     "text_read": True,
                     "value_read": False,
                 }],
@@ -163,6 +171,8 @@ class NextReadinessCanaryTests(unittest.TestCase):
 
         self.assertEqual(report["readiness_status"], "blocked")
         self.assertEqual(report["visible_issue_node_count"], 1)
+        self.assertNotIn("SYNTHETIC_PRIVATE", repr(report))
+        self.assertFalse(report["validation_structural_nodes"][0]["text_read"])
         self.assertEqual(report["next_click_attempts"], 0)
 
     def test_informational_alerts_do_not_block_readiness(self):
@@ -171,6 +181,8 @@ class NextReadinessCanaryTests(unittest.TestCase):
             canary,
             "_snapshot",
             return_value={
+                "auth_observed": False,
+                "captcha_observed": False,
                 "form": {
                     "actions": [{
                         "scope": "document",
@@ -216,6 +228,8 @@ class NextReadinessCanaryTests(unittest.TestCase):
             canary,
             "_snapshot",
             return_value={
+                "auth_observed": False,
+                "captcha_observed": False,
                 "form": {
                     "actions": [{
                         "scope": "document",
@@ -255,7 +269,7 @@ class NextReadinessCanaryTests(unittest.TestCase):
         with patch.object(canary, "_target_binding", return_value={"target_bound": True}), patch.object(
             canary,
             "_snapshot",
-            return_value={"form": {"actions": []}},
+            return_value={"auth_observed": False, "captcha_observed": False, "form": {"actions": []}},
         ):
             with self.assertRaisesRegex(PermissionError, "NEXT_ACTION_COUNT:0"):
                 inspect_on_verified_page(page, self.request(), safe_fill_report())
@@ -266,6 +280,67 @@ class NextReadinessCanaryTests(unittest.TestCase):
         report["safe_fill_status"] = "failed"
         with self.assertRaisesRegex(PermissionError, "REQUIRES_VERIFIED_SAFE_FILL"):
             inspect_on_verified_page(page, self.request(), report)
+
+    def test_auth_challenge_or_unknown_evidence_stops_before_control_inspection(self):
+        cases = [
+            {"auth_observed": True, "captcha_observed": False},
+            {"auth_observed": False, "captcha_observed": True},
+            {"auth_observed": False},
+            {"captcha_observed": False},
+            {"auth_observed": "false", "captcha_observed": False},
+        ]
+        for snapshot in cases:
+            with self.subTest(snapshot=snapshot):
+                page = self.make_page()
+                with patch.object(canary, "_target_binding", return_value={"target_bound": True}), patch.object(
+                    canary, "_snapshot", return_value=snapshot
+                ), patch.object(canary, "_required_control_status") as controls, patch.object(
+                    canary, "_visible_validation_surface"
+                ) as validation:
+                    with self.assertRaisesRegex(PermissionError, "AUTH_OR_CHALLENGE_BOUNDARY"):
+                        inspect_on_verified_page(page, self.request(), safe_fill_report())
+                controls.assert_not_called()
+                validation.assert_not_called()
+                page._test_next_button.click.assert_not_called()
+
+    def test_validation_evidence_discards_unreviewed_attributes(self):
+        nodes = [{"id": "SYNTHETIC_PRIVATE_ID", "role": "alert",
+                  "validation_message_text": "SYNTHETIC_PRIVATE_MESSAGE",
+                  "class_name": "SYNTHETIC_PRIVATE_CLASS", "text_read": True}]
+        result = canary._validation_node_evidence(nodes)
+        self.assertNotIn("SYNTHETIC_PRIVATE", repr(result))
+        self.assertEqual(result[0]["id"], "unreviewed")
+        self.assertFalse(result[0]["text_read"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node required for actual diagnostic JavaScript")
+    def test_actual_validation_script_never_reads_text_and_detects_plain_address_error(self):
+        page = MagicMock()
+
+        def evaluate(script):
+            harness = r"""
+                const el = {
+                    id: 'addressErrorMessage', tagName: 'DIV',
+                    classList: {contains: () => false},
+                    getAttribute: name => name === 'id' ? 'addressErrorMessage' : null,
+                    getBoundingClientRect: () => ({width: 100, height: 20}),
+                    get innerText() { throw new Error('private text must not be read'); }
+                };
+                globalThis.window = {getComputedStyle: () => ({display: 'block', visibility: 'visible'})};
+                globalThis.document = {querySelectorAll: selector =>
+                    selector.includes('#addressErrorMessage') ? [el] : []};
+            """
+            completed = subprocess.run(
+                [shutil.which("node"), "-e", harness + "console.log(JSON.stringify((" + script + ")()));"],
+                capture_output=True, text=True, timeout=10, check=True,
+            )
+            return json.loads(completed.stdout)
+
+        page.evaluate.side_effect = evaluate
+        result = canary._visible_validation_surface(page)
+        self.assertEqual(result["blocking_issue_node_count"], 1)
+        self.assertEqual(result["explicit_address_error_count"], 1)
+        self.assertNotIn("validation_message_text", repr(result))
+        self.assertFalse(result["structural_nodes"][0]["text_read"])
 
 
 if __name__ == "__main__":
