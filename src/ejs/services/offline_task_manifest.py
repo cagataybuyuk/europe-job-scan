@@ -23,14 +23,26 @@ _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _MAX_JSON_BYTES = 4096
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ManifestValidation:
-    """Structural feedback only; never a capability or permission token."""
+    """Structural feedback only; never a capability or permission token.
+
+    Deliberately omit authorization fields from the constructor: even a future
+    caller cannot instantiate a positive authorization through this type.
+    """
 
     schema_valid: bool
     reason: str
-    execution_authorized: bool = False
-    permitted_actions: tuple[str, ...] = ()
+
+    @property
+    def execution_authorized(self) -> bool:
+        """Always false; no execution-authorizing state is representable."""
+        return False
+
+    @property
+    def permitted_actions(self) -> tuple[str, ...]:
+        """Always empty; validation cannot grant permissions."""
+        return ()
 
 
 def _deny(reason: str) -> ManifestValidation:
