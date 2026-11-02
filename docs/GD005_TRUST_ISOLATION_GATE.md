@@ -1,6 +1,6 @@
 # GD-005 next gate: independent approval and isolation
 
-Status: PROPOSAL / NO EXECUTOR AUTHORITY. Date: 2026-11-02.
+Status: OWNER-SELECTED DESIGN / INDEPENDENT PROOF REVIEW PENDING / NO EXECUTOR AUTHORITY. Date: 2026-11-02.
 References: Issues #65/#68, design PR #66, merged validation-only PR #67.
 This document supersedes no governance decision and configures no service.
 
@@ -26,11 +26,12 @@ This document supersedes no governance decision and configures no service.
   dispatch, container testing and trusted approval implementation are not yet
   approved. Existing human-started Mac checks and ordinary CI remain Lane 0.
 
-## Recommended publication design — owner decision required
+## Selected publication design — owner decision 2026-11-02
 
 Use a separately controlled governance publication store, outside the target
-source commit and its PR. A separate protected GitHub control repository is the
-concrete candidate; no repository is created or selected by this proposal.
+source commit and its PR. The owner selected a separate protected GitHub control repository and named
+bykcgty as independent approver. The implementation checkpoint below records
+what has actually been configured; task publication is still unproven.
 
 1. Owner identifies the actual independent approver and confirms they can review
    requests without the requesting code writer approving their own request.
@@ -117,10 +118,10 @@ No hostile test deliberately accesses real secrets or creates unbounded load.
 4. Only after both gates pass and a separate executor implementation is approved
    may a fixed-task execution PR be prepared. It still grants no ATS/PROD rights.
 
-Current result: trust publication UNSELECTED / isolation UNPROVEN / automatic
-execution BLOCKED. Next single decision: approve or revise the proposed separate
-control-store topology and identify its real approver/platform; no runner code
-is authorized by this document. Existing CI/manual fallback can continue.
+Current result: control-store topology SELECTED / independent review PENDING /
+isolation UNPROVEN / automatic task execution BLOCKED. Owner authorized the
+separate store and preparation of a fixed synthetic proof, not an EJS executor.
+Existing CI/manual fallback can continue. See the external reviewer checkpoint.
 
 ## Resource and evidence checkpoint
 
@@ -135,3 +136,31 @@ Official technical references (design support, not account/runtime proof):
 - GitHub deployment environment limits: https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments
 - Docker runtime controls: https://docs.docker.com/reference/cli/docker/container/run/
 - Docker none network semantics: https://docs.docker.com/engine/network/drivers/none/
+
+
+## Owner-authorized preparation checkpoint — 2026-11-02
+
+- User approved this topology, selected bykcgty and authorized routine EJS work
+  without repeat approval prompts; actual independent review remains required.
+- Control store created: https://github.com/cagataybuyuk/ejs-test-control .
+  Documentation-only bootstrap main `9988a31ddc733c293b368af7b3847b80a58b245b`.
+- Control ruleset 26380660 active: protected main, no bypass/force-push/deletion,
+  required code-owner + last-push approval and Actions-bound control-static.
+- **Pending:** bykcgty collaborator invitation (write). GitHub CODEOWNERS errors
+  currently says unknown owner/insufficient write access until acceptance.
+  Therefore do not mark the approval root ready or independent review passed.
+- Fixed synthetic proof is control PR #1, not an EJS task runner:
+  https://github.com/cagataybuyuk/ejs-test-control/pull/1 . PR CI runs only local
+  contract tests; real proof is manual-only after independently reviewed merge
+  to protected control main. No source/task manifest input is accepted.
+- EJS ruleset 26358158: after verifying all six actual checks originate from
+  GitHub Actions integration 15368, the two missing source bindings were added.
+  Fresh readback confirms all six now bind 15368; all previous review/no-bypass
+  controls preserved. Earlier unbound-check observation is historical.
+- GD-005 append records this owner decision. Docker was not installed on the
+  Mac, no container/workflow proof was dispatched, no task record published,
+  and no employer/operational data touched. Public standard Linux runner only;
+  no larger runner, cache/artifact upload or new paid resource configured.
+- Next external action: bykcgty accepts the control-store invitation and performs
+  a genuine review of control PR #1. Neither owner authorization nor a static
+  CI pass can substitute. No additional owner approval request is needed.
