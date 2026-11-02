@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - 'src/ejs/services/adp_verified_session_bootstrap.py'
+      - 'src/ejs/services/adp_same_page_state_selection_canary.py'
+      - 'src/ejs/services/adp_same_page_next_readiness_canary.py'
+      - 'src/ejs/services/adp_entry_autopilot.py'
       - 'src/ejs/services/adp_verified_session_inspector.py'
       - 'src/ejs/services/adp_persistent_profile_probe.py'
       - 'src/ejs/services/adp_same_page_manifest.py'
@@ -20,6 +23,8 @@ on:
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
       - 'scripts/probe_adp_same_page_manifest.ps1'
+      - 'scripts/probe_adp_same_page_state_selection.ps1'
+      - 'scripts/probe_adp_same_page_next_readiness.ps1'
       - 'scripts/probe_adp_same_page_safe_fill.ps1'
       - 'scripts/probe_adp_same_page_contact_address.ps1'
       - 'scripts/probe_adp_same_page_country_combobox.ps1'
@@ -31,6 +36,9 @@ on:
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
+      - 'tests/unit/test_adp_same_page_state_selection_canary.py'
+      - 'tests/unit/test_adp_same_page_next_readiness_canary.py'
+      - 'tests/unit/test_adp_entry_autopilot.py'
       - 'tests/unit/test_adp_same_page_manifest.py'
       - 'tests/unit/test_adp_same_page_safe_fill.py'
       - 'tests/unit/test_adp_same_page_contact_address_contract.py'
@@ -47,6 +55,9 @@ on:
     branches: [main]
     paths:
       - 'src/ejs/services/adp_verified_session_bootstrap.py'
+      - 'src/ejs/services/adp_same_page_state_selection_canary.py'
+      - 'src/ejs/services/adp_same_page_next_readiness_canary.py'
+      - 'src/ejs/services/adp_entry_autopilot.py'
       - 'src/ejs/services/adp_verified_session_inspector.py'
       - 'src/ejs/services/adp_persistent_profile_probe.py'
       - 'src/ejs/services/adp_same_page_manifest.py'
@@ -63,6 +74,8 @@ on:
       - 'scripts/probe_adp_persistent_profile.ps1'
       - 'scripts/probe_adp_live_handoff.ps1'
       - 'scripts/probe_adp_same_page_manifest.ps1'
+      - 'scripts/probe_adp_same_page_state_selection.ps1'
+      - 'scripts/probe_adp_same_page_next_readiness.ps1'
       - 'scripts/probe_adp_same_page_safe_fill.ps1'
       - 'scripts/probe_adp_same_page_contact_address.ps1'
       - 'scripts/probe_adp_same_page_country_combobox.ps1'
@@ -74,6 +87,9 @@ on:
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
+      - 'tests/unit/test_adp_same_page_state_selection_canary.py'
+      - 'tests/unit/test_adp_same_page_next_readiness_canary.py'
+      - 'tests/unit/test_adp_entry_autopilot.py'
       - 'tests/unit/test_adp_same_page_manifest.py'
       - 'tests/unit/test_adp_same_page_safe_fill.py'
       - 'tests/unit/test_adp_same_page_contact_address_contract.py'
@@ -101,6 +117,9 @@ jobs:
       - name: Run verified-session unit tests
         run: |
           python -m unittest discover -s tests/unit -p 'test_adp_verified_session.py' -v
+          python -m unittest discover -s tests/unit -p 'test_adp_same_page_state_selection_canary.py' -v
+          python -m unittest discover -s tests/unit -p 'test_adp_same_page_next_readiness_canary.py' -v
+          python -m unittest discover -s tests/unit -p 'test_adp_entry_autopilot.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_manifest.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_safe_fill.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_contact_address_contract.py' -v
