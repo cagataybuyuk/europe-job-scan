@@ -18,7 +18,10 @@ class Provider:
     network: bool = False
 
     def __post_init__(self):
-        object.__setattr__(self, "capabilities", frozenset(self.capabilities))
+        if type(self.capabilities) in {list, tuple, set, frozenset} and all(
+            type(c) is str for c in self.capabilities
+        ):
+            object.__setattr__(self, "capabilities", frozenset(self.capabilities))
 
 
 @dataclass(frozen=True)
@@ -34,8 +37,14 @@ class Request:
     test_evidence: tuple[str, ...] = ()
 
     def __post_init__(self):
-        object.__setattr__(self, "required_capabilities", frozenset(self.required_capabilities))
-        object.__setattr__(self, "test_evidence", tuple(self.test_evidence))
+        if type(self.required_capabilities) in {list, tuple, set, frozenset} and all(
+            type(c) is str for c in self.required_capabilities
+        ):
+            object.__setattr__(self, "required_capabilities", frozenset(self.required_capabilities))
+        if type(self.test_evidence) in {list, tuple} and all(
+            type(e) is str for e in self.test_evidence
+        ):
+            object.__setattr__(self, "test_evidence", tuple(self.test_evidence))
 
 
 @dataclass(frozen=True)
@@ -70,6 +79,30 @@ def route(request: Request, providers: tuple[Provider, ...] = ()) -> Decision:
     The checkpoint commits to the complete routing input and decision, including
     evidence, availability and capabilities; it is not proof tests actually passed.
     """
+    # Reject malformed Python/JSON-derived metadata before regex, hashing or
+    # membership checks. Do not stringify arbitrary objects or echo their content.
+    valid_request = type(request) is Request and all(
+        type(getattr(request, field)) is str for field in (
+            "task_id", "environment", "approval_ref", "risk_level", "quota_band",
+            "network_requirement", "source_sha",
+        )
+    ) and type(request.required_capabilities) is frozenset and all(
+        type(c) is str for c in request.required_capabilities
+    ) and type(request.test_evidence) is tuple and all(
+        type(e) is str for e in request.test_evidence
+    )
+    valid_providers = type(providers) in {tuple, list} and all(
+        type(p) is Provider and type(p.name) is str
+        and type(p.available) is bool and type(p.network) is bool
+        and type(p.capabilities) is frozenset
+        and all(type(c) is str for c in p.capabilities)
+        for p in providers
+    )
+    if not valid_request or not valid_providers:
+        reason = "invalid_input_schema"
+        # Rejected arbitrary objects cannot safely form checkpoint evidence.
+        digest = hashlib.sha256(b"gd005:v1:invalid_input_schema").hexdigest()
+        return Decision("human_review", None, reason, "sha256:" + digest)
     providers = tuple(providers)
     reason = None
     if request.environment != "TEST":

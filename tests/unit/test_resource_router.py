@@ -68,3 +68,23 @@ def test_checkpoint_is_immutable_idempotent_and_complete():
     with pytest.raises(FrozenInstanceError): d.provider = 'paid_api'
     assert isinstance(r.required_capabilities,frozenset) and isinstance(r.test_evidence,tuple)
     assert not d.final_submit and not d.permitted_actions
+
+@pytest.mark.parametrize('change', [dict(task_id=None), dict(approval_ref=1),
+    dict(risk_level=[]), dict(quota_band={}), dict(network_requirement=False),
+    dict(source_sha=None), dict(required_capabilities=None),
+    dict(required_capabilities='python_tests'),dict(required_capabilities=[1]),
+    dict(test_evidence=None),dict(test_evidence='passed'),dict(test_evidence=[{}])])
+def test_malformed_request_requires_human_review(change):
+    d = route(replace(BASE, **change), (CI,))
+    assert d.provider == 'human_review' and d.stop_reason == 'invalid_input_schema'
+    assert not d.permitted_actions and not d.final_submit
+
+@pytest.mark.parametrize('providers', [None, 'github_ci', [None], [dict(name='github_ci')],
+    [replace(CI, name=None)], [replace(CI, capabilities=None)],
+    [replace(CI, capabilities=[1])], [replace(CI, capabilities='python_tests')]])
+def test_malformed_provider_requires_human_review(providers):
+    assert route(BASE, providers).stop_reason == 'invalid_input_schema'
+
+@pytest.mark.parametrize('invalid_request', [None, {}, 'TEST'])
+def test_malformed_request_object(invalid_request):
+    assert route(invalid_request, (CI,)).provider == 'human_review'

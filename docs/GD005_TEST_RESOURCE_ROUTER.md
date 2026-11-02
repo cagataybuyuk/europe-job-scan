@@ -56,3 +56,14 @@ Implementation source is based on main `63594d1`; exact implementation commit
 is the local TEST branch HEAD. Blocker for remote validation: branch is local,
 and GitHub CLI is not authenticated. Next action: review and publish a separate
 TEST implementation draft PR, then read actual CI checks for its exact SHA.
+
+## Review correction — 2026-11-02
+
+Review found malformed field types (for example a null task ID, list-valued
+risk, or null provider capabilities) could raise before returning human_review.
+The router now rejects malformed input schemas before matching or serializing.
+Such rejected inputs receive a fixed rejection checkpoint, not a fingerprint of
+untrusted arbitrary objects; that reference must not be used as task identity.
+Valid requests retain full deterministic checkpoints. No malformed content is
+stringified or returned. Added 23 regression cases: router suite now 66 cases;
+local core regression 209 passed, secret scan and authority boundary passed.
