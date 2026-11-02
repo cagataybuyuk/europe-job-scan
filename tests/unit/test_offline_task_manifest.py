@@ -40,8 +40,11 @@ def test_fixed_test_catalog_is_schema_valid_but_never_authorized(task):
     result = validate({"task_id": task})
     assert result.schema_valid and result.reason == "schema_valid_not_authorized"
     assert result.execution_authorized is False and result.permitted_actions == ()
-    with pytest.raises(FrozenInstanceError):
+    # Slotted frozen dataclasses may raise TypeError rather than
+    # FrozenInstanceError on a property assignment (Python 3.12).
+    with pytest.raises((FrozenInstanceError, AttributeError, TypeError)):
         result.execution_authorized = True
+    assert result.execution_authorized is False
 
 
 @pytest.mark.parametrize("field,value", [
