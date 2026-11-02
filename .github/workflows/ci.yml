@@ -85,7 +85,7 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[test]'
-      - name: Run 143 core tests
+      - name: Run core regression tests
         run: >-
           python -m pytest -q
           tests/unit/test_connector_capture.py
@@ -101,6 +101,7 @@ jobs:
           tests/unit/test_mw5_guarded_mutation.py
           tests/unit/test_read_fence.py
           tests/unit/test_resource_router.py
+          tests/unit/test_resource_router_smoke.py
           tests/unit/test_shadow.py
           tests/unit/test_submit1_policy.py
           tests/unit/test_tmh1_history.py

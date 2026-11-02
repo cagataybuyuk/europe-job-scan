@@ -67,3 +67,35 @@ untrusted arbitrary objects; that reference must not be used as task identity.
 Valid requests retain full deterministic checkpoints. No malformed content is
 stringified or returned. Added 23 regression cases: router suite now 66 cases;
 local core regression 209 passed, secret scan and authority boundary passed.
+
+## Current checkpoint: merged router and proposed synthetic CLI
+
+PR #63 merged as `00c3730332e18f91037b1145fc87cbfccf0f8000`; all six
+post-merge checks passed. Earlier local-only/authentication blockers above are
+historical evidence, not the current status. Design PR #61 remains draft.
+
+The follow-up `test/gd005-router-smoke` branch adds only a synthetic TEST CLI.
+This is an advisory smoke harness, not a browser/control-plane executor. It
+has no deployment, network, dispatch, write or upload entrypoint. Provider
+availability is a fixture scenario, never a measured operational fact. The
+approval reference is caller-supplied metadata, not authenticated authority.
+The supplied SHA is validated by the router but not discovered by this CLI.
+`test_evidence=not_run` and `provider_executed=false` explicitly prevent the
+selection output from claiming a real provider test passed.
+
+From a checkout with `.[test]` installed:
+
+```sh
+python -m ejs.apps.resource_router_smoke \
+  --environment TEST --approval-ref GD005:TEST:62 \
+  --source-sha "$(git rev-parse HEAD)" --remaining-percent 0 \
+  --scenario local_only
+```
+
+Scenarios: `ci_available`, `local_only`, `no_provider` (default). No provider
+returns exit 2 / human_review; a valid suggestion returns exit 0, which means
+only advisory selection succeeded. Unsupported scope/options also exit 2.
+No PROD environment, execute option, paid API or final-submit option exists.
+Use synthetic metadata only. The existing core CI job runs CLI process tests.
+This follow-up requires separate review and merge approval; deployment and
+actual runtime integration remain out of scope.
