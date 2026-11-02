@@ -102,6 +102,7 @@ jobs:
           tests/unit/test_read_fence.py
           tests/unit/test_resource_router.py
           tests/unit/test_resource_router_smoke.py
+          tests/unit/test_offline_task_manifest.py
           tests/unit/test_shadow.py
           tests/unit/test_submit1_policy.py
           tests/unit/test_tmh1_history.py
