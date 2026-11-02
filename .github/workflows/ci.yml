@@ -100,6 +100,7 @@ jobs:
           tests/unit/test_mw5_executor.py
           tests/unit/test_mw5_guarded_mutation.py
           tests/unit/test_read_fence.py
+          tests/unit/test_resource_router.py
           tests/unit/test_shadow.py
           tests/unit/test_submit1_policy.py
           tests/unit/test_tmh1_history.py
