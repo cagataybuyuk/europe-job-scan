@@ -36,6 +36,8 @@ on:
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
+      - 'tests/unit/test_adp_session_restore_policy.py'
+      - 'src/ejs/services/adp_session_restore_policy.py'
       - 'tests/unit/test_adp_same_page_state_selection_canary.py'
       - 'tests/unit/test_adp_same_page_next_readiness_canary.py'
       - 'tests/unit/test_adp_entry_autopilot.py'
@@ -87,6 +89,8 @@ on:
       - 'scripts/lib/invoke_native_utf8_stdin.ps1'
       - '.github/workflows/gd004-adp-verified-session-inspector.yml'
       - 'tests/unit/test_adp_verified_session.py'
+      - 'tests/unit/test_adp_session_restore_policy.py'
+      - 'src/ejs/services/adp_session_restore_policy.py'
       - 'tests/unit/test_adp_same_page_state_selection_canary.py'
       - 'tests/unit/test_adp_same_page_next_readiness_canary.py'
       - 'tests/unit/test_adp_entry_autopilot.py'
@@ -120,6 +124,7 @@ jobs:
       - name: Run verified-session unit tests
         run: |
           python -m unittest discover -s tests/unit -p 'test_adp_verified_session.py' -v
+          python -m unittest discover -s tests/unit -p 'test_adp_session_restore_policy.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_state_selection_canary.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_same_page_next_readiness_canary.py' -v
           python -m unittest discover -s tests/unit -p 'test_adp_entry_autopilot.py' -v

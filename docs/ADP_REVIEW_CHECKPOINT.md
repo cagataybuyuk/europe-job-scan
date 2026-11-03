@@ -89,3 +89,17 @@ and phone-country post-selection drift. Live session replay remains unproven.
 Local offline ADP suite after this correction: 222 passed with socket connections
 blocked. Secret scan, authority-boundary and whitespace checks passed. Remote
 results must be verified against the new exact head before claiming CI success.
+
+## Session-restore target isolation — 2026-11-03
+
+Both diagnostic replay paths previously restored sessionStorage on hostname match
+alone. They now share a fail-closed policy: reviewed HTTPS origin/default port,
+top-level frame, reviewed entry/postLogin path, and exactly one matching tenant,
+career-center and requisition identifier. Different/duplicate/missing target IDs,
+other schemes/ports, unreviewed paths and frames receive no restoration.
+
+The real generated JavaScript is executed offline in Node across 13 positive and
+negative cases using synthetic storage only. Both existing callers must produce
+the same script. The regression workflow explicitly includes these tests. This
+restricts existing diagnostic replay; it does not enable sessions or prove live
+reuse, and no real session state was read, restored or exported during this work.

@@ -13,6 +13,7 @@ from pathlib import Path
 import sys
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
+from ejs.services.adp_session_restore_policy import session_restore_script
 from ejs.services.adp_live_inspector import validate_adp_live_url, visible_application_controls
 from ejs.services.adp_verified_session_bootstrap import (
     REVIEWED_POSTLOGIN_PATH,
@@ -221,18 +222,7 @@ def _load_session_storage(path: str) -> tuple[dict[str, str], dict]:
 
 
 def _session_storage_init_script(application_url: str, storage: dict[str, str]) -> str:
-    hostname = urlsplit(application_url).hostname or ""
-    hostname_json = json.dumps(hostname, ensure_ascii=False)
-    storage_json = json.dumps(storage, ensure_ascii=False, sort_keys=True)
-    return (
-        "(() => {"
-        f"if (window.location.hostname !== {hostname_json}) return;"
-        f"const restored = {storage_json};"
-        "for (const [key, value] of Object.entries(restored)) "
-        "window.sessionStorage.setItem(key, value);"
-        "})();"
-    )
-
+    return session_restore_script(application_url, storage)
 
 def _postlogin_url(application_url: str) -> str:
     parsed = urlsplit(application_url)

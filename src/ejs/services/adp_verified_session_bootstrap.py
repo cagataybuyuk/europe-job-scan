@@ -17,6 +17,7 @@ import sys
 import time
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
+from ejs.services.adp_session_restore_policy import session_restore_script
 from ejs.services.adp_live_inspector import validate_adp_live_url
 from ejs.services.adp_same_page_manifest import extract_same_page_manifest
 from ejs.services.adp_same_page_safe_fill import (
@@ -576,20 +577,8 @@ def _export_storage_state(context, path: Path) -> dict:
     }
 
 
-def _session_storage_restore_script(
-    application_url: str,
-    session_storage: dict[str, str],
-) -> str:
-    hostname = urlsplit(application_url).hostname or ""
-    return (
-        "(() => {"
-        f"if (window.location.hostname !== {json.dumps(hostname, ensure_ascii=False)}) return;"
-        f"const restored = {json.dumps(session_storage, ensure_ascii=False, sort_keys=True)};"
-        "for (const [key, value] of Object.entries(restored)) "
-        "window.sessionStorage.setItem(key, value);"
-        "})();"
-    )
-
+def _session_storage_restore_script(application_url: str, session_storage: dict[str, str]) -> str:
+    return session_restore_script(application_url, session_storage)
 
 def _probe_authenticated_page(page, application_url: str, budget_ms: int) -> dict:
     hostname = urlsplit(application_url).hostname or ""
