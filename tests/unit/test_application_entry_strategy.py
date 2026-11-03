@@ -9,7 +9,7 @@ from ejs.services.application_entry_strategy import (
 
 def observation(label='Apply with LinkedIn'):
     return {'target_bound': True, 'auth_observed': False, 'captcha_observed': False,
-            'entry_attempts': 0, 'actions': [{'observation_key': 'document/button@2',
+            'entry_attempts': 0, 'observation_complete': True, 'actions': [{'observation_key': 'document/button@2',
             'scope': 'document', 'label': label, 'visible': True, 'disabled': False}]}
 
 
@@ -73,3 +73,11 @@ class ApplicationEntryTests(TestCase):
                 expected_surface_fingerprint=entry_surface_fingerprint(seen),
                 counters={'awli_click_attempts': 0})
         action.click.assert_not_called()
+
+    def test_loading_screen_never_means_awli_is_absent(self):
+        seen = observation('Apply')
+        for value in (None, False):
+            seen['observation_complete'] = value
+            result = choose_application_entry(seen)
+            self.assertEqual(result['route'], 'human_review')
+            self.assertEqual(result['reason'], 'ENTRY_SURFACE_NOT_READY')

@@ -16,7 +16,7 @@ def entry_surface_fingerprint(observation: dict) -> str:
     actions = [{k: action.get(k) for k in ('observation_key', 'scope', 'label', 'visible', 'disabled')}
                for action in observation.get('actions', []) if isinstance(action, dict)]
     actions.sort(key=lambda item: str(item.get('observation_key', '')))
-    payload = {key: observation.get(key) for key in ('target_bound', 'auth_observed', 'captcha_observed', 'entry_attempts')}
+    payload = {key: observation.get(key) for key in ('target_bound', 'auth_observed', 'captcha_observed', 'entry_attempts', 'observation_complete')}
     payload['actions'] = actions
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
@@ -29,6 +29,8 @@ def choose_application_entry(observation: dict) -> dict:
             or observation.get('auth_observed') is not False
             or observation.get('captcha_observed') is not False):
         return {**common, 'route': 'human_review', 'reason': 'TARGET_OR_AUTH_BOUNDARY_UNCLEAR'}
+    if observation.get('observation_complete') is not True:
+        return {**common, 'route': 'human_review', 'reason': 'ENTRY_SURFACE_NOT_READY'}
     attempts = observation.get('entry_attempts')
     if type(attempts) is not int or attempts != 0:
         return {**common, 'route': 'human_review', 'reason': 'ENTRY_RETRY_NOT_AUTHORIZED'}

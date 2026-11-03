@@ -68,7 +68,9 @@ def inspect_preferred_entry(page, application_url: str, *, entry_attempts: int =
     require_application_target(page, application_url)
     result = {'target_bound': True, 'auth_observed': observed.get('auth_observed'),
               'captcha_observed': observed.get('captcha_observed'),
-              'entry_attempts': entry_attempts, 'actions': actions}
+              'entry_attempts': entry_attempts, 'actions': actions,
+              'observation_complete': observed.get('runtime_state') in {'inspected', 'application_entry_observed'}
+                  or any(a.get('visible') is True and a.get('label') == 'Apply with LinkedIn' for a in actions)}
     return {'observation': result, 'surface_fingerprint': entry_surface_fingerprint(result),
             'choice': choose_application_entry(result)}
 
@@ -87,3 +89,16 @@ def use_preferred_entry(page, application_url: str, *, expected_surface_fingerpr
         resolve_action=lambda key: _resolve_document_locator(page, key),
         expected_surface_fingerprint=expected_surface_fingerprint, counters=counters,
     )
+
+
+def wait_for_preferred_entry(page, application_url: str, *, budget_ms: int = 60_000) -> dict:
+    """Observe loading on the same target; no navigation/click or fallback guess."""
+    import time
+    if type(budget_ms) is not int or not 1000 <= budget_ms <= 60000:
+        raise ValueError('INVALID_ENTRY_OBSERVATION_BUDGET')
+    deadline = time.monotonic() + budget_ms / 1000
+    while True:
+        observed = inspect_preferred_entry(page, application_url)
+        if observed['choice'].get('reason') != 'ENTRY_SURFACE_NOT_READY' or time.monotonic() >= deadline:
+            return observed
+        page.wait_for_timeout(500)

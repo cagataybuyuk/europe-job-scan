@@ -44,3 +44,12 @@ Local evidence: 262 selected network-blocked ADP/entry tests passed. A real
 Chromium synthetic fixture selected AWLI once while native Apply remained unused;
 all network requests were intercepted and no profile data was written. Live AWLI
 remains unproven.
+
+## Loading readiness correction
+
+The first authorized automatic-entry probe stopped before any profile write:
+ADP returned an incomplete/loading surface, which did not match the reviewed
+navigation fingerprint. An incomplete observation now routes to review rather
+than being interpreted as AWLI absence/native fallback. A bounded observer can
+wait on the same exact target without clicks or re-navigation. The previous
+blocked result is retained; no live automatic preparation success is claimed.

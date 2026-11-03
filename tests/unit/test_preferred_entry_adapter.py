@@ -25,7 +25,7 @@ class PreferredEntryAdapterTests(TestCase):
         locator.is_visible.return_value = locator.is_enabled.return_value = True
         locator.get_attribute.return_value = 'Apply with LinkedIn'
         page.evaluate.return_value = [action]
-        snapshot = {'auth_observed': False, 'captcha_observed': False, 'form': {'actions': [action]}}
+        snapshot = {'runtime_state': 'application_entry_observed', 'auth_observed': False, 'captcha_observed': False, 'form': {'actions': [action]}}
         with patch.object(adapter, '_snapshot', return_value=snapshot), patch.object(adapter, '_resolve_document_locator', return_value=locator):
             inspected = adapter.inspect_preferred_entry(page, SR)
             result = adapter.use_preferred_entry(page, SR, expected_surface_fingerprint=inspected['surface_fingerprint'],
@@ -33,3 +33,13 @@ class PreferredEntryAdapterTests(TestCase):
         locator.click.assert_called_once()
         self.assertEqual(result['route'], 'awli_started_requires_reinspection')
 
+
+    def test_bounded_wait_observes_loading_without_click_or_navigation(self):
+        pending = {'choice': {'route': 'human_review', 'reason': 'ENTRY_SURFACE_NOT_READY'}}
+        ready = {'choice': {'route': 'native', 'reason': 'AWLI_NOT_OBSERVED'}}
+        page = MagicMock()
+        with patch.object(adapter, 'inspect_preferred_entry', side_effect=[pending, ready]):
+            result = adapter.wait_for_preferred_entry(page, SR, budget_ms=1000)
+        self.assertEqual(result, ready)
+        page.goto.assert_not_called()
+        page.get_by_role.return_value.click.assert_not_called()
