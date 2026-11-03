@@ -1,6 +1,6 @@
 # ADP PR #60 — comprehensive risk-based review, 2026-11-03
 
-Verdict: **changes required; keep draft**. This is the implementing agent's review,
+Initial verdict: **changes required; keep draft**. The follow-up below closes the two P1 code findings; independent review and current live preparation validation remain pending. This is the implementing agent's review,
 not an independent approval. No merge, release or production authority is granted.
 
 ## Scope and method
@@ -172,3 +172,32 @@ is committed; future changes require renewed review of the affected scope.
 | tests/unit/test_adp_same_page_state_selection_canary.py | f654436eecffded32707f07e181ff48944e2293e1a49f0ade35055c377b6c286 | test coverage and execution |
 | tests/unit/test_adp_session_restore_policy.py | 1c00abc51fabe221a1bed3d14c901134ef7965a40cecfc67db8a34481327aee1 | test coverage and execution |
 | tests/unit/test_adp_verified_session.py | 8fa52176d551c242c0fba1dd4a5b112a87ff946e7fe6392c68c3bc8748fbd6e4 | test coverage and execution |
+
+## Follow-up: same-page mutation continuity and preflight ordering
+
+All seven mutating same-page entry points now install the same page/locator guard.
+Before each existing click, fill, selection, key action or candidate-value read, it
+rechecks the exact target plus explicit current auth/CAPTCHA-clear evidence. Nested
+locators retain the guard. Added navigation and uploads are rejected. The guard
+uses the original page for read-only snapshots to avoid recursive checks; it is
+not atomic browser isolation and grants no new action authority.
+
+Personal Information now validates the initial contact fingerprint, supported
+address country and reviewed mobile pairing before invoking identity safe-fill.
+Thus a bad contact contract cannot fail after an initial name write. The two P1
+code findings above are resolved by these changes; the P2 follow-ups and live
+preparation evidence remain open.
+
+Validation: 246 network-blocked ADP tests passed. Guard tests exercise all seven
+entry-point integrations, nested locators, unknown/true boundaries, snapshot-time
+target drift, repeated operations and forbidden upload/navigation. Existing
+fixture tests explicitly simulate a verified source; they are not substituted for
+the separate real guard regressions. A real Chromium experiment intercepted all
+requests on a synthetic ADP origin: first fill changed the requisition via an input
+event, and the guard blocked the second fill before writing. No employer network
+request or personal data was used. The exact CI authority guard passed locally.
+
+User scope update: user requests verified-profile automatic Personal Information
+and retrieval/paste of the matching ADP email verification code. This is a new,
+bounded task request; existing OTP automation remains unimplemented until its
+separate controlled path is reviewed. No CV/submit authority is added.

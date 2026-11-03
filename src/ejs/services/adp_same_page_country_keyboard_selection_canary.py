@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from ejs.services.adp_same_page_guard import guard_verified_page
 from ejs.services.adp_live_inspector import validate_adp_live_url
 from ejs.services.adp_same_page_contact_address_contract import (
     contract_fingerprint as contact_contract_fingerprint,
@@ -56,6 +57,7 @@ def run_on_verified_page(
     page,
     request: AdpSamePageCountryKeyboardSelectionRequest,
 ) -> dict:
+    page = guard_verified_page(page, request.application_url)
     _validate(request)
     contract = inspect_contact_address_on_verified_page(
         page,

@@ -61,6 +61,11 @@ def manifest_fixture():
 
 
 class AdpSamePageSafeFillTests(unittest.TestCase):
+    def setUp(self):
+        boundary = patch('ejs.services.adp_same_page_guard.require_current_verified_target')
+        boundary.start()
+        self.addCleanup(boundary.stop)
+
     def profile_path(self, tmp, **overrides):
         payload = {
             "profile_version": "test-profile-v1",

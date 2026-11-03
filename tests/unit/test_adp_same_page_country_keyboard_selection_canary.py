@@ -40,6 +40,11 @@ def contact_fixture():
 
 
 class CountryKeyboardSelectionCanaryTests(unittest.TestCase):
+    def setUp(self):
+        boundary = patch('ejs.services.adp_same_page_guard.require_current_verified_target')
+        boundary.start()
+        self.addCleanup(boundary.stop)
+
     def request(self):
         return AdpSamePageCountryKeyboardSelectionRequest(
             application_url=URL,

@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from ejs.services.adp_same_page_guard import guard_verified_page
 from ejs.services.adp_live_inspector import validate_adp_live_url
 from ejs.services.adp_same_page_state_after_country_contract import (
     contract_fingerprint as state_contract_fingerprint,
@@ -59,6 +60,7 @@ def _state_visible_text(state) -> str:
 
 
 def run_on_verified_page(page, request: AdpSamePageStateSelectionRequest) -> dict:
+    page = guard_verified_page(page, request.application_url)
     _validate(request)
 
     structural = inspect_after_reviewed_country_selection(

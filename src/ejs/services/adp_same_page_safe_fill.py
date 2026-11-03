@@ -15,6 +15,7 @@ import re
 import unicodedata
 
 from ejs.contracts.prefill import SafeFieldWriterAuthority, value_hash
+from ejs.services.adp_same_page_guard import guard_verified_page
 from ejs.services.adp_live_inspector import validate_adp_live_url
 from ejs.services.adp_validation_contract import turkish_ascii_candidate
 from ejs.services.adp_same_page_manifest import (
@@ -211,6 +212,7 @@ def run_on_verified_page(
     page,
     request: AdpSamePageSafeFillRequest,
 ) -> dict:
+    page = guard_verified_page(page, request.application_url)
     validate_request(request)
     profile = load_identity_profile(request.profile_json_path)
     counters = {

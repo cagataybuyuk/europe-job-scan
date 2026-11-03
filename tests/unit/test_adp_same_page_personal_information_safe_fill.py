@@ -57,6 +57,11 @@ def input_locator(before: str, after: str | None = None):
 
 
 class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
+    def setUp(self):
+        boundary = patch('ejs.services.adp_same_page_guard.require_current_verified_target')
+        boundary.start()
+        self.addCleanup(boundary.stop)
+
     def profile_path(self, tmp: str) -> str:
         payload = {
             "profile_version": "candidate-profile-v3",
@@ -403,6 +408,21 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
 
         self.assertEqual(evidence["mode"], "mismatch")
         self.assertFalse(evidence["browser_valid"])
+
+    def test_contact_contract_mismatch_blocks_before_any_identity_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_path = self.profile_path(tmp)
+            request = AdpSamePagePersonalInformationSafeFillRequest(
+                application_url=URL, expected_manifest_fingerprint=MANIFEST_FP,
+                expected_contact_contract_fingerprint=CONTACT_FP,
+                expected_country_option_surface_fingerprint=COUNTRY_FP,
+                expected_state_option_surface_fingerprint=STATE_FP,
+                profile_json_path=profile_path,
+            )
+            with patch.object(safe_fill, 'inspect_contact_address_on_verified_page', return_value=contact_fixture()), patch.object(safe_fill, 'contact_contract_fingerprint', return_value='0'*64), patch.object(safe_fill, 'run_identity_safe_fill') as identity:
+                with self.assertRaisesRegex(PermissionError, 'CONTACT_CONTRACT_FINGERPRINT_MISMATCH'):
+                    run_on_verified_page(MagicMock(), request)
+            identity.assert_not_called()
 
     def test_unreviewed_address_country_blocks_before_country_click(self):
         with tempfile.TemporaryDirectory() as tmp:

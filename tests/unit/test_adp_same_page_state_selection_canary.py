@@ -21,6 +21,11 @@ STATE_SURFACE_FP = "e" * 64
 
 
 class StateSelectionCanaryTests(unittest.TestCase):
+    def setUp(self):
+        boundary = patch('ejs.services.adp_same_page_guard.require_current_verified_target')
+        boundary.start()
+        self.addCleanup(boundary.stop)
+
     def request(self, label="İstanbul"):
         return AdpSamePageStateSelectionRequest(
             application_url=URL,

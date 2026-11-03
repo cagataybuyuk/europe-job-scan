@@ -18,6 +18,11 @@ COUNTRY_FP = "c" * 64
 
 
 class StateAfterCountryContractTests(unittest.TestCase):
+    def setUp(self):
+        boundary = patch('ejs.services.adp_same_page_guard.require_current_verified_target')
+        boundary.start()
+        self.addCleanup(boundary.stop)
+
     def test_selects_only_reviewed_country_then_reads_state_structure(self):
         page = MagicMock()
         pre_state = {
@@ -282,6 +287,11 @@ class StateAfterCountryContractTests(unittest.TestCase):
 
 
 class StateOptionObservationRegressionTests(unittest.TestCase):
+    def setUp(self):
+        boundary = patch('ejs.services.adp_same_page_guard.require_current_verified_target')
+        boundary.start()
+        self.addCleanup(boundary.stop)
+
     def make_surface(self, labels):
         page = MagicMock()
         state = MagicMock()

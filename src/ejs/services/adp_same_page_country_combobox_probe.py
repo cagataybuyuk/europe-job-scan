@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from ejs.services.adp_same_page_guard import guard_verified_page
 from ejs.services.adp_same_page_contact_address_contract import (
     contract_fingerprint as contact_contract_fingerprint,
     inspect_on_verified_page as inspect_contact_address_on_verified_page,
@@ -137,6 +138,7 @@ def inspect_country_combobox_on_verified_page(
     timeout_ms: int = 20_000,
     render_wait_ms: int = 5_000,
 ) -> dict:
+    page = guard_verified_page(page, application_url)
     contract = inspect_contact_address_on_verified_page(
         page,
         application_url,

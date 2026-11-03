@@ -39,6 +39,11 @@ def contact_fixture():
 
 
 class AdpSamePageCountryComboboxProbeTests(unittest.TestCase):
+    def setUp(self):
+        boundary = patch('ejs.services.adp_same_page_guard.require_current_verified_target')
+        boundary.start()
+        self.addCleanup(boundary.stop)
+
     def test_reviewed_mobile_pair_resolves_required_pair(self):
         pair = reviewed_mobile_pair(contact_fixture())
         self.assertEqual(pair["country_ordinal"], 0)

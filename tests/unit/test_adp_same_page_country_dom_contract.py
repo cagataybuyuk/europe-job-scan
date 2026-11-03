@@ -37,6 +37,11 @@ def contact_fixture():
 
 
 class CountryDomContractTests(unittest.TestCase):
+    def setUp(self):
+        boundary = patch('ejs.services.adp_same_page_guard.require_current_verified_target')
+        boundary.start()
+        self.addCleanup(boundary.stop)
+
     def test_contract_is_read_only_and_value_free(self):
         page = MagicMock()
         country = MagicMock()

@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 
 from ejs.contracts.prefill import value_hash
+from ejs.services.adp_same_page_guard import guard_verified_page
 from ejs.services.adp_live_inspector import validate_adp_live_url
 from ejs.services.adp_personal_information_profile import (
     resolve_personal_information_profile,
@@ -501,8 +502,24 @@ def run_on_verified_page(
     page,
     request: AdpSamePagePersonalInformationSafeFillRequest,
 ) -> dict:
+    page = guard_verified_page(page, request.application_url)
     validate_request(request)
     profile = _load_profile(request.profile_json_path)
+
+    contract = inspect_contact_address_on_verified_page(
+        page,
+        request.application_url,
+        request.expected_manifest_fingerprint,
+        timeout_ms=request.timeout_ms,
+        render_wait_ms=request.render_wait_ms,
+    )
+    observed_contract = contact_contract_fingerprint(contract)
+    if observed_contract != request.expected_contact_contract_fingerprint:
+        raise PermissionError("ADP_PERSONAL_INFO_CONTACT_CONTRACT_FINGERPRINT_MISMATCH")
+
+    if profile.address_country_iso2 != REVIEWED_ADDRESS_COUNTRY_ISO2:
+        raise PermissionError("ADP_PERSONAL_INFO_ADDRESS_COUNTRY_NOT_REVIEWED")
+    reviewed_mobile_pair(contract)
 
     identity = run_identity_safe_fill(
         page,
@@ -517,17 +534,6 @@ def run_on_verified_page(
             ),
         ),
     )
-
-    contract = inspect_contact_address_on_verified_page(
-        page,
-        request.application_url,
-        request.expected_manifest_fingerprint,
-        timeout_ms=request.timeout_ms,
-        render_wait_ms=request.render_wait_ms,
-    )
-    observed_contract = contact_contract_fingerprint(contract)
-    if observed_contract != request.expected_contact_contract_fingerprint:
-        raise PermissionError("ADP_PERSONAL_INFO_CONTACT_CONTRACT_FINGERPRINT_MISMATCH")
 
     counters = {
         "form_value_write_attempts": int(identity.get("form_value_write_attempts", 0)),
