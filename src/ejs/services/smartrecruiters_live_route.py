@@ -11,12 +11,14 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-ROUTE_VERSION = "smartrecruiters-live-route-v1"
+from ejs.services.smartrecruiters_live_inspector import discovery_state
+
+ROUTE_VERSION = "smartrecruiters-live-route-v2"
 ROUTES = frozenset({"human_handoff", "manifest_review_candidate", "diagnostic_review"})
 
 
 def _count(report: Mapping[str, Any], key: str) -> int:
-    value = report.get(key, 0)
+    value = report.get(key)
     if type(value) is not int or value < 0:
         raise ValueError(f"INVALID_{key.upper()}")
     return value
@@ -75,7 +77,27 @@ def route_live_inspection(report: Mapping[str, Any]) -> dict[str, Any]:
             ),
         }
 
-    if runtime_state == "inspected" and controls:
+    observed_state, observed_code = discovery_state(form if isinstance(form, Mapping) else {})
+    if runtime_state == "job_expired" or error_code == "JOB_EXPIRED" or observed_state == "job_expired":
+        return {
+            **common, "route": "diagnostic_review", "reason_code": "JOB_EXPIRED",
+            "human_action_required": True, "manifest_review_allowed": False,
+            "required_user_action": "Verify opportunity availability and select a current target; do not prepare this expired job.",
+        }
+    if runtime_state == "auth_boundary" or error_code == "AUTH_BOUNDARY" or observed_state == "auth_boundary":
+        return {
+            **common, "route": "human_handoff", "reason_code": "AUTH_BOUNDARY",
+            "human_action_required": True, "manifest_review_allowed": False,
+            "required_user_action": "Resolve authentication manually and obtain fresh read-only evidence; do not automate credentials.",
+        }
+    if report.get("captcha_observed") is not False:
+        return {
+            **common, "route": "diagnostic_review", "reason_code": "CAPTCHA_EVIDENCE_REQUIRED",
+            "human_action_required": True, "manifest_review_allowed": False,
+            "required_user_action": "Obtain explicit current challenge evidence before manifest review.",
+        }
+
+    if runtime_state == "inspected" and observed_state == "inspected":
         return {
             **common,
             "route": "manifest_review_candidate",
@@ -91,7 +113,7 @@ def route_live_inspection(report: Mapping[str, Any]) -> dict[str, Any]:
     return {
         **common,
         "route": "diagnostic_review",
-        "reason_code": error_code or "FORM_STRUCTURE_NOT_READY",
+        "reason_code": error_code or observed_code or "FORM_STRUCTURE_NOT_READY",
         "human_action_required": True,
         "manifest_review_allowed": False,
         "required_user_action": (

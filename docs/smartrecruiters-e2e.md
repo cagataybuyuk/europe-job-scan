@@ -40,3 +40,38 @@ Historical testing of tracked Rituals SmartRecruiters requisition `7440001129369
 ## Production runtime requirement
 
 The next live gate is a current SmartRecruiters re-inspection from the approved browser runtime, followed by an adapter-scoped safe-fill/upload validation and reviewed final-submit canary. Any required session material must remain encrypted and outside Sheets/source control.
+
+## MVP readiness correction — 2026-11-03
+
+Real anonymous read-only inspection of a tracked target displayed an expired-job
+status, one hidden share input and zero application mutations. Earlier discovery
+counted any control and suggested manifest review even though the observed input
+was hidden sharing UI. The captured report remains local/private; no profile,
+CV, cookies or user data was supplied to the live page, and tracker cells were
+not modified. Historical tracker availability was not treated as current proof.
+
+Discovery now requires visible controls and recognizes the exact observed
+visible expired-job status. Read-only routing v2 independently rejects expired
+or auth-boundary evidence even when the reported runtime state says inspected;
+hidden-only controls cannot become manifest candidates. Missing mutation
+counters are rejected, and explicit clear challenge evidence is needed before
+manifest review. These decisions still grant no safe-fill/upload/submit rights.
+
+Local baseline: 106 existing preparation/browser/upload/submit-policy tests
+passed against installed Chromium (not skipped). After the correction, 73
+targeted preparation, real DOM, shadow, route and policy tests passed. These
+sets overlap and must not be added as unique tests. A real Chromium regression
+uses an expired status plus hidden sharing input and proves zero DOM mutation;
+replaying the captured live structural evidence now returns JOB_EXPIRED and
+manifest_review_allowed=false without another navigation.
+
+Remaining gate: choose a currently verified open application target, obtain
+current application controls rather than posting/share UI, review the manifest,
+then separately validate safe-fill/upload. Submit and confirmation are still
+unimplemented release-gated work. No successful live preparation or submitted
+application is claimed by this correction.
+
+The read-only CLI/workflow can record JOB_EXPIRED and AUTH_BOUNDARY as successful
+observations while routing refuses manifest promotion. Observation exit 0 never
+means a job is open, preparation succeeded or execution was authorized. Unsupported
+runtime remains a nonzero exit; no workflow input or runtime authority is added.
