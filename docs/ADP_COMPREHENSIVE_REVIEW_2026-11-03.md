@@ -67,6 +67,31 @@ material is written to disk, GitHub, Sheets or an external API by this live harn
 A sanitized checkpoint records the actual result separately; pending/timeout is
 not successful reuse. GitHub-runner reuse remains a separate unproven gate.
 
+## Observed live result
+
+A dedicated headed user-driven run observed the OTP stage and then a target-bound
+verified manifest with 18 visible controls, stable for at least 10 seconds. Source
+fingerprint: `e3770a2956f32d0ecedf8b0620a4baab2ece791740ab1405b07c2ce6fd038a7f`.
+The live harness loaded source revision `c6f6ece7be2b79ec1465af6b9fff3d20d4efd036`
+before the review corrections were committed; it independently gated source and
+positive replay claims with the strict verified manifest. It is not an exact-head
+live pass for the later corrected code.
+
+Two fresh, separate Chromium processes were tested while the verified source
+remained open: ordinary in-memory Playwright state, and state plus an injected
+target-bound sessionStorage script. Neither reached a verified authenticated form
+within the bounded probe. Both observed the reviewed cookie containers absent.
+The injected script's restoration count was not instrumented; because duplicate
+query compatibility remains open, this does not establish that sessionStorage
+was actually restored. No conclusion that ADP universally forbids reuse follows.
+
+Outcome: `source_verified_replay_not_proven`, not success. The manual entry/OTP
+belongs to the user. Automated clicks, candidate writes, uploads and submits were
+zero. Sensitive material remained in process memory; contexts/browser processes
+closed and no state was persisted/provisioned. A sanitized local checkpoint retains
+run times and results. GitHub-runner reuse is still unproven. No additional live
+attempt should be presented as necessary before the remaining findings are resolved.
+
 ## Verification
 
 After corrections: 239 ADP tests passed with Python socket connections blocked.
