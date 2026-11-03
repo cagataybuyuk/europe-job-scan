@@ -189,7 +189,7 @@ def _cookie_preflight(page, request: AdpEntryAutopilotRequest, counters: dict) -
         raise PermissionError("ADP_ENTRY_AUTOPILOT_COOKIE_BOUNDARY_PERSISTED")
 
 
-def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> dict:
+def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest, *, preferred_entry_handler=None) -> dict:
     validate_request(request)
     _require_target(page,request.application_url)
     profile = load_resolved_profile(request.profile_json_path)
@@ -248,6 +248,20 @@ def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> 
     _require_clear_boundary(form,"ADP_ENTRY_AUTOPILOT_POST_APPLY_BOUNDARY")
     if safe_fill_surface_fingerprint(form) != EXPECTED_SAFE_FILL_FP:
         raise PermissionError("ADP_ENTRY_AUTOPILOT_IDENTITY_SURFACE_DRIFT")
+
+    if preferred_entry_handler is not None:
+        entry_result = preferred_entry_handler(page)
+        if entry_result.get("route") == "awli_started_requires_reinspection":
+            return {
+                "autopilot_version": AUTOPILOT_VERSION,
+                "autopilot_status": "awli_started_requires_reinspection",
+                **counters, "entry_strategy": entry_result,
+                "otp_write_allowed": False, "next_click_allowed": False,
+                "file_upload_allowed": False, "final_submit_allowed": False,
+                "raw_values_exposed": False,
+            }
+        if entry_result.get("route") != "native":
+            raise PermissionError("ADP_ENTRY_PREFERENCE_REQUIRES_REVIEW")
 
     phone_contract = phone_contract_descriptor(page)
     if phone_contract_surface_fingerprint(phone_contract) != EXPECTED_PHONE_FP:
