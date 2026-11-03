@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from ejs.services.smartrecruiters_live_inspector import (
     LiveInspectionRequest,
@@ -98,6 +99,22 @@ class LiveInspectionPolicyTests(unittest.TestCase):
     def test_visible_password_is_auth_boundary(self):
         self.assertEqual(discovery_state({"controls":[{"type":"password","visible":True}]}),
                          ("auth_boundary","AUTH_BOUNDARY"))
+
+    def test_cli_records_expired_and_auth_observations_without_execution_success_claim(self):
+        from ejs.services import smartrecruiters_live_inspector as inspector
+        for state,code in (("job_expired","JOB_EXPIRED"),("auth_boundary","AUTH_BOUNDARY")):
+            with self.subTest(state=state),patch.object(inspector,"inspect_live_page",return_value={
+                "runtime_state":state,"error_code":code,"inspection_only":True,"live_execution_ready":False
+            }),patch.object(inspector.sys,"argv",["inspector","--url","https://jobs.smartrecruiters.com/Acme/job"]),\
+                 patch("builtins.print"):
+                self.assertEqual(inspector.main(),0) # observation succeeded; no execution authority
+
+    def test_cli_unsupported_runtime_still_fails(self):
+        from ejs.services import smartrecruiters_live_inspector as inspector
+        with patch.object(inspector,"inspect_live_page",return_value={"runtime_state":"unsupported"}),\
+             patch.object(inspector.sys,"argv",["inspector","--url","https://jobs.smartrecruiters.com/Acme/job"]),\
+             patch("builtins.print"):
+            self.assertEqual(inspector.main(),2)
 
 
 if __name__ == "__main__":

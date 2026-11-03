@@ -68,9 +68,15 @@ jobs:
               'inspected',
               'captcha_boundary',
               'form_structure_not_discovered',
+              'job_expired',
+              'auth_boundary',
           }
           if report.get('runtime_state') == 'form_structure_not_discovered':
               assert report.get('error_code') == 'FORM_STRUCTURE_NOT_DISCOVERED'
+          if report.get('runtime_state') == 'job_expired':
+              assert report.get('error_code') == 'JOB_EXPIRED'
+          if report.get('runtime_state') == 'auth_boundary':
+              assert report.get('error_code') == 'AUTH_BOUNDARY'
           if report.get('runtime_state') == 'captcha_boundary':
               assert report.get('error_code') == 'CAPTCHA_BOUNDARY'
               assert report.get('captcha_observed') is True
@@ -90,6 +96,9 @@ jobs:
           assert route.get('automation_resume_allowed') is False
           assert route.get('safe_fill_allowed') is False
           assert route.get('final_submit_allowed') is False
+          if inspection.get('runtime_state') in {'job_expired', 'auth_boundary'}:
+              assert route.get('manifest_review_allowed') is False
+              assert route.get('reason_code') in {'JOB_EXPIRED', 'AUTH_BOUNDARY', 'CAPTCHA_BOUNDARY'}
           if inspection.get('runtime_state') == 'captcha_boundary':
               assert route.get('route') == 'human_handoff'
               assert route.get('reason_code') == 'CAPTCHA_BOUNDARY'

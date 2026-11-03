@@ -344,7 +344,7 @@ def main() -> int:
     if args.output:
         Path(args.output).write_text(payload + "\n", encoding="utf-8")
     print(payload)
-    return 0 if report.get("runtime_state") in {"inspected", "captcha_boundary", "form_structure_not_discovered"} else 2
+    return 0 if report.get("runtime_state") in {"inspected", "captcha_boundary", "form_structure_not_discovered", "job_expired", "auth_boundary"} else 2
 
 
 if __name__ == "__main__":

@@ -70,3 +70,8 @@ current application controls rather than posting/share UI, review the manifest,
 then separately validate safe-fill/upload. Submit and confirmation are still
 unimplemented release-gated work. No successful live preparation or submitted
 application is claimed by this correction.
+
+The read-only CLI/workflow can record JOB_EXPIRED and AUTH_BOUNDARY as successful
+observations while routing refuses manifest promotion. Observation exit 0 never
+means a job is open, preparation succeeded or execution was authorized. Unsupported
+runtime remains a nonzero exit; no workflow input or runtime authority is added.
