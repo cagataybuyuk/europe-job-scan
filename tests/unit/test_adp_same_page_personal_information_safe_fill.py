@@ -338,7 +338,7 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
         self.assertTrue(evidence["selected_label_match"])
         self.assertFalse(evidence["raw_value_exposed"])
 
-    def test_country_readback_accepts_nonempty_valid_closed_custom_value_without_exposing_raw(self):
+    def test_country_readback_does_not_certify_unknown_custom_country_value(self):
         page = MagicMock()
         country = MagicMock()
         country.input_value.return_value = "opaque-internal-country-value"
@@ -360,13 +360,24 @@ class AdpSamePagePersonalInformationSafeFillTests(unittest.TestCase):
         ):
             evidence = _country_readback_evidence(page, country)
 
-        self.assertEqual(evidence["mode"], "custom_committed")
+        self.assertEqual(evidence["mode"], "unverified_custom")
         self.assertTrue(evidence["nonempty"])
         self.assertTrue(evidence["browser_valid"])
         self.assertEqual(evidence["visible_listbox_count"], 0)
         self.assertEqual(evidence["visible_option_count"], 0)
         self.assertFalse(evidence["raw_value_exposed"])
         self.assertNotIn("opaque-internal-country-value", repr(evidence))
+
+    def test_typed_country_label_without_valid_closed_selection_is_not_proof(self):
+        for valid, expanded, listboxes in ((False, 'false', 0), (True, 'true', 0), (True, 'false', 1)):
+            page, country = MagicMock(), MagicMock()
+            country.input_value.return_value = 'Turkey'
+            country.evaluate.return_value = valid
+            country.get_attribute.return_value = expanded
+            page.locator.return_value.count.return_value = listboxes
+            with patch.object(safe_fill, '_selected_country_label_evidence', return_value={'present': False, 'reviewed_label_match': False, 'label_hash': ''}):
+                evidence = _country_readback_evidence(page, country)
+            self.assertNotIn(evidence['mode'], {'selected_label', 'label', 'iso2'})
 
     def test_country_readback_does_not_claim_success_for_invalid_nonempty_value(self):
         page = MagicMock()

@@ -19,6 +19,7 @@ from ejs.services.adp_verified_session_bootstrap import (
     REVIEWED_POSTLOGIN_PATH,
     _authenticated_form_evidence,
     _form_surface_signature,
+    _session_boundary_clear,
     _sanitized_post_verification_report,
     bootstrap_stage,
 )
@@ -325,6 +326,7 @@ def _probe_authenticated_postlogin(
             and stage.get("verification_code_visible") is not True
             and stage.get("identity_surface_visible") is not True
             and bool(signature)
+            and _session_boundary_clear(page, application_url)
         )
         key = (str(page.url), signature)
         if valid:
@@ -502,7 +504,7 @@ def run_inspector(
                     "inspector_status": "blocked",
                     "error_code": "ADP_VERIFIED_SESSION_COOKIE_STATE_NOT_REUSED",
                 }
-            if pre.get("captcha_observed") is True or pre.get("auth_observed") is True:
+            if pre.get("captcha_observed") is not False or pre.get("auth_observed") is not False:
                 return {
                     **base,
                     "inspector_status": "blocked",
@@ -542,7 +544,7 @@ def run_inspector(
                 timeout_ms=request.timeout_ms,
                 render_wait_ms=request.render_wait_ms,
             )
-            if post.get("captcha_observed") is True or post.get("auth_observed") is True:
+            if post.get("captcha_observed") is not False or post.get("auth_observed") is not False:
                 return {
                     **base,
                     "inspector_status": "blocked",
@@ -570,12 +572,15 @@ def run_inspector(
                     "error_code": "ADP_VERIFIED_SESSION_POST_APPLY_SURFACE_EMPTY",
                     "post_apply_surface": surface,
                 }
+            if (_authenticated_form_evidence(page, request.application_url).get("authenticated_form_observed") is not True
+                    or not _session_boundary_clear(page, request.application_url)):
+                return {**base, "inspector_status": "blocked", "error_code": "ADP_VERIFIED_SESSION_AUTHENTICATED_TARGET_NOT_PROVEN"}
             return {
                 **base,
                 "inspector_status": "inspected",
                 "error_code": "",
                 "session_reused": True,
-                "post_apply_url": str(page.url),
+                "post_apply_target_bound": True,
                 "post_apply_surface": surface,
             }
         finally:
@@ -630,5 +635,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"ADP_VERIFIED_SESSION_INSPECTOR_ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"ADP_VERIFIED_SESSION_INSPECTOR_ERROR: {type(exc).__name__}", file=sys.stderr)
         raise SystemExit(2)

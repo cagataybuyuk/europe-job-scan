@@ -35,10 +35,11 @@ def _normalize(value: str) -> str:
 
 
 def _sanitize_semantic_text(value: str) -> str:
+    # Ancestor text can contain names, addresses or formatted phone numbers.
+    # Retain exact reviewed semantic labels only; arbitrary prose is not evidence.
     text = _normalize(value)
-    text = re.sub(r"[^\s@]+@[^\s@]+", "[email]", text)
-    text = re.sub(r"\b\d{6,}\b", "[digits]", text)
-    return text[:600]
+    reviewed = {"Mobile Number*", "Home Phone Number", "Country*"}
+    return text if text in reviewed else ""
 
 
 def _nearest_semantic_context(locator) -> dict:

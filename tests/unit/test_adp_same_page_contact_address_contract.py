@@ -142,13 +142,19 @@ class AdpSamePageContactAddressContractTests(unittest.TestCase):
             loc.click.assert_not_called()
             loc.select_option.assert_not_called()
 
-    def test_semantic_context_redacts_email_and_long_digits(self):
+    def test_semantic_context_drops_unreviewed_prose_including_private_values(self):
         self.assertEqual(
             contract._sanitize_semantic_text(
                 "Mobile candidate@example.com 5551112233 secondary"
             ),
-            "Mobile [email] [digits] secondary",
+            "",
         )
+
+    def test_semantic_context_keeps_only_reviewed_exact_labels(self):
+        for label in ('Mobile Number*', 'Home Phone Number', 'Country*'):
+            self.assertEqual(contract._sanitize_semantic_text(label), label)
+        for text in ('PRIVATE_NAME_SENTINEL', 'Mobile Number* PRIVATE_ADDRESS_SENTINEL', '+90 555 000 00 00'):
+            self.assertEqual(contract._sanitize_semantic_text(text), '')
 
     def test_phone_pairing_requires_unique_bijective_nearest_pairs(self):
         matrix = [

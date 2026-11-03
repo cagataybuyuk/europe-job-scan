@@ -80,7 +80,7 @@ def run_on_verified_page(
         raise PermissionError("ADP_COUNTRY_KEYBOARD_CANARY_AUTOCOMPLETE_DRIFT")
 
     before = _country_readback_evidence(page, country)
-    if before["mode"] in {"label", "iso2", "custom_committed"}:
+    if before["mode"] in {"selected_label", "label", "iso2"}:
         return {
             "canary_version": CANARY_VERSION,
             "selection_status": "already_committed",
@@ -125,12 +125,12 @@ def run_on_verified_page(
     for _ in range(20):
         page.wait_for_timeout(150)
         readback = _country_readback_evidence(page, country)
-        if readback["mode"] in {"label", "iso2", "custom_committed"}:
+        if readback["mode"] in {"selected_label", "label", "iso2"}:
             break
     if not isinstance(readback, dict) or readback["mode"] not in {
         "label",
         "iso2",
-        "custom_committed",
+        "selected_label",
     }:
         mode = readback.get("mode", "unknown") if isinstance(readback, dict) else "unknown"
         raise PermissionError(

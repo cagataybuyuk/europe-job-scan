@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -19,7 +20,8 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from ejs.services.adp_session_restore_policy import session_restore_script
 from ejs.services.adp_live_inspector import validate_adp_live_url
-from ejs.services.adp_same_page_manifest import extract_same_page_manifest
+from ejs.services.adp_same_page_manifest import extract_same_page_manifest, _target_binding
+from ejs.services.adp_navigation_canary import _snapshot
 from ejs.services.adp_same_page_safe_fill import (
     AdpSamePageSafeFillRequest,
     run_on_verified_page as run_same_page_safe_fill,
@@ -481,6 +483,22 @@ def _sanitized_post_verification_report(page, verification_seen: bool) -> dict:
     }
 
 
+def _session_boundary_clear(page, application_url: str) -> bool:
+    """Require current target and explicit clear challenge/auth evidence."""
+    try:
+        if _target_binding(str(page.url), application_url).get("target_bound") is not True:
+            return False
+        observed = _snapshot(page, requested_url=application_url, timeout_ms=2_000, render_wait_ms=100)
+        return (
+            observed.get("runtime_state") == "inspected"
+            and observed.get("captcha_observed") is False
+            and observed.get("auth_observed") is False
+            and _target_binding(str(page.url), application_url).get("target_bound") is True
+        )
+    except Exception:
+        return False
+
+
 def _capture_session_storage(page) -> tuple[dict[str, str], dict]:
     """Capture tab-scoped state locally without exposing keys or values in diagnostics."""
     raw = page.evaluate(
@@ -546,10 +564,21 @@ def _sanitized_cookie_metadata(cookies: list[dict]) -> dict:
     }
 
 
+def _write_sensitive_text(path: Path, payload: str) -> None:
+    """Create a private new file; never follow links or overwrite existing state."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
 def _export_storage_state(context, path: Path) -> dict:
     """Export cookies/localStorage plus IndexedDB without exposing raw values."""
     try:
-        state = context.storage_state(path=str(path), indexed_db=True)
+        state = context.storage_state(indexed_db=True)
     except TypeError as exc:
         raise RuntimeError("PLAYWRIGHT_INDEXED_DB_STORAGE_STATE_UNAVAILABLE") from exc
     if not isinstance(state, dict):
@@ -571,6 +600,7 @@ def _export_storage_state(context, path: Path) -> dict:
         if isinstance(indexed_db, list) and indexed_db:
             indexed_db_origin_count += 1
             indexed_db_database_count += len(indexed_db)
+    _write_sensitive_text(path, json.dumps(state, ensure_ascii=False, sort_keys=True) + "\n")
     return {
         "storage_cookie_count": len(cookies),
         "storage_origin_count": len(origins),
@@ -609,6 +639,7 @@ def _probe_authenticated_page(page, application_url: str, budget_ms: int) -> dic
             and stage.get("verification_code_visible") is not True
             and stage.get("identity_surface_visible") is not True
             and bool(signature)
+            and _session_boundary_clear(page, application_url)
         )
         key = (str(page.url), signature)
         if valid:
@@ -1135,7 +1166,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                             )
                             page.wait_for_timeout(500)
                             continue
-                elif (verification_seen or authenticated["authenticated_form_observed"]) and not stage["identity_surface_visible"]:
+                elif authenticated["authenticated_form_observed"] and not stage["identity_surface_visible"]:
                     if not transition_announced:
                         if verification_seen:
                             print("Verification screen closed. Waiting for a stable form; keep the browser open.")
@@ -1158,6 +1189,11 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                             last_otp_seen is not None and now - last_otp_seen >= MIN_POST_VERIFICATION_SECONDS
                         ))
                     ):
+                        if not _session_boundary_clear(page, request.application_url):
+                            stable_since = None
+                            last_signature = None
+                            page.wait_for_timeout(1_000)
+                            continue
                         session_storage = {}
                         session_storage_evidence = {
                             "session_storage_entry_count": 0,
@@ -1166,9 +1202,9 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                         }
                         if session_storage_path is not None:
                             session_storage, session_storage_evidence = _capture_session_storage(page)
-                            session_storage_path.write_text(
+                            _write_sensitive_text(
+                                session_storage_path,
                                 json.dumps(session_storage, ensure_ascii=False, sort_keys=True) + "\n",
-                                encoding="utf-8",
                             )
                         canonical_url_evidence = _authenticated_form_diagnostics(
                             page,
@@ -1183,7 +1219,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                                 and canonical_url_evidence.get("jobid_match") is True
                             ):
                                 raise RuntimeError("ADP_SESSION_BOOTSTRAP_CANONICAL_POSTLOGIN_URL_INVALID")
-                            postlogin_url_path.write_text(str(page.url) + "\n", encoding="utf-8")
+                            _write_sensitive_text(postlogin_url_path, str(page.url) + "\n")
                             canonical_url_exported = True
 
                         storage_evidence = _export_storage_state(context, storage_path)
@@ -2172,5 +2208,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"ADP_VERIFIED_SESSION_BOOTSTRAP_ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"ADP_VERIFIED_SESSION_BOOTSTRAP_ERROR: {type(exc).__name__}", file=sys.stderr)
         raise SystemExit(2)

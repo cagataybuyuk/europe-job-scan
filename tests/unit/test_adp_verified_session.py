@@ -91,6 +91,38 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         self.assertFalse(evidence["storage_raw_values_exposed"])
         self.assertNotIn("secret", repr(evidence))
 
+    def test_storage_export_validates_before_private_write_and_never_overwrites(self):
+        import os
+        context = MagicMock()
+        context.storage_state.return_value = {'cookies': [], 'origins': []}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'state.json'
+            _export_storage_state(context, path)
+            if os.name == 'posix':
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            original = path.read_bytes()
+            with self.assertRaises(FileExistsError):
+                _export_storage_state(context, path)
+            self.assertEqual(path.read_bytes(), original)
+            context.storage_state.return_value = {'cookies': 'invalid', 'origins': []}
+            invalid = Path(tmp) / 'invalid.json'
+            with self.assertRaisesRegex(RuntimeError, 'STORAGE_STATE_INVALID'):
+                _export_storage_state(context, invalid)
+            self.assertFalse(invalid.exists())
+
+    def test_sensitive_writer_never_follows_existing_symbolic_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / 'target.txt'
+            target.write_text('untouched')
+            link = Path(tmp) / 'link.txt'
+            try:
+                link.symlink_to(target)
+            except OSError:
+                self.skipTest('Symbolic links unavailable')
+            with self.assertRaises(FileExistsError):
+                bootstrap._write_sensitive_text(link, 'synthetic-session')
+            self.assertEqual(target.read_text(), 'untouched')
+
     def test_validate_storage_state_reports_indexed_db_counts_without_values(self):
         state = {
             "cookies": [
@@ -409,7 +441,8 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         page = MagicMock()
         page.url = _postlogin_url(URL)
         page.wait_for_timeout.return_value = None
-        with patch.object(inspector, "bootstrap_stage", return_value={
+        with patch.object(inspector, "_session_boundary_clear", return_value=True), \
+                patch.object(inspector, "bootstrap_stage", return_value={
                     "verification_code_visible": False,
                     "identity_surface_visible": False,
                 }), \
@@ -487,7 +520,7 @@ class AdpVerifiedSessionTests(unittest.TestCase):
                             "raw_values_exposed": False,
                         }), \
                         patch.object(inspector, "_cookie_visibility", return_value=CLEAR_COOKIE_SURFACE), \
-                        patch.object(inspector, "_snapshot", side_effect=[{}, {boundary: True}]), \
+                        patch.object(inspector, "_snapshot", side_effect=[{"auth_observed": False, "captcha_observed": False}, {boundary: True}]), \
                         patch.object(inspector, "navigation_surface_fingerprint", return_value=FP), \
                         patch.object(inspector, "_approved_entry", return_value={}), \
                         patch.object(inspector, "_resolve_document_locator") as entry:
@@ -522,7 +555,7 @@ class AdpVerifiedSessionTests(unittest.TestCase):
 
         def snapshot(*args, **kwargs):
             rendered[0] = True
-            return {}
+            return {"auth_observed": False, "captcha_observed": False}
 
         clicks = []
         with tempfile.TemporaryDirectory() as tmp:
@@ -537,6 +570,8 @@ class AdpVerifiedSessionTests(unittest.TestCase):
                         "navigation_click_attempts": 0,
                         "raw_values_exposed": False,
                     }), \
+                    patch.object(inspector, "_authenticated_form_evidence", return_value={"authenticated_form_observed": True}), \
+                    patch.object(inspector, "_session_boundary_clear", return_value=True), \
                     patch.object(inspector, "_cookie_visibility", side_effect=observe), \
                     patch.object(inspector, "_snapshot", side_effect=snapshot) as snapshots, \
                     patch.object(inspector, "navigation_surface_fingerprint", return_value=FP), \
@@ -627,11 +662,13 @@ class AdpVerifiedSessionTests(unittest.TestCase):
             with self.subTest(ms=ms), self.assertRaisesRegex(ValueError, "INVALID_INSPECTOR_RENDER_WAIT"):
                 validate_inspector_request(AdpVerifiedSessionInspectorRequest(URL, FP, 0, "state.json", render_wait_ms=ms))
 
-    def run_timeline(self, stages, reports, *, expected_error=None, page_url=URL, visible_labels=()):
+    def run_timeline(self, stages, reports, *, expected_error=None, page_url=None, visible_labels=None, boundary_clear=True):
         """Drive the actual bootstrap loop with a deterministic browser clock."""
         clock = [0]
         page = MagicMock()
-        page.url = page_url
+        page.url = page_url or _postlogin_url(URL)
+        if visible_labels is None:
+            visible_labels = ("Sign Out", "My Applications", "Personal Information")
         def text_locator(label, **kwargs):
             labels = visible_labels(clock[0]) if callable(visible_labels) else visible_labels
             locator = MagicMock()
@@ -650,12 +687,11 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         playwright.chromium.launch.return_value = browser
         exports = []
 
-        def export(path, indexed_db=False):
+        def export(indexed_db=False):
             if indexed_db is not True:
                 raise AssertionError("IndexedDB must be included in verified-session export")
             exports.append(clock[0])
             payload = {"cookies": [], "origins": []}
-            Path(path).write_text(json.dumps(payload), encoding="utf-8")
             return payload
 
         context.storage_state.side_effect = export
@@ -668,6 +704,7 @@ class AdpVerifiedSessionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, \
                 patch("playwright.sync_api.sync_playwright") as sync, \
+                patch.object(bootstrap, "_session_boundary_clear", return_value=boundary_clear), \
                 patch.object(bootstrap.time, "monotonic", side_effect=lambda: clock[0]), \
                 patch.object(bootstrap, "bootstrap_stage", side_effect=lambda _: at(stages)), \
                 patch.object(bootstrap, "_sanitized_post_verification_report", side_effect=lambda *_: at(reports)), \
@@ -686,6 +723,60 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         context.close.assert_called_once()
         browser.close.assert_called_once()
         return exports, result
+
+    def test_otp_transition_on_wrong_target_never_exports_candidate(self):
+        exports, _ = self.run_timeline(
+            [{'verification_code_visible': True, 'identity_surface_visible': False},
+             {'verification_code_visible': False, 'identity_surface_visible': False}],
+            [surface({})], page_url=_postlogin_url(URL).replace('cid=test', 'cid=other'),
+            expected_error='FORM_NOT_READY',
+        )
+        self.assertEqual(exports, [])
+
+    def test_unclear_current_boundary_never_exports_after_otp(self):
+        exports, _ = self.run_timeline(
+            [{'verification_code_visible': True, 'identity_surface_visible': False},
+             {'verification_code_visible': False, 'identity_surface_visible': False}],
+            [surface({})], boundary_clear=False, expected_error='FORM_NOT_READY',
+        )
+        self.assertEqual(exports, [])
+
+    def test_current_session_boundary_requires_explicit_clear_evidence_and_stable_target(self):
+        page = MagicMock()
+        for snapshot in ({}, {'runtime_state': 'inspected', 'auth_observed': False},
+                         {'runtime_state': 'inspected', 'auth_observed': False, 'captcha_observed': True},
+                         {'runtime_state': 'inspected', 'auth_observed': 0, 'captcha_observed': False}):
+            page.url = _postlogin_url(URL)
+            with patch.object(bootstrap, '_snapshot', return_value=snapshot):
+                self.assertFalse(bootstrap._session_boundary_clear(page, URL))
+        page.url = _postlogin_url(URL)
+        def drift(*args, **kwargs):
+            page.url = page.url.replace('cid=test', 'cid=other')
+            return {'runtime_state': 'inspected', 'auth_observed': False, 'captcha_observed': False}
+        with patch.object(bootstrap, '_snapshot', side_effect=drift):
+            self.assertFalse(bootstrap._session_boundary_clear(page, URL))
+
+    def test_direct_probe_cannot_reuse_marker_only_form_under_unclear_boundary(self):
+        page = MagicMock()
+        page.url = _postlogin_url(URL)
+        with patch.object(inspector, 'bootstrap_stage', return_value={'verification_code_visible': False, 'identity_surface_visible': False}), patch.object(inspector, '_authenticated_form_evidence', return_value={'authenticated_form_observed': True}), patch.object(inspector, '_sanitized_post_verification_report', return_value=surface({})), patch.object(inspector, '_cookie_visibility', return_value=CLEAR_COOKIE_SURFACE), patch.object(inspector, '_session_boundary_clear', return_value=False):
+            result = _probe_authenticated_postlogin(page, URL, 1000)
+        self.assertFalse(result['authenticated_postlogin_reused'])
+        self.assertEqual(result['navigation_click_attempts'], 0)
+
+    def test_session_cli_error_handlers_never_print_exception_payload(self):
+        import ast, contextlib, io
+        for module in (bootstrap, inspector, persistent_probe):
+            source = Path(module.__file__).read_text()
+            boundary = ast.parse(source).body[-1]
+            def fail():
+                raise RuntimeError('PRIVATE_EXCEPTION_SENTINEL')
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                exec(compile(ast.Module(body=[boundary], type_ignores=[]), module.__file__, 'exec'),
+                     {'__name__': '__main__', 'main': fail, 'sys': __import__('sys')})
+            self.assertIn('RuntimeError', stderr.getvalue())
+            self.assertNotIn('PRIVATE_EXCEPTION_SENTINEL', stderr.getvalue())
 
     def test_authenticated_form_without_observed_otp_exports_as_candidate(self):
         exports, report = self.run_timeline(
@@ -936,7 +1027,7 @@ class AdpVerifiedSessionTests(unittest.TestCase):
     def test_form_without_observed_verification_never_exports(self):
         exports, _ = self.run_timeline(
             [{"verification_code_visible": False, "identity_surface_visible": False}],
-            [surface({})], expected_error="VERIFICATION_TIMEOUT",
+            [surface({})], visible_labels=(), expected_error="VERIFICATION_TIMEOUT",
         )
         self.assertEqual(exports, [])
 

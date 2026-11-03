@@ -223,12 +223,12 @@ def _country_readback_evidence(page, country) -> dict:
     )
     if selected_label_committed:
         mode = "selected_label"
-    elif input_label_match:
+    elif input_label_match and valid and aria_expanded in {"", "false"} and visible_listboxes == 0 and visible_options == 0:
         mode = "label"
-    elif input_iso2_match:
+    elif input_iso2_match and valid and aria_expanded in {"", "false"} and visible_listboxes == 0 and visible_options == 0:
         mode = "iso2"
     elif committed_custom_value:
-        mode = "custom_committed"
+        mode = "unverified_custom"
     elif not nonempty:
         mode = "empty"
     else:
@@ -301,13 +301,12 @@ def _set_address_country(
     for _ in range(20):
         page.wait_for_timeout(150)
         readback = _country_readback_evidence(page, country)
-        if readback["mode"] in {"selected_label", "label", "iso2", "custom_committed"}:
+        if readback["mode"] in {"selected_label", "label", "iso2"}:
             break
     if not isinstance(readback, dict) or readback["mode"] not in {
         "selected_label",
         "label",
         "iso2",
-        "custom_committed",
     }:
         mode = readback.get("mode", "unknown") if isinstance(readback, dict) else "unknown"
         raise PermissionError(

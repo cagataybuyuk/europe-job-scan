@@ -155,7 +155,7 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as exc:
         print(
-            f"ADP_PERSISTENT_PROFILE_PROBE_ERROR: {type(exc).__name__}: {exc}",
+            f"ADP_PERSISTENT_PROFILE_PROBE_ERROR: {type(exc).__name__}",
             file=sys.stderr,
         )
         raise SystemExit(2)
