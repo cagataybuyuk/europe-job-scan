@@ -82,9 +82,22 @@ class LiveInspectionPolicyTests(unittest.TestCase):
             ("form_structure_not_discovered", "FORM_STRUCTURE_NOT_DISCOVERED"),
         )
         self.assertEqual(
-            discovery_state({"controls": [{"observation_key": "document/input@0"}], "actions": []}),
+            discovery_state({"controls": [{"observation_key": "document/input@0", "visible": True}], "actions": []}),
             ("inspected", ""),
         )
+
+    def test_hidden_share_input_is_not_an_application_form(self):
+        self.assertEqual(discovery_state({"controls":[{"type":"text","visible":False}],"actions":[]}),
+                         ("form_structure_not_discovered","FORM_STRUCTURE_NOT_DISCOVERED"))
+
+    def test_visible_expiry_status_overrides_even_visible_controls(self):
+        self.assertEqual(discovery_state({"controls":[{"type":"text","visible":True}],
+            "actions":[{"label":"Sorry, this job has expired","visible":True}]}),
+            ("job_expired","JOB_EXPIRED"))
+
+    def test_visible_password_is_auth_boundary(self):
+        self.assertEqual(discovery_state({"controls":[{"type":"password","visible":True}]}),
+                         ("auth_boundary","AUTH_BOUNDARY"))
 
 
 if __name__ == "__main__":

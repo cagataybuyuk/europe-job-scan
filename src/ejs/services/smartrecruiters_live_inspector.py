@@ -141,7 +141,18 @@ def combine_shadow_reports(reports: list[dict]) -> dict:
 
 
 def discovery_state(form: dict) -> tuple[str, str]:
-    if form.get("controls"):
+    # Job-status/cookie/share UI must not masquerade as an application form.
+    actions = form.get("actions", [])
+    expired_labels = {"sorry, this job has expired", "this job has expired"}
+    if any(isinstance(a, dict) and a.get("visible") is True
+           and " ".join(str(a.get("label", "")).casefold().split()) in expired_labels
+           for a in actions):
+        return "job_expired", "JOB_EXPIRED"
+    controls = [c for c in form.get("controls", [])
+                if isinstance(c, dict) and c.get("visible") is True]
+    if any(str(c.get("type", "")).casefold() == "password" for c in controls):
+        return "auth_boundary", "AUTH_BOUNDARY"
+    if controls:
         return "inspected", ""
     return "form_structure_not_discovered", "FORM_STRUCTURE_NOT_DISCOVERED"
 

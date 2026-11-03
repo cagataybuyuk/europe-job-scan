@@ -283,6 +283,34 @@ class SmartRecruitersE2ETests(unittest.TestCase):
         self.assertTrue(r.submit_control_observed)
         self.assertEqual(r.submit_attempts, 0)
 
+    def test_expired_page_hidden_share_input_never_becomes_manifest_candidate(self):
+        from playwright.sync_api import sync_playwright
+        from ejs.services.smartrecruiters_shadow import inspect_shadow_form
+        from ejs.services.smartrecruiters_live_inspector import discovery_state
+        from ejs.services.smartrecruiters_live_route import route_live_inspection
+        with sync_playwright() as p:
+            browser=p.chromium.launch(executable_path=self.config.executable_path,headless=True)
+            try:
+                page=browser.new_page()
+                page.set_content('<button type="button">Sorry, this job has expired</button>'
+                                 '<aside style="display:none"><input aria-label="Copy link" value="PRIVATE_SENTINEL"></aside>'
+                                 '<script>window.mutations=0;for(const e of ["input","change","click","submit"])'
+                                 'document.addEventListener(e,()=>window.mutations++);</script>')
+                form=inspect_shadow_form(page)
+                state,code=discovery_state(form)
+                decision=route_live_inspection({"runtime_state":state,"error_code":code,
+                    "form":form,"captcha_observed":False,"inspection_only":True,
+                    "live_execution_ready":False,"form_value_write_attempts":0,
+                    "file_upload_attempts":0,"submit_attempts":0})
+                self.assertEqual(state,"job_expired")
+                self.assertEqual(decision["reason_code"],"JOB_EXPIRED")
+                self.assertFalse(decision["manifest_review_allowed"])
+                self.assertFalse(decision["safe_fill_allowed"])
+                self.assertEqual(page.evaluate('window.mutations'),0)
+                self.assertNotIn('PRIVATE_SENTINEL',repr(form))
+            finally:
+                browser.close()
+
 
 if __name__ == "__main__":
     unittest.main()

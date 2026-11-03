@@ -44,7 +44,7 @@ class LiveInspectionRouteTests(unittest.TestCase):
         decision = route_live_inspection(report(
             runtime_state="inspected",
             error_code="",
-            form={"controls": [{"observation_key": "document/input@1"}], "actions": []},
+            form={"controls": [{"observation_key": "document/input@1", "visible": True}], "actions": []},
         ))
         self.assertEqual(decision["route"], "manifest_review_candidate")
         self.assertEqual(decision["reason_code"], "INSPECTABLE_CONTROLS_OBSERVED")
@@ -69,6 +69,37 @@ class LiveInspectionRouteTests(unittest.TestCase):
             route_live_inspection(report(inspection_only=False))
         with self.assertRaises(PermissionError):
             route_live_inspection(report(live_execution_ready=True))
+
+    def test_stale_inspected_state_cannot_promote_hidden_share_control(self):
+        decision=route_live_inspection(report(runtime_state="inspected",form={
+            "controls":[{"type":"text","visible":False}],"actions":[]}))
+        self.assertFalse(decision["manifest_review_allowed"])
+        self.assertEqual(decision["route"],"diagnostic_review")
+
+    def test_expired_job_is_rejected_even_when_report_says_inspected(self):
+        decision=route_live_inspection(report(runtime_state="inspected",form={
+            "controls":[{"type":"text","visible":True}],
+            "actions":[{"label":"Sorry, this job has expired","visible":True}]}))
+        self.assertEqual(decision["reason_code"],"JOB_EXPIRED")
+        self.assertFalse(decision["manifest_review_allowed"])
+        self.assertFalse(decision["safe_fill_allowed"])
+
+    def test_visible_auth_field_forces_human_handoff(self):
+        decision=route_live_inspection(report(runtime_state="inspected",form={
+            "controls":[{"type":"password","visible":True}],"actions":[]}))
+        self.assertEqual(decision["reason_code"],"AUTH_BOUNDARY")
+        self.assertFalse(decision["manifest_review_allowed"])
+
+    def test_missing_side_effect_counters_are_not_assumed_zero(self):
+        for key in ("form_value_write_attempts","file_upload_attempts","submit_attempts"):
+            value=report();del value[key]
+            with self.subTest(key=key),self.assertRaises(ValueError): route_live_inspection(value)
+
+    def test_missing_or_malformed_captcha_evidence_cannot_promote_manifest(self):
+        for value in (None,"false",0):
+            decision=route_live_inspection(report(runtime_state="inspected",captcha_observed=value,
+                form={"controls":[{"visible":True}],"actions":[]}))
+            self.assertFalse(decision["manifest_review_allowed"])
 
 
 if __name__ == "__main__":
