@@ -42,7 +42,10 @@ def _target_binding(page_url: str, application_url: str) -> dict:
     current = urlsplit(page_url)
     expected = urlsplit(application_url)
     evidence = {
-        "reviewed_origin_valid": current.hostname == expected.hostname,
+        "reviewed_origin_valid": (
+            current.hostname == expected.hostname
+            and current.port in (None, 443) and expected.port in (None, 443)
+        ),
         "postlogin_path_match": current.path == REVIEWED_POSTLOGIN_PATH,
         "cid_match": False,
         "ccid_match": False,
@@ -241,9 +244,12 @@ def extract_same_page_manifest(
         timeout_ms=timeout_ms,
         render_wait_ms=render_wait_ms,
     )
-    if snapshot.get("captcha_observed") is True:
+    binding = _target_binding(str(page.url), application_url)
+    if binding.get("target_bound") is not True:
+        raise PermissionError("ADP_SAME_PAGE_MANIFEST_TARGET_MISMATCH")
+    if snapshot.get("captcha_observed") is not False:
         raise PermissionError("ADP_SAME_PAGE_MANIFEST_CAPTCHA_BOUNDARY")
-    if snapshot.get("auth_observed") is True:
+    if snapshot.get("auth_observed") is not False:
         raise PermissionError("ADP_SAME_PAGE_MANIFEST_AUTH_BOUNDARY")
     if snapshot.get("runtime_state") != "inspected":
         raise PermissionError("ADP_SAME_PAGE_MANIFEST_FORM_NOT_INSPECTED")

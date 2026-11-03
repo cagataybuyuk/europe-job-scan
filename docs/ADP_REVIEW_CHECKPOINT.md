@@ -112,3 +112,14 @@ and current URLs and return false evidence before reading markers on an
 unreviewed port. This aligns proof classification with restoration isolation.
 Tests cover current-only, approved-only and matching non-default ports plus
 derived/captured replay inputs. No live session or browser operation was used.
+
+## Shared manifest fail-closed correction — 2026-11-03
+
+The shared verified-page manifest now requires auth/CAPTCHA indicators to be
+explicitly false, rejects non-default HTTPS ports in both approved/current URLs,
+and rechecks target binding after snapshot acquisition. Unknown or malformed
+boundary evidence and redirects during inspection cannot produce a verified
+manifest. Tests cover missing/null/numeric/string/true evidence, mid-snapshot
+tenant drift and current/approved/both unreviewed ports before DOM access.
+This tightens the shared gate used by existing same-page helpers, without
+enabling an action or claiming atomic browser isolation or live reuse.

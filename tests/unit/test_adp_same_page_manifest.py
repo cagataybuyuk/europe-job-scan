@@ -221,6 +221,40 @@ class AdpSamePageManifestTests(unittest.TestCase):
             manifest_surface_fingerprint(semantic_drift),
         )
 
+    def test_unknown_or_malformed_boundary_evidence_is_rejected(self):
+        for key, code in (('captcha_observed', 'CAPTCHA_BOUNDARY'), ('auth_observed', 'AUTH_BOUNDARY')):
+            for value in (None, 0, '', 'false', True):
+                snapshot = {'runtime_state': 'inspected', 'captcha_observed': False, 'auth_observed': False}
+                snapshot[key] = value
+                with self.subTest(key=key, value=value), patch.object(manifest, '_snapshot', return_value=snapshot):
+                    with self.assertRaisesRegex(PermissionError, code):
+                        extract_same_page_manifest(self.page_with_steps(), URL)
+            snapshot.pop(key)
+            with patch.object(manifest, '_snapshot', return_value=snapshot):
+                with self.assertRaisesRegex(PermissionError, code):
+                    extract_same_page_manifest(self.page_with_steps(), URL)
+
+    def test_target_drift_during_snapshot_rejects_stale_initial_binding(self):
+        page = self.page_with_steps()
+        def drift(*args, **kwargs):
+            page.url = POSTLOGIN.replace('cid=test', 'cid=other')
+            return {'runtime_state': 'inspected', 'captcha_observed': False, 'auth_observed': False}
+        with patch.object(manifest, '_snapshot', side_effect=drift):
+            with self.assertRaisesRegex(PermissionError, 'TARGET_MISMATCH'):
+                extract_same_page_manifest(page, URL)
+
+    def test_nondefault_port_rejected_before_page_content_read(self):
+        for current, expected in ((POSTLOGIN.replace('.com/', '.com:444/'), URL),
+                                  (POSTLOGIN, URL.replace('.com/', '.com:444/')),
+                                  (POSTLOGIN.replace('.com/', '.com:444/'), URL.replace('.com/', '.com:444/'))):
+            page = self.page_with_steps()
+            page.url = current
+            with self.subTest(current=current, expected=expected), patch.object(manifest, '_snapshot') as snapshot:
+                with self.assertRaisesRegex(PermissionError, 'TARGET_MISMATCH'):
+                    extract_same_page_manifest(page, expected)
+                snapshot.assert_not_called()
+                page.get_by_text.assert_not_called()
+
     def test_conflicting_duplicate_jobid_is_rejected(self):
         page = self.page_with_steps()
         page.url = POSTLOGIN + "&jobId=1"
