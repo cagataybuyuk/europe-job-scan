@@ -28,6 +28,15 @@ class ShadowSummaryTests(unittest.TestCase):
         self.assertEqual(result["schema_fingerprint"], summarize_shadow_form(original)["schema_fingerprint"])
         self.assertNotIn("PRIVATE_", json.dumps(result))
 
+    def test_changed_host_hint_invalidates_fingerprint_without_enabling_execution(self):
+        observed = self.sample()
+        observed['controls'][0]['host_label_hint'] = 'Resume'
+        original = summarize_shadow_form(observed)
+        observed['controls'][0]['host_label_hint'] = 'Cover letter'
+        changed = summarize_shadow_form(observed)
+        self.assertNotEqual(original['schema_fingerprint'], changed['schema_fingerprint'])
+        self.assertFalse(changed['live_execution_ready'])
+
     def test_duplicate_identity_is_rejected(self):
         observed = self.sample()
         observed["controls"][1]["observation_key"] = observed["controls"][0]["observation_key"]
@@ -49,6 +58,39 @@ class ShadowSummaryTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("playwright"), "Playwright is not installed")
 class ShadowBrowserTests(unittest.TestCase):
+    def test_host_labels_remain_diagnostic_without_reading_host_text_or_values(self):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                page = browser.new_page()
+                page.set_content('''<div id="outer" label="Outer section"></div>
+                    <script>
+                    window.events = 0;
+                    const outer = document.querySelector('#outer').attachShadow({mode:'open'});
+                    outer.innerHTML = '<div id="field" label="City" required>PRIVATE_HOST_TEXT</div><div id="resume" aria-label="Resume"></div>';
+                    const field = outer.querySelector('#field').attachShadow({mode:'open'});
+                    field.innerHTML = '<input id="generated-1" value="PRIVATE_VALUE">';
+                    const resume = outer.querySelector('#resume').attachShadow({mode:'open'});
+                    resume.innerHTML = '<input type="file">';
+                    for (const root of [document, outer, field, resume])
+                      for (const name of ['input','change','click','submit'])
+                        root.addEventListener(name, () => window.events++);
+                    </script>''')
+                result = inspect_shadow_form(page)
+                first, file = result['controls']
+                self.assertEqual(first['label'], '')
+                self.assertEqual(first['host_label_hint'], 'City')
+                self.assertTrue(first['host_required_hint'])
+                self.assertFalse(first['required'])
+                self.assertEqual(file['host_label_hint'], 'Resume')
+                self.assertNotIn('PRIVATE_', json.dumps(result))
+                self.assertEqual(page.evaluate('window.events'), 0)
+                self.assertFalse(result['live_execution_ready'])
+                self.assertEqual(result['file_upload_attempts'], 0)
+            finally:
+                browser.close()
+
     def test_nested_shadow_scopes_labels_and_read_only_invariants(self):
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:

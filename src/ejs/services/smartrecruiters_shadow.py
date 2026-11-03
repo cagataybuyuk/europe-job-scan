@@ -46,6 +46,9 @@ SHADOW_FORM_EXTRACTOR = r"""
           id: el.id || '', name: el.getAttribute('name') || '', label: lbl,
           role: el.getAttribute('role') || '', visible: shown(el), disabled: !!el.disabled,
           required: !!el.required || el.getAttribute('aria-required') === 'true' || /\*\s*$/.test(lbl),
+          // Host labels are diagnostic hints only, never canonical mappings.
+          // Read explicit static label metadata, not host textContent or values.
+          host_label_hint: hosts.map(n => norm(n.getAttribute('label')) || label(n)).find(Boolean) || '',
           host_required_hint: hosts.some(n => n.hasAttribute('required') || n.getAttribute('aria-required') === 'true'),
           accept: el.getAttribute('accept') || '', multiple: !!el.multiple
         });
@@ -73,7 +76,7 @@ def summarize_shadow_form(observation: dict) -> dict:
     # Allowlist output fields: never retain native input values, files, HTML,
     # arbitrary browser state, or candidate data supplied by a caller.
     keys = ("scope", "observation_key", "tag", "type", "id", "name", "label", "role",
-            "visible", "disabled", "required", "host_required_hint", "accept", "multiple")
+            "visible", "disabled", "required", "host_required_hint", "host_label_hint", "accept", "multiple")
     controls = [{k: c[k] for k in keys if k in c} for c in observation["controls"]]
     actions = [{k: a[k] for k in ("scope", "observation_key", "label", "type", "visible", "disabled") if k in a}
                for a in observation["actions"]]
@@ -89,7 +92,7 @@ def summarize_shadow_form(observation: dict) -> dict:
     collisions = [group for group in locator_groups.values() if len(group) > 1]
     payload = {"controls": controls, "actions": actions}
     fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return {"adapter_version": "smartrecruiters-shadow-inspection-v1", **payload,
+    return {"adapter_version": "smartrecruiters-shadow-inspection-v2", **payload,
             "schema_fingerprint": fingerprint, "unscoped_locator_collisions": collisions,
             "file_control_keys": [c["observation_key"] for c in controls if c.get("type") == "file"],
             "next_observed": any(a.get("visible") and a.get("label", "").strip().lower() in {"next", "continue", "proceed"} for a in actions),
