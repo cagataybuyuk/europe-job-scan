@@ -25,7 +25,7 @@ class AdpEntryAutopilotTests(unittest.TestCase):
             profile_json_path="profile.json",
         )
 
-    def test_advance_to_otp_uses_reviewed_actions_and_stops_at_otp(self):
+    def _drive_reviewed_entry(self, entry_result=None):
         page = MagicMock()
         page.url = URL
 
@@ -70,15 +70,19 @@ class AdpEntryAutopilotTests(unittest.TestCase):
             autopilot, "phone_contract_surface_fingerprint", return_value=autopilot.EXPECTED_PHONE_FP
         ), patch.object(
             autopilot, "_write_identity_fields", return_value=[{}, {}, {}]
-        ), patch.object(
+        ) as identity_writer, patch.object(
             autopilot, "_write_phone_fields", return_value={"phone_readback_match": True}
-        ), patch.object(
+        ) as phone_writer, patch.object(
             autopilot, "action_surface_descriptor", return_value={}
         ), patch.object(
             autopilot, "action_surface_fingerprint", return_value=autopilot.EXPECTED_ACTION_FP
         ):
-            report = advance_to_otp_on_existing_page(page, self.request())
+            handler = MagicMock(return_value=entry_result) if entry_result is not None else None
+            report = advance_to_otp_on_existing_page(page, self.request(), preferred_entry_handler=handler)
+        return report, identity_writer, phone_writer, continue_button, handler
 
+    def test_advance_to_otp_uses_reviewed_actions_and_stops_at_otp(self):
+        report, *_ = self._drive_reviewed_entry()
         self.assertEqual(report["autopilot_status"], "waiting_for_otp")
         self.assertEqual(report["apply_click_attempts"], 1)
         self.assertEqual(report["apply_click_successes"], 1)
@@ -89,6 +93,22 @@ class AdpEntryAutopilotTests(unittest.TestCase):
         self.assertEqual(report["file_upload_attempts"], 0)
         self.assertEqual(report["submit_attempts"], 0)
         self.assertFalse(report["raw_values_exposed"])
+
+    def test_awli_entry_stops_native_identity_phone_and_continue(self):
+        report, identity, phone, continue_button, handler = self._drive_reviewed_entry(
+            {'route': 'awli_started_requires_reinspection', 'final_submit_allowed': False})
+        handler.assert_called_once()
+        identity.assert_not_called()
+        phone.assert_not_called()
+        continue_button.click.assert_not_called()
+        self.assertEqual(report['autopilot_status'], 'awli_started_requires_reinspection')
+        self.assertEqual(report['form_value_write_attempts'], 0)
+        self.assertEqual(report['continue_click_attempts'], 0)
+        self.assertFalse(report['final_submit_allowed'])
+
+    def test_unclear_entry_preference_blocks_native_writes(self):
+        with self.assertRaisesRegex(PermissionError, 'PREFERENCE_REQUIRES_REVIEW'):
+            self._drive_reviewed_entry({'route': 'human_review'})
 
     def test_identity_target_drift_after_fill_stops_before_readback_or_next_field(self):
         page = MagicMock()
