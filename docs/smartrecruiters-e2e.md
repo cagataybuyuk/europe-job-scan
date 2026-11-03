@@ -75,3 +75,19 @@ The read-only CLI/workflow can record JOB_EXPIRED and AUTH_BOUNDARY as successfu
 observations while routing refuses manifest promotion. Observation exit 0 never
 means a job is open, preparation succeeded or execution was authorized. Unsupported
 runtime remains a nonzero exit; no workflow input or runtime authority is added.
+
+## Host-label diagnostics — 2026-11-03
+
+A subsequent anonymous read-only observation reached 13 visible controls, but
+several inner inputs had no direct label. Inspector v2 now includes a separate
+`host_label_hint`, choosing the nearest ancestor shadow host's explicit label
+metadata. It never reads host textContent, input values or file contents for this
+hint. Direct labels and required flags are unchanged: a host hint is neither an
+approved canonical mapping nor an upload selector. Fingerprints include the new
+metadata and require fresh review; v1 fingerprints must not be promoted.
+
+Targeted shadow/live-inspector/live-route tests: 29 passed, including real Chromium
+host-label isolation and zero-event assertions. The captured live inventory
+remains preliminary: exact final target binding, role eligibility, two ambiguous
+dropzones and the required unnamed autocomplete still need current review.
+No successful live safe-fill, upload or submit is claimed.
