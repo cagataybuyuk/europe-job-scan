@@ -6,13 +6,14 @@ Verify only after the user has already entered a syntactically valid OTP, and
 may click exactly one reviewed Complete Your Application action after
 authentication.
 
-It never reads/logs OTP text, never writes an OTP, never clicks application
+It never returns/logs OTP text, never writes an OTP, never clicks application
 Next, never uploads a file and never submits an application.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+from urllib.parse import parse_qs, urlsplit
 
 from ejs.services.adp_cookie_preferences_canary import (
     preference_surface_descriptor,
@@ -45,7 +46,7 @@ from ejs.services.adp_profile_v2_continue_canary import (
     load_resolved_profile,
     phone_contract_surface_fingerprint,
 )
-from ejs.services.adp_same_page_manifest import _target_binding
+from ejs.services.adp_same_page_manifest import _target_binding, REVIEWED_POSTLOGIN_PATH
 from ejs.services.adp_safe_fill_canary import safe_fill_surface_fingerprint
 
 AUTOPILOT_VERSION = "adp-entry-autopilot-v1"
@@ -92,6 +93,38 @@ def validate_request(request: AdpEntryAutopilotRequest) -> None:
         raise ValueError("ADP_ENTRY_AUTOPILOT_INVALID_RENDER_WAIT")
 
 
+ENTRY_PATH = "/mascsr/default/mdf/recruitment/recruitment.html"
+
+
+def _require_target(page, application_url: str, *, postlogin=False) -> None:
+    """Bind every stage to one exact reviewed tenant/requisition; no URL output."""
+    try:
+        validate_adp_live_url(application_url)
+        validate_adp_live_url(str(page.url))
+        expected, current = urlsplit(application_url), urlsplit(str(page.url))
+        allowed = {REVIEWED_POSTLOGIN_PATH} if postlogin else {ENTRY_PATH}
+        if (expected.path != ENTRY_PATH or current.path not in allowed
+                or expected.port not in (None,443) or current.port not in (None,443)):
+            raise ValueError("unreviewed path/port")
+        def parameters(query):
+            result = {}
+            for key, values in parse_qs(query,keep_blank_values=True).items():
+                result.setdefault(key.casefold(),[]).extend(values)
+            return result
+        wanted, actual = parameters(expected.query), parameters(current.query)
+        for key in ("cid","ccid","jobid"):
+            if (len(wanted.get(key,[])) != 1 or not wanted[key][0]
+                    or len(actual.get(key,[])) != 1 or actual[key] != wanted[key]):
+                raise ValueError("ambiguous target")
+    except (ValueError,TypeError):
+        raise PermissionError("ADP_ENTRY_AUTOPILOT_TARGET_MISMATCH") from None
+
+
+def _require_clear_boundary(snapshot: dict, code: str) -> None:
+    if snapshot.get("captcha_observed") is not False or snapshot.get("auth_observed") is not False:
+        raise PermissionError(code)
+
+
 def _base_counters() -> dict:
     return {
         "preference_navigation_click_attempts": 0,
@@ -122,6 +155,7 @@ def _cookie_preflight(page, request: AdpEntryAutopilotRequest, counters: dict) -
     if surface.get("banner_visible") is not True:
         return
 
+    _require_target(page,request.application_url)
     candidate = reviewed_preferences_button(page)
     counters["preference_navigation_click_attempts"] += 1
     candidate.click(timeout=request.timeout_ms)
@@ -136,12 +170,14 @@ def _cookie_preflight(page, request: AdpEntryAutopilotRequest, counters: dict) -
     if pref.get("visible_checkboxes") != []:
         raise PermissionError("ADP_ENTRY_AUTOPILOT_VISIBLE_CHECKBOX_DRIFT")
 
+    _require_target(page,request.application_url)
     unselect = _unique_actionable_button(page, UNSELECT_ALL_LABEL)
     counters["cookie_unselect_all_click_attempts"] += 1
     unselect.click(timeout=request.timeout_ms)
     counters["cookie_unselect_all_click_successes"] += 1
     page.wait_for_timeout(250)
 
+    _require_target(page,request.application_url)
     save = _unique_actionable_button(page, SAVE_CHANGES_LABEL)
     counters["cookie_save_click_attempts"] += 1
     save.click(timeout=request.timeout_ms)
@@ -155,6 +191,7 @@ def _cookie_preflight(page, request: AdpEntryAutopilotRequest, counters: dict) -
 
 def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> dict:
     validate_request(request)
+    _require_target(page,request.application_url)
     profile = load_resolved_profile(request.profile_json_path)
     counters = _base_counters()
 
@@ -164,8 +201,8 @@ def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> 
         timeout_ms=request.timeout_ms,
         render_wait_ms=request.render_wait_ms,
     )
-    if pre.get("captcha_observed") is True or pre.get("auth_observed") is True:
-        raise PermissionError("ADP_ENTRY_AUTOPILOT_PREFLIGHT_BOUNDARY")
+    _require_target(page,request.application_url)
+    _require_clear_boundary(pre,"ADP_ENTRY_AUTOPILOT_PREFLIGHT_BOUNDARY")
     if navigation_surface_fingerprint(pre) != EXPECTED_NAVIGATION_FP:
         raise AdpEntryNavigationSurfaceDrift(
             "ADP_ENTRY_AUTOPILOT_NAVIGATION_SURFACE_DRIFT",
@@ -180,6 +217,8 @@ def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> 
         timeout_ms=request.timeout_ms,
         render_wait_ms=request.render_wait_ms,
     )
+    _require_target(page,request.application_url)
+    _require_clear_boundary(post_cookie,"ADP_ENTRY_AUTOPILOT_POST_COOKIE_BOUNDARY")
     if navigation_surface_fingerprint(post_cookie) != EXPECTED_NAVIGATION_FP:
         raise AdpEntryNavigationSurfaceDrift(
             "ADP_ENTRY_AUTOPILOT_POST_COOKIE_NAVIGATION_DRIFT",
@@ -193,6 +232,7 @@ def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> 
     actual_apply = entry.get_attribute("aria-label") or entry.inner_text() or ""
     if _normalize(actual_apply) != "apply":
         raise PermissionError("ADP_ENTRY_AUTOPILOT_APPLY_LABEL_DRIFT")
+    _require_target(page,request.application_url)
     counters["apply_click_attempts"] = 1
     entry.click(timeout=request.timeout_ms)
     counters["apply_click_successes"] = 1
@@ -204,8 +244,8 @@ def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> 
         timeout_ms=request.timeout_ms,
         render_wait_ms=request.render_wait_ms,
     )
-    if form.get("captcha_observed") is True or form.get("auth_observed") is True:
-        raise PermissionError("ADP_ENTRY_AUTOPILOT_POST_APPLY_BOUNDARY")
+    _require_target(page,request.application_url)
+    _require_clear_boundary(form,"ADP_ENTRY_AUTOPILOT_POST_APPLY_BOUNDARY")
     if safe_fill_surface_fingerprint(form) != EXPECTED_SAFE_FILL_FP:
         raise PermissionError("ADP_ENTRY_AUTOPILOT_IDENTITY_SURFACE_DRIFT")
 
@@ -213,7 +253,9 @@ def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> 
     if phone_contract_surface_fingerprint(phone_contract) != EXPECTED_PHONE_FP:
         raise PermissionError("ADP_ENTRY_AUTOPILOT_PHONE_CONTRACT_DRIFT")
 
+    _require_target(page,request.application_url)
     identity = _write_identity_fields(page, form, profile, counters)
+    _require_target(page,request.application_url)
     phone = _write_phone_fields(page, profile, counters)
 
     action_surface = action_surface_descriptor(page)
@@ -227,6 +269,7 @@ def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> 
         or not continue_button.is_enabled()
     ):
         raise PermissionError("ADP_ENTRY_AUTOPILOT_CONTINUE_NOT_ACTIONABLE")
+    _require_target(page,request.application_url)
     counters["continue_click_attempts"] = 1
     continue_button.click(timeout=request.timeout_ms)
     counters["continue_click_successes"] = 1
@@ -254,12 +297,18 @@ def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> 
     }
 
 
-def click_verify_if_user_populated_otp(page, counters: dict, *, timeout_ms: int = 20_000) -> bool:
+def click_verify_if_user_populated_otp(page, counters: dict, *, application_url: str, timeout_ms: int = 20_000) -> bool:
     """Click Verify only after the user has already entered a six-digit OTP.
 
     The OTP value is read only in memory for shape validation and is never
     returned or logged.
     """
+    if counters.get("verify_click_attempts",0) != 0:
+        return False
+    _require_target(page,application_url)
+    current = _snapshot(page,requested_url=application_url,timeout_ms=timeout_ms,render_wait_ms=min(5000,timeout_ms))
+    _require_clear_boundary(current,"ADP_ENTRY_AUTOPILOT_VERIFY_BOUNDARY")
+    _require_target(page,application_url)
     otp = page.locator(f"#{OTP_CONTROL_ID}")
     if otp.count() != 1 or not otp.is_visible() or not otp.is_enabled():
         return False
@@ -272,6 +321,7 @@ def click_verify_if_user_populated_otp(page, counters: dict, *, timeout_ms: int 
         raise PermissionError("ADP_ENTRY_AUTOPILOT_VERIFY_NOT_ACTIONABLE")
     if counters.get("verify_click_attempts", 0) != 0:
         return False
+    _require_target(page,application_url)
     counters["verify_click_attempts"] = 1
     verify.click(timeout=timeout_ms)
     counters["verify_click_successes"] = 1
@@ -289,6 +339,7 @@ def click_complete_application_on_portal(
     if counters.get("complete_application_click_attempts", 0) != 0:
         return False
 
+    _require_target(page,application_url,postlogin=True)
     binding = _target_binding(str(page.url), application_url)
     if binding.get("target_bound") is not True:
         raise PermissionError("ADP_ENTRY_AUTOPILOT_PORTAL_TARGET_MISMATCH")
@@ -299,6 +350,8 @@ def click_complete_application_on_portal(
         timeout_ms=timeout_ms,
         render_wait_ms=render_wait_ms,
     )
+    _require_target(page,application_url,postlogin=True)
+    _require_clear_boundary(snapshot,"ADP_ENTRY_AUTOPILOT_PORTAL_BOUNDARY")
     actions = snapshot.get("form", {}).get("actions", [])
     candidates = [
         item for item in actions
@@ -318,6 +371,7 @@ def click_complete_application_on_portal(
     if not locator.is_visible() or not locator.is_enabled():
         raise PermissionError("ADP_ENTRY_AUTOPILOT_COMPLETE_APPLICATION_NOT_ACTIONABLE")
 
+    _require_target(page,application_url,postlogin=True)
     counters["complete_application_click_attempts"] = 1
     locator.click(timeout=timeout_ms)
     counters["complete_application_click_successes"] = 1

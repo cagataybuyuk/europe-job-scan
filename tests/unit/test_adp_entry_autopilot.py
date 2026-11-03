@@ -26,6 +26,7 @@ class AdpEntryAutopilotTests(unittest.TestCase):
 
     def test_advance_to_otp_uses_reviewed_actions_and_stops_at_otp(self):
         page = MagicMock()
+        page.url = URL
 
         apply_locator = MagicMock()
         apply_locator.is_visible.return_value = True
@@ -90,6 +91,7 @@ class AdpEntryAutopilotTests(unittest.TestCase):
 
     def test_verify_click_requires_user_populated_six_digit_otp_and_never_returns_value(self):
         page = MagicMock()
+        page.url = URL
         otp = MagicMock()
         otp.count.return_value = 1
         otp.is_visible.return_value = True
@@ -104,7 +106,8 @@ class AdpEntryAutopilotTests(unittest.TestCase):
         page.get_by_role.return_value = verify
 
         counters = {"verify_click_attempts": 0, "verify_click_successes": 0}
-        clicked = click_verify_if_user_populated_otp(page, counters)
+        with patch.object(autopilot,"_snapshot",return_value={"captcha_observed":False,"auth_observed":False}):
+            clicked = click_verify_if_user_populated_otp(page, counters, application_url=URL)
 
         self.assertTrue(clicked)
         verify.click.assert_called_once()
@@ -114,6 +117,7 @@ class AdpEntryAutopilotTests(unittest.TestCase):
 
     def test_verify_does_not_click_for_incomplete_otp(self):
         page = MagicMock()
+        page.url = URL
         otp = MagicMock()
         otp.count.return_value = 1
         otp.is_visible.return_value = True
@@ -122,11 +126,13 @@ class AdpEntryAutopilotTests(unittest.TestCase):
         page.locator.return_value = otp
 
         counters = {"verify_click_attempts": 0, "verify_click_successes": 0}
-        self.assertFalse(click_verify_if_user_populated_otp(page, counters))
+        with patch.object(autopilot,"_snapshot",return_value={"captcha_observed":False,"auth_observed":False}):
+            self.assertFalse(click_verify_if_user_populated_otp(page, counters, application_url=URL))
         page.get_by_role.assert_not_called()
 
     def test_complete_application_click_is_exactly_once(self):
         page = MagicMock()
+        page.url = URL.replace(autopilot.ENTRY_PATH,autopilot.REVIEWED_POSTLOGIN_PATH)
         candidate = {
             "scope": "document",
             "observation_key": "document/button@9",
@@ -144,7 +150,7 @@ class AdpEntryAutopilotTests(unittest.TestCase):
         with patch.object(
             autopilot, "_target_binding", return_value={"target_bound": True}
         ), patch.object(
-            autopilot, "_snapshot", return_value={"form": {"actions": [candidate]}}
+            autopilot, "_snapshot", return_value={"captcha_observed":False,"auth_observed":False,"form": {"actions": [candidate]}}
         ), patch.object(
             autopilot, "_resolve_document_locator", return_value=locator
         ):
@@ -156,6 +162,88 @@ class AdpEntryAutopilotTests(unittest.TestCase):
         locator.click.assert_called_once()
         self.assertEqual(counters["complete_application_click_attempts"], 1)
         self.assertEqual(counters["complete_application_click_successes"], 1)
+
+    def test_wrong_or_ambiguous_target_stops_before_profile_access(self):
+        cases=[URL.replace('955507','955508'),URL.replace('cid=test','cid=other'),
+               URL+'&jobId=955507',URL+'&jobId=',URL.replace('ccId=19000101_000001&',''),
+               URL.replace('https://','http://'),URL.replace('workforcenow.adp.com','example.com'),
+               URL.replace('workforcenow.adp.com','workforcenow.adp.com:444'),
+               URL.replace(autopilot.ENTRY_PATH,'/unreviewed.html')]
+        for target in cases:
+            page=MagicMock();page.url=target
+            with self.subTest(target=target),patch.object(autopilot,'load_resolved_profile') as profile:
+                with self.assertRaisesRegex(PermissionError,'TARGET_MISMATCH'):
+                    advance_to_otp_on_existing_page(page,self.request())
+                profile.assert_not_called();page.locator.assert_not_called()
+
+    def test_post_cookie_auth_or_unknown_evidence_stops_before_apply(self):
+        clear={'captcha_observed':False,'auth_observed':False}
+        for boundary in ({'captcha_observed':True,'auth_observed':False},
+                         {'captcha_observed':False,'auth_observed':True},{},
+                         {'captcha_observed':'false','auth_observed':False}):
+            page=MagicMock();page.url=URL
+            with self.subTest(boundary=boundary),patch.object(autopilot,'load_resolved_profile'),\
+                 patch.object(autopilot,'_snapshot',side_effect=[clear,boundary]),\
+                 patch.object(autopilot,'navigation_surface_fingerprint',return_value=autopilot.EXPECTED_NAVIGATION_FP),\
+                 patch.object(autopilot,'_cookie_preflight'),patch.object(autopilot,'_approved_entry') as entry:
+                with self.assertRaisesRegex(PermissionError,'POST_COOKIE_BOUNDARY'):
+                    advance_to_otp_on_existing_page(page,self.request())
+                entry.assert_not_called()
+
+    def test_post_apply_retarget_stops_before_identity_and_phone_writes(self):
+        page=MagicMock();page.url=URL
+        clear={'captcha_observed':False,'auth_observed':False}
+        calls=[]
+        def snapshot(*args,**kwargs):
+            calls.append(1)
+            if len(calls)==3: page.url=URL.replace('955507','955508')
+            return clear
+        locator=MagicMock();locator.is_visible.return_value=True;locator.is_enabled.return_value=True
+        locator.get_attribute.return_value='Apply'
+        with patch.object(autopilot,'load_resolved_profile'),patch.object(autopilot,'_snapshot',side_effect=snapshot),\
+             patch.object(autopilot,'navigation_surface_fingerprint',return_value=autopilot.EXPECTED_NAVIGATION_FP),\
+             patch.object(autopilot,'_cookie_preflight'),\
+             patch.object(autopilot,'_approved_entry',return_value={'observation_key':'document/button@1'}),\
+             patch.object(autopilot,'_resolve_document_locator',return_value=locator),\
+             patch.object(autopilot,'_write_identity_fields') as identity,\
+             patch.object(autopilot,'_write_phone_fields') as phone:
+            with self.assertRaisesRegex(PermissionError,'TARGET_MISMATCH'):
+                advance_to_otp_on_existing_page(page,self.request())
+            identity.assert_not_called();phone.assert_not_called()
+            locator.click.assert_called_once()
+
+    def test_verify_refuses_wrong_target_and_unknown_boundary_before_otp_read(self):
+        for wrong_url,boundary in [(URL.replace('955507','955508'),{}),(URL,{}),
+                                   (URL,{'captcha_observed':True,'auth_observed':False})]:
+            page=MagicMock();page.url=wrong_url
+            with self.subTest(url=wrong_url,boundary=boundary),patch.object(autopilot,'_snapshot',return_value=boundary):
+                with self.assertRaises(PermissionError):
+                    click_verify_if_user_populated_otp(page,{},application_url=URL)
+            page.locator.assert_not_called();page.get_by_role.assert_not_called()
+
+    def test_verify_target_drift_after_shape_check_stops_before_click(self):
+        page=MagicMock();page.url=URL
+        otp=MagicMock();otp.count.return_value=1;otp.is_visible.return_value=True;otp.is_enabled.return_value=True
+        def value():
+            page.url=URL.replace('955507','955508')
+            return '123456'
+        otp.input_value.side_effect=value;page.locator.return_value=otp
+        button=MagicMock();button.count.return_value=1;button.is_visible.return_value=True;button.is_enabled.return_value=True
+        page.get_by_role.return_value=button;counters={}
+        with patch.object(autopilot,'_snapshot',return_value={'captcha_observed':False,'auth_observed':False}):
+            with self.assertRaisesRegex(PermissionError,'TARGET_MISMATCH'):
+                click_verify_if_user_populated_otp(page,counters,application_url=URL)
+        button.click.assert_not_called();self.assertEqual(counters,{})
+
+    def test_portal_auth_and_target_drift_cannot_click_complete(self):
+        portal=URL.replace(autopilot.ENTRY_PATH,autopilot.REVIEWED_POSTLOGIN_PATH)
+        for target,boundary in [(portal+'&jobId=955507',{}),(portal,{}),
+                                (portal,{'captcha_observed':False,'auth_observed':True})]:
+            page=MagicMock();page.url=target
+            with self.subTest(target=target,boundary=boundary),patch.object(autopilot,'_snapshot',return_value=boundary),\
+                 patch.object(autopilot,'_resolve_document_locator') as locator:
+                with self.assertRaises(PermissionError): click_complete_application_on_portal(page,URL,{})
+                locator.assert_not_called()
 
 
 if __name__ == "__main__":

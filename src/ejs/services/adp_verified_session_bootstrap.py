@@ -1132,6 +1132,7 @@ def run_bootstrap(request: AdpVerifiedSessionBootstrapRequest) -> dict:
                         clicked_verify = click_verify_if_user_populated_otp(
                             page,
                             entry_autopilot_counters,
+                            application_url=request.application_url,
                         )
                         if clicked_verify:
                             print(

@@ -53,3 +53,24 @@ PYTHONPATH=src ../gd005-router/.venv/bin/python -m pytest -q tests/unit/test_adp
 python3.12 scripts/ci/secret_scan.py
 python3.12 scripts/ci/verify_authority_boundaries.py
 ```
+
+## Entry-autopilot target/auth correction — 2026-11-03
+
+Review found structural fingerprints alone did not bind the autopilot's entry
+and OTP actions to one exact tenant/requisition. The helper now validates HTTPS,
+reviewed entry/postLogin paths, default port and exactly one matching cid/ccId/
+jobId before profile access and at action/stage boundaries. Duplicate/blank or
+conflicting query parameters fail closed, including identical duplicates.
+Post-cookie and post-Apply snapshots require explicit auth/CAPTCHA false.
+Portal completion requires current clear boundary evidence as well as target
+binding. Verify now requires the approved application URL from its bootstrap
+caller, checks current target/boundaries before reading the user-entered OTP,
+and rechecks target before clicking. OTP remains never returned/logged/written.
+
+No new actions are enabled. These are stage/action checks, not a proof of atomic
+browser isolation or a claim every underlying field-helper mutation is reviewed.
+The broader PR and live ordinary/session replay remain pending. Local ADP suite
+with Python network connections blocked: 219 passed; secret scan, authority
+boundary and whitespace checks passed. Negative cases cover wrong/duplicate
+identity, non-reviewed origin/path/port, post-cookie auth/unknown evidence,
+post-Apply retargeting, Verify drift and portal auth. No live ADP run occurred.
