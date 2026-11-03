@@ -170,7 +170,17 @@ jobs:
           state_after_country_helper = Path('scripts/probe_adp_same_page_state_after_country.ps1').read_text(encoding='utf-8')
           assert 'headless=False' in bootstrap
           assert 'Do not paste the code into this terminal' in bootstrap
-          assert 'storage_state(path=' in bootstrap
+          # Capture into memory, validate, then create a private exclusive output.
+          import ast
+          tree = ast.parse(bootstrap)
+          exports = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and node.func.attr == 'storage_state']
+          assert exports
+          assert all(not node.args and not any(k.arg == 'path' for k in node.keywords)
+                     and any(k.arg == 'indexed_db' and isinstance(k.value, ast.Constant)
+                             and k.value.value is True for k in node.keywords) for node in exports)
+          assert 'os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600' in bootstrap
+          assert '_write_sensitive_text(path, json.dumps(state' in bootstrap
           assert 'EJS_ADP_VERIFIED_STORAGE_STATE_JSON' in helper
           assert 'Invoke-GhSecretSetUtf8' in helper
           assert 'form_value_write_attempts": 0' in inspector

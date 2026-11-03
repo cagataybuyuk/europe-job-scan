@@ -98,7 +98,11 @@ After corrections: 239 ADP tests passed with Python socket connections blocked.
 This includes private-file/no-overwrite/no-symlink cases, target/OTP/challenge
 negative cases and actual generated JavaScript restoration cases. Earlier failed
 fixture runs were corrected to provide explicit clear evidence; unknown evidence
-was not made permissive. Remote CI must be checked for the final exact head.
+was not made permissive. Remote CI must be checked for the final exact head. Run 41673834556 failed
+because its guard required the former storage_state(path=...) spelling. The
+guard now checks the storage export AST for IndexedDB capture without a path
+and verifies private exclusive output creation. The exact inline workflow guard
+passed locally; the failed historical run is not reported as success.
 
 ## File inventory at review
 
@@ -107,7 +111,7 @@ is committed; future changes require renewed review of the affected scope.
 
 | File | SHA-256 | Review route |
 |---|---|---|
-| .github/workflows/gd004-adp-verified-session-regression.yml | 27e0b18f65b46a40941f06e06749089cb887a3c0b5c18c7adcccb0032a29dc55 | workflow trigger, permissions and test coverage |
+| .github/workflows/gd004-adp-verified-session-regression.yml | f744296d10e8ac2f933b0ae9fee68ab8e52a1b248c8009ce2b45667eb9782188 | workflow trigger, permissions and test coverage |
 | .gitignore | 5b22d39c53751284df5bf72a210928d1da26cef1fe6799cf24cc9cf9509b8601 | policy, configuration and claims |
 | README.md | bf7b43113b48fa1b277570aa6221b24b9c593ae8c676555413bca067b0e8cb6c | policy, configuration and claims |
 | docs/ADP_AWLI_FEASIBILITY_SPIKE.md | 43279ba248a9a4c078f5a7ddf27b17b563d22299e14f62917a0f2119c80b68eb | policy, configuration and claims |
