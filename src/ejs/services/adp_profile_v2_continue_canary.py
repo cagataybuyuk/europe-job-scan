@@ -18,6 +18,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+from typing import Callable
 
 from ejs.contracts.prefill import SAFE_VERIFIED_FIELDS, SafeFieldWriterAuthority, value_hash
 from ejs.services.adp_cookie_preferences_canary import (
@@ -228,7 +229,7 @@ def _result(base: dict, counters: dict, status: str, error_code: str, **evidence
     return {**base, **counters, "canary_status": status, "error_code": error_code, **evidence}
 
 
-def _write_identity_fields(page, form: dict, profile: ResolvedAdpProfile, counters: dict) -> list[dict]:
+def _write_identity_fields(page, form: dict, profile: ResolvedAdpProfile, counters: dict, *, before_field_access: Callable[[], None] | None = None) -> list[dict]:
     values = {
         "candidate.first_name": profile.first_name,
         "candidate.last_name": profile.last_name,
@@ -237,6 +238,8 @@ def _write_identity_fields(page, form: dict, profile: ResolvedAdpProfile, counte
     results: list[dict] = []
     for spec in TARGETS:
         canonical, element_id, _label, _ctype, _required = spec
+        if before_field_access is not None:
+            before_field_access()
         _validate_target_control(form, spec)
         locator = page.locator(f"#{element_id}")
         if locator.count() != 1 or not locator.is_visible() or not locator.is_enabled():
@@ -245,9 +248,13 @@ def _write_identity_fields(page, form: dict, profile: ResolvedAdpProfile, counte
         before = locator.input_value()
         executed = before != desired
         if executed:
+            if before_field_access is not None:
+                before_field_access()
             counters["form_value_write_attempts"] += 1
             locator.fill(desired)
             counters["form_value_write_successes"] += 1
+        if before_field_access is not None:
+            before_field_access()
         readback = locator.input_value()
         valid = bool(locator.evaluate("el => el.checkValidity()"))
         if readback != desired or not valid:
@@ -263,7 +270,9 @@ def _write_identity_fields(page, form: dict, profile: ResolvedAdpProfile, counte
     return results
 
 
-def _write_phone_fields(page, profile: ResolvedAdpProfile, counters: dict) -> dict:
+def _write_phone_fields(page, profile: ResolvedAdpProfile, counters: dict, *, before_field_access: Callable[[], None] | None = None) -> dict:
+    if before_field_access is not None:
+        before_field_access()
     country = page.locator(f"select[name='{PHONE_COUNTRY_NAME}']")
     phone = page.locator(f"#{PHONE_INPUT_ID}")
     if country.count() != 1 or not country.is_visible() or not country.is_enabled():
@@ -278,19 +287,29 @@ def _write_phone_fields(page, profile: ResolvedAdpProfile, counters: dict) -> di
     country_before = country.input_value()
     country_executed = country_before != profile.phone_country_iso2
     if country_executed:
+        if before_field_access is not None:
+            before_field_access()
         counters["form_value_write_attempts"] += 1
         country.select_option(value=profile.phone_country_iso2)
         counters["form_value_write_successes"] += 1
+    if before_field_access is not None:
+        before_field_access()
     country_after = country.input_value()
     if country_after != profile.phone_country_iso2:
         raise PermissionError("ADP_PROFILE_V2_PHONE_COUNTRY_READBACK_MISMATCH")
 
+    if before_field_access is not None:
+        before_field_access()
     phone_before = phone.input_value()
     phone_executed = phone_before != profile.phone_national_number
     if phone_executed:
+        if before_field_access is not None:
+            before_field_access()
         counters["form_value_write_attempts"] += 1
         phone.fill(profile.phone_national_number)
         counters["form_value_write_successes"] += 1
+    if before_field_access is not None:
+        before_field_access()
     phone_after = phone.input_value()
     readback_match, readback_mode = phone_readback_semantic_match(
         phone_after,

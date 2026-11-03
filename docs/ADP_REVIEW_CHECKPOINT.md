@@ -74,3 +74,18 @@ with Python network connections blocked: 219 passed; secret scan, authority
 boundary and whitespace checks passed. Negative cases cover wrong/duplicate
 identity, non-reviewed origin/path/port, post-cookie auth/unknown evidence,
 post-Apply retargeting, Verify drift and portal auth. No live ADP run occurred.
+
+## Per-field target recheck — 2026-11-03
+
+Entry autopilot now supplies a target-check callback to its existing identity/phone
+helpers. The helpers invoke it before field access, immediately before each fill
+or country selection, and before readback. A redirect triggered by a prior field
+therefore stops the next read/write; drift during pre-read stops the first write.
+No new action is enabled. Other pre-existing helper callers keep their existing
+behavior; this is not an atomic browser guard or a fresh auth-boundary snapshot.
+Three negative regressions cover identity pre-read drift, identity post-fill drift
+and phone-country post-selection drift. Live session replay remains unproven.
+
+Local offline ADP suite after this correction: 222 passed with socket connections
+blocked. Secret scan, authority-boundary and whitespace checks passed. Remote
+results must be verified against the new exact head before claiming CI success.

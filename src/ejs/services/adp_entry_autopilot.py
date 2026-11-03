@@ -254,9 +254,15 @@ def advance_to_otp_on_existing_page(page, request: AdpEntryAutopilotRequest) -> 
         raise PermissionError("ADP_ENTRY_AUTOPILOT_PHONE_CONTRACT_DRIFT")
 
     _require_target(page,request.application_url)
-    identity = _write_identity_fields(page, form, profile, counters)
+    identity = _write_identity_fields(
+        page, form, profile, counters,
+        before_field_access=lambda: _require_target(page, request.application_url),
+    )
     _require_target(page,request.application_url)
-    phone = _write_phone_fields(page, profile, counters)
+    phone = _write_phone_fields(
+        page, profile, counters,
+        before_field_access=lambda: _require_target(page, request.application_url),
+    )
 
     action_surface = action_surface_descriptor(page)
     if action_surface_fingerprint(action_surface) != EXPECTED_ACTION_FP:

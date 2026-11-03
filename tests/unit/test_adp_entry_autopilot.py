@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from ejs.services import adp_entry_autopilot as autopilot
+from ejs.services import adp_profile_v2_continue_canary as fields
 from ejs.services.adp_entry_autopilot import (
     AdpEntryAutopilotRequest,
     advance_to_otp_on_existing_page,
@@ -88,6 +89,69 @@ class AdpEntryAutopilotTests(unittest.TestCase):
         self.assertEqual(report["file_upload_attempts"], 0)
         self.assertEqual(report["submit_attempts"], 0)
         self.assertFalse(report["raw_values_exposed"])
+
+    def test_identity_target_drift_after_fill_stops_before_readback_or_next_field(self):
+        page = MagicMock()
+        page.url = URL
+        locator = page.locator.return_value
+        locator.count.return_value = 1
+        locator.is_visible.return_value = True
+        locator.is_enabled.return_value = True
+        locator.input_value.return_value = ''
+        locator.fill.side_effect = lambda value: setattr(page, 'url', URL.replace('955507', '999999'))
+        profile = MagicMock(first_name='Synthetic', last_name='Test', email='test@example.invalid')
+        counters = autopilot._base_counters()
+        with patch.object(fields, '_validate_target_control'):
+            with self.assertRaisesRegex(PermissionError, 'TARGET_MISMATCH'):
+                fields._write_identity_fields(page, {}, profile, counters,
+                    before_field_access=lambda: autopilot._require_target(page, URL))
+        self.assertEqual(locator.fill.call_count, 1)
+        self.assertEqual(locator.input_value.call_count, 1)
+        self.assertEqual(page.locator.call_count, 1)
+        self.assertEqual(counters['form_value_write_attempts'], 1)
+
+    def test_identity_drift_during_pre_read_stops_before_first_write(self):
+        page = MagicMock()
+        page.url = URL
+        locator = page.locator.return_value
+        locator.count.return_value = 1
+        locator.is_visible.return_value = True
+        locator.is_enabled.return_value = True
+        def drift():
+            page.url = URL.replace('955507', '999999')
+            return ''
+        locator.input_value.side_effect = drift
+        profile = MagicMock(first_name='Synthetic', last_name='Test', email='test@example.invalid')
+        counters = autopilot._base_counters()
+        with patch.object(fields, '_validate_target_control'):
+            with self.assertRaisesRegex(PermissionError, 'TARGET_MISMATCH'):
+                fields._write_identity_fields(page, {}, profile, counters,
+                    before_field_access=lambda: autopilot._require_target(page, URL))
+        locator.fill.assert_not_called()
+        self.assertEqual(counters['form_value_write_attempts'], 0)
+
+    def test_phone_target_drift_after_country_selection_blocks_phone_access(self):
+        page = MagicMock()
+        page.url = URL
+        country, phone = MagicMock(), MagicMock()
+        page.locator.side_effect = [country, phone]
+        for locator in (country, phone):
+            locator.count.return_value = 1
+            locator.is_visible.return_value = True
+            locator.is_enabled.return_value = True
+        country.locator.return_value.count.return_value = 1
+        country.locator.return_value.is_disabled.return_value = False
+        country.input_value.return_value = 'GB'
+        country.select_option.side_effect = lambda **kwargs: setattr(page, 'url', URL.replace('955507', '999999'))
+        profile = MagicMock(phone_country_iso2='TR', phone_national_number='5550000000')
+        counters = autopilot._base_counters()
+        with self.assertRaisesRegex(PermissionError, 'TARGET_MISMATCH'):
+            fields._write_phone_fields(page, profile, counters,
+                before_field_access=lambda: autopilot._require_target(page, URL))
+        country.select_option.assert_called_once_with(value='TR')
+        phone.input_value.assert_not_called()
+        phone.fill.assert_not_called()
+        self.assertEqual(counters['form_value_write_attempts'], 1)
 
     def test_verify_click_requires_user_populated_six_digit_otp_and_never_returns_value(self):
         page = MagicMock()
