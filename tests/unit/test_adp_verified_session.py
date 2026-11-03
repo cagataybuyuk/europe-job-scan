@@ -831,6 +831,30 @@ class AdpVerifiedSessionTests(unittest.TestCase):
         )
         self.assertEqual(exports, [22])
 
+    def test_unreviewed_port_cannot_produce_authenticated_evidence(self):
+        correct = _postlogin_url(URL)
+        for current, expected in (
+            (correct.replace('.com/', '.com:444/'), URL),
+            (correct, URL.replace('.com/', '.com:444/')),
+            (correct.replace('.com/', '.com:444/'), URL.replace('.com/', '.com:444/')),
+        ):
+            page = MagicMock()
+            page.url = current
+            evidence = _authenticated_form_diagnostics(page, expected)
+            self.assertFalse(evidence['reviewed_origin_valid'])
+            self.assertFalse(evidence['authenticated_form_observed'])
+            page.get_by_text.assert_not_called()
+
+    def test_unreviewed_port_rejected_for_derived_and_captured_replay_urls(self):
+        bad = URL.replace('.com/', '.com:444/')
+        with self.assertRaisesRegex(ValueError, 'UNREVIEWED_PORT'):
+            _load_direct_reuse_url('', bad)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'captured.txt'
+            path.write_text(_postlogin_url(URL).replace('.com/', '.com:444/'))
+            with self.assertRaisesRegex(ValueError, 'TARGET_MISMATCH'):
+                _load_direct_reuse_url(str(path), URL)
+
     def test_authenticated_route_accepts_identical_duplicate_jobid_only(self):
         correct = URL.replace("/default/", "/applicant/").replace("recruitment.html", "postLogin.html")
         labels = ("Personal Information", "Resume", "Questions", "Review Your Application", "Self-Attest & Submit")

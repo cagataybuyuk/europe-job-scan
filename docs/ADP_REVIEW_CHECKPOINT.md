@@ -103,3 +103,12 @@ negative cases using synthetic storage only. Both existing callers must produce
 the same script. The regression workflow explicitly includes these tests. This
 restricts existing diagnostic replay; it does not enable sessions or prove live
 reuse, and no real session state was read, restored or exported during this work.
+
+## Replay proof origin parity — 2026-11-03
+
+Session bootstrap/inspector requests and derived/captured replay URLs now reject
+non-default HTTPS ports. Authenticated-form diagnostics validate both approved
+and current URLs and return false evidence before reading markers on an
+unreviewed port. This aligns proof classification with restoration isolation.
+Tests cover current-only, approved-only and matching non-default ports plus
+derived/captured replay inputs. No live session or browser operation was used.

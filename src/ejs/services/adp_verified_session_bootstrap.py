@@ -128,6 +128,8 @@ class AdpVerifiedSessionBootstrapRequest:
 
 def validate_request(request: AdpVerifiedSessionBootstrapRequest) -> None:
     validate_adp_live_url(request.application_url)
+    if urlsplit(request.application_url).port not in (None, 443):
+        raise ValueError("ADP_SESSION_BOOTSTRAP_UNREVIEWED_PORT")
     if not request.storage_state_out:
         raise ValueError("ADP_SESSION_BOOTSTRAP_REQUIRES_STORAGE_STATE_OUT")
     if not request.report_out:
@@ -333,9 +335,12 @@ def _authenticated_form_diagnostics(page, application_url: str) -> dict:
     }
     try:
         validate_adp_live_url(str(page.url))
-        evidence["reviewed_origin_valid"] = True
+        validate_adp_live_url(application_url)
         current = urlsplit(str(page.url))
         expected = urlsplit(application_url)
+        if current.port not in (None, 443) or expected.port not in (None, 443):
+            return evidence
+        evidence["reviewed_origin_valid"] = True
         evidence["postlogin_path_match"] = (
             current.netloc == expected.netloc and current.path == REVIEWED_POSTLOGIN_PATH
         )

@@ -54,6 +54,8 @@ class AdpVerifiedSessionInspectorRequest:
 
 def validate_request(request: AdpVerifiedSessionInspectorRequest) -> None:
     validate_adp_live_url(request.application_url)
+    if urlsplit(request.application_url).port not in (None, 443):
+        raise ValueError("ADP_VERIFIED_SESSION_UNREVIEWED_PORT")
     if not FINGERPRINT_RE.fullmatch(request.expected_navigation_surface_fingerprint):
         raise ValueError("INVALID_EXPECTED_NAVIGATION_SURFACE_FINGERPRINT")
     if type(request.entry_ordinal) is not int or request.entry_ordinal < 0 or request.entry_ordinal > 9:
@@ -225,7 +227,10 @@ def _session_storage_init_script(application_url: str, storage: dict[str, str]) 
     return session_restore_script(application_url, storage)
 
 def _postlogin_url(application_url: str) -> str:
+    validate_adp_live_url(application_url)
     parsed = urlsplit(application_url)
+    if parsed.port not in (None, 443):
+        raise ValueError("ADP_VERIFIED_SESSION_UNREVIEWED_PORT")
     return urlunsplit((parsed.scheme, parsed.netloc, REVIEWED_POSTLOGIN_PATH, parsed.query, ""))
 
 
@@ -237,8 +242,9 @@ def _query_values(query: str) -> dict[str, list[str]]:
 
 
 def _load_direct_reuse_url(path: str, application_url: str) -> tuple[str, dict]:
+    reviewed_derived_url = _postlogin_url(application_url)
     if not path:
-        return _postlogin_url(application_url), {
+        return reviewed_derived_url, {
             "direct_reuse_url_loaded": False,
             "direct_reuse_url_source": "derived",
             "direct_reuse_url_target_bound": True,
@@ -253,6 +259,7 @@ def _load_direct_reuse_url(path: str, application_url: str) -> tuple[str, dict]:
     expected = urlsplit(application_url)
     if (
         actual.scheme != "https"
+        or actual.port not in (None, 443)
         or actual.netloc != expected.netloc
         or actual.path != REVIEWED_POSTLOGIN_PATH
         or actual.fragment
