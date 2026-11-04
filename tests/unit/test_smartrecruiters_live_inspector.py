@@ -211,7 +211,9 @@ class NetworkFenceDiagnosticTests(unittest.TestCase):
         value = summarize_blocked_request("POST", "fetch",
             "https://identity.example.net/private/token?email=secret@example.com#fragment", False)
         self.assertEqual(value, {"method": "POST", "resource_type": "fetch",
-                                 "host": "external_redacted", "navigation": False})
+                                 "host": "external_redacted", "navigation": False,
+                                 "purpose_hypothesis": "non_read_request_unknown",
+                                 "permission_granted": False})
         self.assertNotIn("secret", str(value))
         self.assertNotIn("identity.example.net", str(value))
 
@@ -220,7 +222,9 @@ class NetworkFenceDiagnosticTests(unittest.TestCase):
         value = summarize_blocked_request("GET", "document",
             "https://jobs.smartrecruiters.com/oneclick-ui/private?token=secret", True)
         self.assertEqual(value, {"method": "GET", "resource_type": "document",
-                                 "host": "jobs.smartrecruiters.com", "navigation": True})
+                                 "host": "jobs.smartrecruiters.com", "navigation": True,
+                                 "purpose_hypothesis": "document_navigation_unverified",
+                                 "permission_granted": False})
         self.assertNotIn("token", str(value))
 
     def test_unknown_method_and_resource_type_are_bucketed(self):
