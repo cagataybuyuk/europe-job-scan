@@ -137,6 +137,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
       - name: Run MVP-03 malformed observation and privacy tests
         run: python -m pytest -q tests/test_mvp03_observation_boundaries.py tests/unit/test_smartrecruiters_shadow.py
 
