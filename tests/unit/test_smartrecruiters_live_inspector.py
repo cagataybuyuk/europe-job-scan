@@ -150,8 +150,16 @@ class BoundedApplyEntryPolicyTests(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertEqual(select_apply_entry([self.cta(href=url)], self.POSTING)["status"],
                                  "NO_APPROVED_CTA")
-        self.assertEqual(select_apply_entry([self.cta(), self.cta()], self.POSTING)["status"],
-                         "AMBIGUOUS_APPLY_CTA")
+        same_target = select_apply_entry([self.cta(), self.cta()], self.POSTING)
+        self.assertEqual(same_target["status"], "APPROVED_CTA")
+        self.assertEqual(same_target["candidate_count"], 2)
+        self.assertEqual(same_target["distinct_destination_count"], 1)
+        distinct = select_apply_entry(
+            [self.cta(), self.cta(href=self.TRUSTED + "?source=alternate")],
+            self.POSTING
+        )
+        self.assertEqual(distinct["status"], "AMBIGUOUS_APPLY_CTA")
+        self.assertEqual(distinct["distinct_destination_count"], 2)
         self.assertEqual(select_apply_entry([self.cta()], "http://jobs.smartrecruiters.com/Acme")["status"],
                          "UNTRUSTED_POSTING_URL")
 
@@ -168,6 +176,25 @@ class BoundedApplyEntryPolicyTests(unittest.TestCase):
             with self.subTest(candidate=candidate):
                 self.assertEqual(select_apply_entry([candidate], self.POSTING)["status"],
                                  "NO_APPROVED_CTA")
+
+    def test_two_identical_buttons_remain_ambiguous(self):
+        result = select_apply_entry(
+            [self.cta(tag="button", href="", type="button"),
+             self.cta(tag="button", href="", type="button")],
+            self.POSTING
+        )
+        self.assertEqual(result["status"], "AMBIGUOUS_APPLY_CTA")
+        self.assertEqual(result["button_candidate_count"], 2)
+        self.assertEqual(result["distinct_destination_count"], 2)
+
+    def test_link_and_button_never_collapse_into_one_entry(self):
+        result = select_apply_entry(
+            [self.cta(), self.cta(tag="button", href="", type="button")],
+            self.POSTING
+        )
+        self.assertEqual(result["status"], "AMBIGUOUS_APPLY_CTA")
+        self.assertEqual(result["link_candidate_count"], 1)
+        self.assertEqual(result["button_candidate_count"], 1)
 
     def test_unique_explicit_non_submit_button_is_allowed_to_open_only(self):
         value = select_apply_entry(
