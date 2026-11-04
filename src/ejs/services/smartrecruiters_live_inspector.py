@@ -477,6 +477,7 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
             same_origin_frames = 0
             cross_origin_frames = 0
             challenge_frame_origins: list[str] = []
+            same_origin_frame_observation_failed = False
 
             for index, frame in enumerate(page.frames):
                 if frame == page.main_frame:
@@ -498,6 +499,7 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
                         meta["inspection_state"] = "inspected"
                     except Exception as exc:
                         meta["inspection_state"] = "unavailable"
+                        same_origin_frame_observation_failed = True
                         meta["error_type"] = type(exc).__name__
                 else:
                     cross_origin_frames += 1
@@ -514,6 +516,9 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
             state, error_code = discovery_state(form)
             if captcha:
                 state, error_code = "captcha_boundary", "CAPTCHA_BOUNDARY"
+            elif same_origin_frame_observation_failed:
+                # A partial same-origin frame read cannot certify complete form discovery.
+                state, error_code = "form_structure_not_discovered", "FRAME_OBSERVATION_INCOMPLETE"
             # A blocked/failed navigation must not promote partially rendered
             # controls to a manifest-review candidate.
             if apply_navigation["status"] in {
