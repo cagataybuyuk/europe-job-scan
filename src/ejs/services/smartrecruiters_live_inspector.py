@@ -252,9 +252,10 @@ PAGE_STRUCTURE_DIAGNOSTICS = r"""
     body_present: !!document.body,
     body_text_length: document.body ? (document.body.innerText || '').length : 0,
     element_count: all.length,
-    form_count: document.querySelectorAll('form').length,
-    native_control_count: document.querySelectorAll('input:not([type="hidden"]), textarea, select').length,
-    action_candidate_count: document.querySelectorAll('button, input[type="submit"], input[type="button"], a[role="button"]').length,
+    // Count controls in open shadow roots too; these are read-only render signals.
+    form_count: all.filter(el => el.matches('form')).length,
+    native_control_count: all.filter(el => el.matches('input:not([type="hidden"]), textarea, select')).length,
+    action_candidate_count: all.filter(el => el.matches('button, input[type="submit"], input[type="button"], a[role="button"]')).length,
     iframe_count: document.querySelectorAll('iframe').length,
     script_count: document.querySelectorAll('script').length,
     custom_element_count: Array.from(customTags).reduce((n, tag) => n + (tagCounts.get(tag) || 0), 0),
