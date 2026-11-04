@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,18 @@ def evaluate_vacancy_evidence(
         age_seconds = (now.astimezone(timezone.utc) - checked.astimezone(timezone.utc)).total_seconds()
         if age_seconds < 0 or age_seconds > max_age_hours * 3600:
             reasons.append("EMPLOYER_FRESHNESS_UNVERIFIED")
-    if not evidence.employer_posting_url.startswith("https://jobs.smartrecruiters.com/"):
+    try:
+        source = urlparse(evidence.employer_posting_url)
+        trusted_source = (
+            source.scheme == "https"
+            and source.hostname == "jobs.smartrecruiters.com"
+            and source.port in (None, 443)
+            and not source.username and not source.password
+            and source.path.startswith("/") and source.path != "/"
+        )
+    except (TypeError, ValueError):
+        trusted_source = False
+    if not trusted_source:
         reasons.append("EMPLOYER_SOURCE_UNVERIFIED")
     if evidence.employer_posting_open is not True:
         reasons.append("VACANCY_OPEN_UNVERIFIED")
