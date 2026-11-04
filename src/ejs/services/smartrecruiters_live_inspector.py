@@ -522,7 +522,7 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
                 state, error_code = "form_structure_not_discovered", "FRAME_OBSERVATION_INCOMPLETE"
             # A blocked/failed navigation must not promote partially rendered
             # controls to a manifest-review candidate.
-            if apply_navigation["status"] in {
+            if not captcha and apply_navigation["status"] in {
                 "NETWORK_FENCE_BLOCKED", "UNTRUSTED_FINAL_URL", "ENTRY_NAVIGATION_FAILED",
                 "CTA_SCAN_FAILED", "CTA_LOCATOR_CHANGED",
             }:
