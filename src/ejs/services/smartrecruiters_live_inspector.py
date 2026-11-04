@@ -118,6 +118,25 @@ def select_apply_entry(observed: list[dict], posting_url: str) -> dict:
             "candidate_count": len(matches), "distinct_destination_count": 1}
 
 
+def classify_blocked_request_purpose(method: str, resource_type: str, url: str, is_navigation: bool) -> str:
+    """Conservative, fixed-category hypothesis only; no endpoint or payload retention.
+
+    A POST is never treated as harmless bootstrap without independent evidence.
+    Classification does not grant network or execution permissions.
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if is_navigation and host != "jobs.smartrecruiters.com" and not host.endswith(".smartrecruiters.com"):
+        return "external_navigation_unknown"
+    if method.upper() not in {"GET", "HEAD"}:
+        return "non_read_request_unknown"
+    if resource_type in {"xhr", "fetch"}:
+        return "read_api_request_unverified"
+    if resource_type == "document":
+        return "document_navigation_unverified"
+    return "asset_or_other_unverified"
+
+
 def summarize_blocked_request(method: str, resource_type: str, url: str, is_navigation: bool) -> dict:
     """Bounded, non-identifying network-fence evidence; never retain URLs or query strings."""
     parsed = urlparse(url)
@@ -131,6 +150,8 @@ def summarize_blocked_request(method: str, resource_type: str, url: str, is_navi
         } else "other",
         "host": host,
         "navigation": bool(is_navigation),
+        "purpose_hypothesis": classify_blocked_request_purpose(method, resource_type, url, is_navigation),
+        "permission_granted": False,
     }
 
 
