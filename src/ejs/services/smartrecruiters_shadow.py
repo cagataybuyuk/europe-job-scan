@@ -77,6 +77,12 @@ def summarize_shadow_form(observation: dict) -> dict:
     # arbitrary browser state, or candidate data supplied by a caller.
     keys = ("scope", "observation_key", "tag", "type", "id", "name", "label", "role",
             "visible", "disabled", "required", "host_required_hint", "host_label_hint", "accept", "multiple")
+    if not isinstance(observation, dict) or not isinstance(observation.get("controls"), list) or not isinstance(observation.get("actions"), list):
+        raise ValueError("INVALID_FORM_OBSERVATION")
+    if any(not isinstance(c, dict) or not isinstance(c.get("observation_key"), str) or not c["observation_key"] or not isinstance(c.get("scope"), str) or not isinstance(c.get("tag"), str) for c in observation["controls"]):
+        raise ValueError("INVALID_CONTROL_OBSERVATION")
+    if any(not isinstance(a, dict) or not isinstance(a.get("observation_key"), str) or not a["observation_key"] or not isinstance(a.get("scope"), str) for a in observation["actions"]):
+        raise ValueError("INVALID_ACTION_OBSERVATION")
     controls = [{k: c[k] for k in keys if k in c} for c in observation["controls"]]
     actions = [{k: a[k] for k in ("scope", "observation_key", "label", "type", "visible", "disabled") if k in a}
                for a in observation["actions"]]
