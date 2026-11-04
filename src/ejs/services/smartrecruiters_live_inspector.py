@@ -374,14 +374,16 @@ def _wait_for_render_structure(page, *, budget_ms: int) -> tuple[dict, dict]:
             tuple(last.get("custom_element_tags", [])),
             last.get("open_shadow_root_count"),
         )
-        obvious_structure = (
+        # Shell actions (cookie/share/apply buttons), opaque iframes, and
+        # custom-element hints are not evidence of an application form.
+        # Keep observing within the existing budget until real native
+        # controls or a form appear; downstream checks still validate
+        # visibility, origin, auth boundaries, and actual field semantics.
+        form_structure = (
             last.get("form_count", 0) > 0
             or last.get("native_control_count", 0) > 0
-            or last.get("action_candidate_count", 0) > 0
-            or last.get("iframe_count", 0) > 0
-            or last.get("custom_control_hint_count", 0) > 0
         )
-        if obvious_structure and elapsed >= min(500, budget_ms):
+        if form_structure and elapsed >= min(500, budget_ms):
             return last, {
                 "budget_ms": budget_ms,
                 "elapsed_ms": elapsed,
