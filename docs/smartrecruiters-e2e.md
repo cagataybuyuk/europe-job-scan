@@ -125,3 +125,26 @@ candidate data, CV upload, final submit, or environment approval bypass.
 This code requires CI + reviewer approval before protected-main merge; new
 live read-only target evidence is required after merge. Autonomous production
 execution and independent trusted authority remain separate gates.
+
+
+## GD-004 one-shot autonomous read-only entry canary (2026-11-04)
+
+The previous GD-004 workflow required a user to manually dispatch and paste
+the target URL. A **separate** narrow `.github/workflows/gd004-auto-readonly-entry.yml`
+is now proposed. It triggers only on a `push` to `main` which **changes that
+exact workflow file**; the first reviewed merge should cause one read-only
+inspection of the fixed, already-approved public Rotork listing URL
+`https://jobs.smartrecruiters.com/Rotork1/744000156409389`. It does not
+run on every commit, daily schedule, unrelated file change or PR branch.
+It checks out the immutable event SHA and verifies it, uses the same bounded
+`--auto-open-apply` inspection/routing checks, and uploads a 14-day JSON
+artifact. Workflow permissions are read-only, no secrets are needed, and
+form write, CV upload, final submit, resume and PROD tracker mutations remain
+prohibited. A GitHub Actions workflow success means *inspection completed*
+only; Gate B remains blocked until real form controls and reviewed evidence
+are found.
+
+The trigger is a **one-shot CI orchestration improvement**, not a general
+unattended applicant. Future target selection, repeated scans, employer
+writes and final submission require separate explicit design/authorization.
+The workflow is pinned by an automated source-policy regression test.
