@@ -66,3 +66,21 @@ def test_naive_now_and_invalid_window_rejected():
         evaluate_vacancy_evidence(complete(), now=datetime(2026, 11, 5))
     with pytest.raises(ValueError):
         evaluate_vacancy_evidence(complete(), now=NOW, max_age_hours=0)
+
+
+@pytest.mark.parametrize("url", [
+    "https://jobs.smartrecruiters.com.evil.example/Example/123",
+    "https://jobs.smartrecruiters.com@evil.example/Example/123",
+    "http://jobs.smartrecruiters.com/Example/123",
+    "https://jobs.smartrecruiters.com:444/Example/123",
+    "https://user:password@jobs.smartrecruiters.com/Example/123",
+    "https://jobs.smartrecruiters.com:invalid/Example/123",
+    "https://jobs.smartrecruiters.com/",
+])
+def test_spoofed_or_malformed_ats_origin_is_not_trusted(url):
+    result = evaluate_vacancy_evidence(
+        replace(complete(), employer_posting_url=url), now=NOW
+    )
+    assert result["review_candidate"] is False
+    assert "EMPLOYER_SOURCE_UNVERIFIED" in result["reasons"]
+    assert result["execution_authorized"] is False
