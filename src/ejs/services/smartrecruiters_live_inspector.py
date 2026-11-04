@@ -546,7 +546,16 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
                 "apply_navigation": apply_navigation,
                 "frames": frame_diagnostics,
             }
+            # Explicit human handoff only: no automatic challenge solving or resume.
+            human_handoff = {
+                "required": state == "captcha_boundary",
+                "reason": "CAPTCHA_BOUNDARY" if state == "captcha_boundary" else "",
+                "manual_verification_only": state == "captcha_boundary",
+                "automatic_resume_allowed": False,
+                "resume_requires_new_read_only_inspection": state == "captcha_boundary",
+            }
             return {
+                "human_handoff": human_handoff,
                 "runtime_state": state,
                 "error_code": error_code,
                 "requested_url": request.application_url,
