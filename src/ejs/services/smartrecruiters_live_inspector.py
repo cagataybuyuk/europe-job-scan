@@ -141,7 +141,8 @@ def summarize_blocked_request(method: str, resource_type: str, url: str, is_navi
     """Bounded, non-identifying network-fence evidence; never retain URLs or query strings."""
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-    if host != "jobs.smartrecruiters.com" and not host.endswith(".smartrecruiters.com"):
+    trusted_host = (host == "jobs.smartrecruiters.com" or host.endswith(".smartrecruiters.com")) and parsed.scheme == "https" and not parsed.username and not parsed.password and parsed.port in (None, 443)
+    if not trusted_host:
         host = "external_redacted"
     return {
         "method": method.upper() if method.upper() in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"} else "OTHER",
@@ -150,6 +151,8 @@ def summarize_blocked_request(method: str, resource_type: str, url: str, is_navi
         } else "other",
         "host": host,
         "navigation": bool(is_navigation),
+        "deny_reason": "NON_GET_REQUEST" if method.upper() not in {"GET", "HEAD"} else "UNTRUSTED_NAVIGATION",
+        "trust_class": "trusted_https_host" if trusted_host else "untrusted_or_external",
         "purpose_hypothesis": classify_blocked_request_purpose(method, resource_type, url, is_navigation),
         "permission_granted": False,
     }
