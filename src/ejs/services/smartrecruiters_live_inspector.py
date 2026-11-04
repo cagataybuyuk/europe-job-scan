@@ -96,9 +96,26 @@ def select_apply_entry(observed: list[dict], posting_url: str) -> dict:
                 matches.append({"kind": "link", "href": href, "label": item.get("label", "")})
         elif tag == "button" and str(item.get("type") or "").casefold() in ("", "button"):
             matches.append({"kind": "button", "label": item.get("label", "")})
-    if len(matches) != 1:
-        return {"status": "NO_APPROVED_CTA" if not matches else "AMBIGUOUS_APPLY_CTA"}
-    return {"status": "APPROVED_CTA", **matches[0]}
+    # Responsive job pages often render desktop and mobile CTA anchors
+    # pointing at the *same observed destination*. This is one navigation
+    # decision, not two conflicting destinations. Never deduplicate buttons:
+    # clicking a button may have page-specific side effects.
+    distinct = {}
+    for match in matches:
+        key = ("link", match["href"]) if match["kind"] == "link" else (
+            "button", len(distinct)
+        )
+        distinct[key] = match
+    if len(distinct) != 1:
+        return {
+            "status": "NO_APPROVED_CTA" if not distinct else "AMBIGUOUS_APPLY_CTA",
+            "candidate_count": len(matches),
+            "distinct_destination_count": len(distinct),
+            "link_candidate_count": sum(x["kind"] == "link" for x in matches),
+            "button_candidate_count": sum(x["kind"] == "button" for x in matches),
+        }
+    return {"status": "APPROVED_CTA", **next(iter(distinct.values())),
+            "candidate_count": len(matches), "distinct_destination_count": 1}
 
 
 def follow_one_read_only_apply_entry(page, context, posting_url: str, *, timeout_ms: int) -> dict:
@@ -112,7 +129,7 @@ def follow_one_read_only_apply_entry(page, context, posting_url: str, *, timeout
     except Exception as exc:
         return {"status": "CTA_SCAN_FAILED", "error_type": type(exc).__name__, "attempt_count": 0}
     if entry["status"] != "APPROVED_CTA":
-        return {"status": entry["status"], "attempt_count": 0}
+        return {**entry, "attempt_count": 0}
 
     blocked = []
     def fence(route):
@@ -144,6 +161,8 @@ def follow_one_read_only_apply_entry(page, context, posting_url: str, *, timeout
         if not _is_trusted_navigation_url(page.url):
             return {"status": "UNTRUSTED_FINAL_URL", "attempt_count": 1}
         return {"status": "FOLLOWED", "kind": entry["kind"],
+                "candidate_count": entry.get("candidate_count", 1),
+                "distinct_destination_count": entry.get("distinct_destination_count", 1),
                 "url_changed": page.url != posting_url, "attempt_count": 1}
     except Exception as exc:
         return {"status": "ENTRY_NAVIGATION_FAILED", "attempt_count": 1, "error_type": type(exc).__name__}
