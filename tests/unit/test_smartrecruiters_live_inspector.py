@@ -211,7 +211,9 @@ class NetworkFenceDiagnosticTests(unittest.TestCase):
         value = summarize_blocked_request("POST", "fetch",
             "https://identity.example.net/private/token?email=secret@example.com#fragment", False)
         self.assertEqual(value, {"method": "POST", "resource_type": "fetch",
-                                 "host": "external_redacted", "navigation": False})
+                                 "host": "external_redacted", "navigation": False,
+                                 "purpose_hypothesis": "non_read_request_unknown",
+                                 "permission_granted": False})
         self.assertNotIn("secret", str(value))
         self.assertNotIn("identity.example.net", str(value))
 
@@ -220,7 +222,9 @@ class NetworkFenceDiagnosticTests(unittest.TestCase):
         value = summarize_blocked_request("GET", "document",
             "https://jobs.smartrecruiters.com/oneclick-ui/private?token=secret", True)
         self.assertEqual(value, {"method": "GET", "resource_type": "document",
-                                 "host": "jobs.smartrecruiters.com", "navigation": True})
+                                 "host": "jobs.smartrecruiters.com", "navigation": True,
+                                 "purpose_hypothesis": "document_navigation_unverified",
+                                 "permission_granted": False})
         self.assertNotIn("token", str(value))
 
     def test_unknown_method_and_resource_type_are_bucketed(self):
@@ -367,6 +371,47 @@ class BoundedApplyEntryBrowserTests(unittest.TestCase):
             finally:
                 browser.close()
 
+
+
+class BlockedRequestPurposeClassificationTests(unittest.TestCase):
+    def test_external_navigation_is_unknown_and_never_authorized(self):
+        from ejs.services.smartrecruiters_live_inspector import summarize_blocked_request
+        x = summarize_blocked_request("GET", "document",
+            "https://evil.example/collect?token=secret&email=person@example.com", True)
+        self.assertEqual(x["host"], "external_redacted")
+        self.assertEqual(x["purpose_hypothesis"], "external_navigation_unknown")
+        self.assertIs(x["permission_granted"], False)
+        self.assertNotIn("secret", repr(x))
+        self.assertNotIn("person@example.com", repr(x))
+        self.assertNotIn("evil.example", repr(x))
+        self.assertNotIn("collect", repr(x))
+
+    def test_same_host_post_remains_unknown_and_blocked(self):
+        from ejs.services.smartrecruiters_live_inspector import summarize_blocked_request
+        x = summarize_blocked_request("POST", "xhr",
+            "https://jobs.smartrecruiters.com/oneclick-ui/submit?candidate=private", False)
+        self.assertEqual(x["purpose_hypothesis"], "non_read_request_unknown")
+        self.assertIs(x["permission_granted"], False)
+        self.assertNotIn("submit", repr(x))
+        self.assertNotIn("candidate", repr(x))
+        self.assertNotIn("private", repr(x))
+
+    def test_read_only_api_is_not_mistaken_for_approved_bootstrap(self):
+        from ejs.services.smartrecruiters_live_inspector import summarize_blocked_request
+        x = summarize_blocked_request("GET", "fetch",
+            "https://jobs.smartrecruiters.com/api/private?key=secret", False)
+        self.assertEqual(x["purpose_hypothesis"], "read_api_request_unverified")
+        self.assertIs(x["permission_granted"], False)
+
+    def test_unusual_methods_and_types_are_redacted_and_not_authorized(self):
+        from ejs.services.smartrecruiters_live_inspector import summarize_blocked_request
+        x = summarize_blocked_request("TRACE", "websocket",
+            "https://username:password@other.example/a?x=y", False)
+        self.assertEqual(x["method"], "OTHER")
+        self.assertEqual(x["resource_type"], "other")
+        self.assertEqual(x["host"], "external_redacted")
+        self.assertIs(x["permission_granted"], False)
+        self.assertNotIn("password", repr(x))
 
 
 class AutonomousReadOnlyTriggerPolicyTests(unittest.TestCase):
