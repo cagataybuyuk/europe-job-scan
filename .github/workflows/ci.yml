@@ -107,6 +107,17 @@ jobs:
           tests/unit/test_submit1_policy.py
           tests/unit/test_tmh1_history.py
 
+  mvp01-render-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[test]'
+      - name: Run MVP-01 render-wait negative tests
+        run: python -m pytest -q tests/test_mvp01_render_structure_wait.py
+
   browser-prefill-regression:
     runs-on: ubuntu-latest
     steps:
