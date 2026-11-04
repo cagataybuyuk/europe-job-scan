@@ -1,7 +1,7 @@
 name: GD-004 Autonomous Read-only Entry Canary
 
 # Runs when this exact workflow file changes on main. This revision
-# explicitly rechecks Rotork after identical-target Apply CTA deduplication.
+# explicitly rechecks Rotork with redacted network-fence request diagnostics.
 # Subsequent runs require another deliberate edit to this workflow file.
 # No cron, no PROD job selection, no employer-facing form mutation.
 on:
