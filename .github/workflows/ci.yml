@@ -109,6 +109,7 @@ jobs:
           tests/unit/test_submit1_policy.py
           tests/unit/test_tmh1_history.py
           tests/test_live_canary_manifest.py
+          tests/test_mvp04_vacancy_evidence_gate.py
 
   mvp01-render-regression:
     runs-on: ubuntu-latest
