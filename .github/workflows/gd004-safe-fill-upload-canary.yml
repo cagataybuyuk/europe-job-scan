@@ -41,11 +41,15 @@ jobs:
       EJS_FINAL_SUBMIT: 'false'
       EJS_KILL_SWITCH: 'true'
       EJS_CANARY_APPROVAL: ${{ inputs.approval_phrase }}
-      EJS_CANARY_INPUT_DIR: ${{ runner.temp }}/ejs-canary-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.expected_sha }}
+
+      - name: Set private input directory on the assigned runner
+        shell: bash
+        run: |
+          printf 'EJS_CANARY_INPUT_DIR=%s/ejs-canary-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
 
       - name: Assert immutable source and canary fence
         shell: bash
@@ -93,13 +97,14 @@ jobs:
 
       - name: Execute bounded safe-fill + one approved CV upload
         env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
           TARGET_MODE: ${{ inputs.target_mode }}
           TARGET_URL: ${{ inputs.target_url }}
           REVIEWED_MANIFEST_SHA256: ${{ secrets.EJS_LIVE_CANARY_MANIFEST_SHA256 }}
           REVIEWED_FACTS_SHA256: ${{ secrets.EJS_LIVE_CANARY_FACTS_SHA256 }}
         shell: bash
         run: |
-          args=(--source-sha "${{ inputs.expected_sha }}" --approval-phrase "$EJS_CANARY_APPROVAL" --target-mode "$TARGET_MODE" --run-id "$GITHUB_RUN_ID")
+          args=(--source-sha "$EXPECTED_SHA" --approval-phrase "$EJS_CANARY_APPROVAL" --target-mode "$TARGET_MODE" --run-id "$GITHUB_RUN_ID")
           if [ -n "$TARGET_URL" ]; then args+=(--target-url "$TARGET_URL"); fi
           if [ "$TARGET_MODE" = live ]; then args+=(--manifest "$EJS_CANARY_INPUT_DIR/canary-manifest.json" --cv-path "$EJS_CANARY_INPUT_DIR/approved-canary-cv.pdf" --facts "$EJS_CANARY_INPUT_DIR/canary-facts.json" --manifest-sha256 "$REVIEWED_MANIFEST_SHA256" --facts-sha256 "$REVIEWED_FACTS_SHA256"); fi
           python -m ejs.apps.github_runner.safe_fill_upload_canary "${args[@]}" | tee canary-evidence.json
@@ -122,5 +127,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          rm -f "$EJS_CANARY_INPUT_DIR/canary-manifest.json" "$EJS_CANARY_INPUT_DIR/canary-facts.json" "$EJS_CANARY_INPUT_DIR/approved-canary-cv.pdf"
-          if [ -d "$EJS_CANARY_INPUT_DIR" ]; then rmdir "$EJS_CANARY_INPUT_DIR"; fi
+          if [ -n "${EJS_CANARY_INPUT_DIR:-}" ]; then
+            rm -f "$EJS_CANARY_INPUT_DIR/canary-manifest.json" "$EJS_CANARY_INPUT_DIR/canary-facts.json" "$EJS_CANARY_INPUT_DIR/approved-canary-cv.pdf"
+            if [ -d "$EJS_CANARY_INPUT_DIR" ]; then rmdir "$EJS_CANARY_INPUT_DIR"; fi
+          fi
