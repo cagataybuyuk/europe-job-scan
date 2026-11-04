@@ -316,5 +316,30 @@ class BoundedApplyEntryBrowserTests(unittest.TestCase):
 
 
 
+class AutonomousReadOnlyTriggerPolicyTests(unittest.TestCase):
+    def test_workflow_is_single_merge_scoped_read_only_and_immutable(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[2]
+        wf = (root / ".github/workflows/gd004-auto-readonly-entry.yml").read_text()
+        self.assertIn("  push:", wf)
+        self.assertIn("    branches: [main]", wf)
+        self.assertIn("      - '.github/workflows/gd004-auto-readonly-entry.yml'", wf)
+        self.assertNotIn("  schedule:", wf)
+        self.assertNotIn("  pull_request:", wf)
+        self.assertNotIn("workflow_dispatch:", wf)
+        self.assertIn("          ref: \${{ github.sha }}".replace("\\", ""), wf)
+        self.assertIn("          EXPECTED_SHA: \${{ github.sha }}".replace("\\", ""), wf)
+        self.assertIn("          TARGET_URL: https://jobs.smartrecruiters.com/Rotork1/744000156409389", wf)
+        self.assertIn("            --auto-open-apply", wf)
+        self.assertIn("      EJS_FORM_WRITE: 'false'", wf)
+        self.assertIn("      EJS_FILE_UPLOAD: 'false'", wf)
+        self.assertIn("      EJS_FINAL_SUBMIT: 'false'", wf)
+        self.assertIn("      EJS_KILL_SWITCH: 'true'", wf)
+        self.assertIn("          assert report.get('submit_attempts', 0) == 0", wf)
+        self.assertIn("          assert route.get('safe_fill_allowed') is False", wf)
+        self.assertIn("          assert route.get('final_submit_allowed') is False", wf)
+        self.assertIn("permissions:\n  contents: read", wf)
+
+
 if __name__ == "__main__":
     unittest.main()
