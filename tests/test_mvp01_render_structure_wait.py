@@ -63,6 +63,24 @@ class RenderStructureWaitTests(unittest.TestCase):
         self.assertEqual(report["elapsed_ms"], 2_000)
         self.assertEqual(report["exit_reason"], "render_wait_budget_exhausted")
 
+    def test_auth_shell_without_controls_does_not_trigger_early_exit(self):
+        page = FakePage([structure(action_candidate_count=2, iframe_count=1, body_text_length=45)])
+        _, report = _wait_for_render_structure(page, budget_ms=4_000)
+        self.assertGreaterEqual(report["elapsed_ms"], 3_000)
+        self.assertNotEqual(report["exit_reason"], "structure_signal_observed")
+
+    def test_challenge_shell_without_controls_does_not_trigger_early_exit(self):
+        page = FakePage([structure(action_candidate_count=1, custom_control_hint_count=1)])
+        _, report = _wait_for_render_structure(page, budget_ms=4_000)
+        self.assertGreaterEqual(report["elapsed_ms"], 3_000)
+        self.assertNotEqual(report["exit_reason"], "structure_signal_observed")
+
+    def test_expired_job_shell_without_controls_does_not_trigger_early_exit(self):
+        page = FakePage([structure(action_candidate_count=1, iframe_count=0)])
+        _, report = _wait_for_render_structure(page, budget_ms=4_000)
+        self.assertGreaterEqual(report["elapsed_ms"], 3_000)
+        self.assertNotEqual(report["exit_reason"], "structure_signal_observed")
+
     def test_custom_hints_alone_are_not_form_controls(self):
         page = FakePage([structure(custom_control_hint_count=2, custom_element_tags=["x-widget"])])
         _, report = _wait_for_render_structure(page, budget_ms=4_000)
