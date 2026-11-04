@@ -24,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
+      EJS_FORM_WRITE: 'false'
+      EJS_FILE_UPLOAD: 'false'
       EJS_FINAL_SUBMIT: 'false'
       EJS_KILL_SWITCH: 'true'
     steps:
@@ -38,6 +40,8 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test "$APPROVAL" = "APPROVE-TEST-LIVE-INSPECTION"
+          test "$EJS_FORM_WRITE" = "false"
+          test "$EJS_FILE_UPLOAD" = "false"
           test "$EJS_FINAL_SUBMIT" = "false"
           test "$EJS_KILL_SWITCH" = "true"
       - uses: actions/setup-python@v5
@@ -53,6 +57,7 @@ jobs:
         run: |
           python -m ejs.services.smartrecruiters_live_inspector \
             --url "$TARGET_URL" \
+            --auto-open-apply \
             --output live-inspection.json
       - name: Reassert zero side effects and fail-closed discovery state
         run: |
@@ -60,6 +65,13 @@ jobs:
           import json
           report = json.load(open('live-inspection.json', encoding='utf-8'))
           assert report['inspection_only'] is True
+          navigation = report.get('diagnostics', {}).get('apply_navigation', {})
+          assert navigation.get('attempt_count') in {0, 1}
+          if navigation.get('status') in {
+              'NETWORK_FENCE_BLOCKED', 'UNTRUSTED_FINAL_URL',
+              'ENTRY_NAVIGATION_FAILED', 'CTA_SCAN_FAILED', 'CTA_LOCATOR_CHANGED',
+          }:
+              assert report.get('runtime_state') != 'inspected'
           assert report.get('live_execution_ready') is False
           assert report.get('form_value_write_attempts', 0) == 0
           assert report.get('file_upload_attempts', 0) == 0

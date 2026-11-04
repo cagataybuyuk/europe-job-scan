@@ -1,3 +1,4 @@
+import importlib.util
 import unittest
 from unittest.mock import patch
 
@@ -5,6 +6,8 @@ from ejs.services.smartrecruiters_live_inspector import (
     LiveInspectionRequest,
     combine_shadow_reports,
     discovery_state,
+    follow_one_read_only_apply_entry,
+    select_apply_entry,
     is_known_captcha_origin,
     same_origin_url,
     scope_shadow_report,
@@ -115,6 +118,202 @@ class LiveInspectionPolicyTests(unittest.TestCase):
              patch.object(inspector.sys,"argv",["inspector","--url","https://jobs.smartrecruiters.com/Acme/job"]),\
              patch("builtins.print"):
             self.assertEqual(inspector.main(),2)
+
+
+
+class BoundedApplyEntryPolicyTests(unittest.TestCase):
+    POSTING = "https://jobs.smartrecruiters.com/Acme/123-job"
+    TRUSTED = "https://jobs.smartrecruiters.com/oneclick-ui/Acme/123"
+
+    def cta(self, **changes):
+        item = dict(tag="a", label="I'm interested", href=self.TRUSTED,
+                    type="", visible=True, disabled=False, in_form=False)
+        item.update(changes)
+        return item
+
+    def test_unique_visible_trusted_oneclick_link_is_accepted(self):
+        result = select_apply_entry([self.cta()], self.POSTING)
+        self.assertEqual(result["status"], "APPROVED_CTA")
+        self.assertEqual(result["kind"], "link")
+        self.assertEqual(result["href"], self.TRUSTED)
+
+    def test_untrusted_or_ambiguous_links_cannot_trigger_navigation(self):
+        urls = (
+            "https://evil.example/apply",
+            "https://jobs.smartrecruiters.com.evil.example/oneclick-ui/Acme/123",
+            "http://jobs.smartrecruiters.com/oneclick-ui/Acme/123",
+            "https://user:pass@jobs.smartrecruiters.com/oneclick-ui/Acme/123",
+            "https://jobs.smartrecruiters.com/Acme/123-job",
+            "javascript:alert(1)",
+        )
+        for url in urls:
+            with self.subTest(url=url):
+                self.assertEqual(select_apply_entry([self.cta(href=url)], self.POSTING)["status"],
+                                 "NO_APPROVED_CTA")
+        self.assertEqual(select_apply_entry([self.cta(), self.cta()], self.POSTING)["status"],
+                         "AMBIGUOUS_APPLY_CTA")
+        self.assertEqual(select_apply_entry([self.cta()], "http://jobs.smartrecruiters.com/Acme")["status"],
+                         "UNTRUSTED_POSTING_URL")
+
+    def test_hidden_disabled_submit_and_non_entry_controls_are_not_clicked(self):
+        candidates = [
+            self.cta(visible=False), self.cta(disabled=True), self.cta(in_form=True),
+            self.cta(tag="button", href="", type="submit"),
+            self.cta(tag="button", href="", type="reset"),
+            self.cta(label="Submit application"),
+            self.cta(label="Apply with LinkedIn"),
+            self.cta(label="I'm interested", tag="div", href=""),
+        ]
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                self.assertEqual(select_apply_entry([candidate], self.POSTING)["status"],
+                                 "NO_APPROVED_CTA")
+
+    def test_unique_explicit_non_submit_button_is_allowed_to_open_only(self):
+        value = select_apply_entry(
+            [self.cta(tag="button", href="", type="button", label="I’m interested")],
+            self.POSTING
+        )
+        self.assertEqual(value["status"], "APPROVED_CTA")
+        self.assertEqual(value["kind"], "button")
+
+
+@unittest.skipUnless(importlib.util.find_spec("playwright"), "Playwright is not installed")
+class BoundedApplyEntryBrowserTests(unittest.TestCase):
+    POSTING = "https://jobs.smartrecruiters.com/Acme/123-job"
+    APPLY = "https://jobs.smartrecruiters.com/oneclick-ui/Acme/123"
+
+    def test_verified_oneclick_get_navigation_reveals_form_without_mutating(self):
+        from playwright.sync_api import sync_playwright
+        from ejs.services.smartrecruiters_shadow import inspect_shadow_form
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                context = browser.new_context()
+                context.route(self.POSTING, lambda route: route.fulfill(
+                    status=200, content_type="text/html",
+                    body="<a href='" + self.APPLY + "'>I'm interested</a>"
+                ))
+                context.route(self.APPLY, lambda route: route.fulfill(
+                    status=200, content_type="text/html",
+                    body="<input aria-label='First name' required><input type='file' aria-label='CV'>"
+                ))
+                page = context.new_page()
+                page.goto(self.POSTING)
+                result = follow_one_read_only_apply_entry(
+                    page, context, self.POSTING, timeout_ms=5000
+                )
+                self.assertEqual(result["status"], "FOLLOWED")
+                self.assertTrue(result["url_changed"])
+                self.assertEqual(result["attempt_count"], 1)
+                observed = inspect_shadow_form(page)
+                self.assertTrue(any(c["label"] == "First name" for c in observed["controls"]))
+                self.assertEqual(observed["form_value_write_attempts"], 0)
+                self.assertEqual(observed["file_upload_attempts"], 0)
+                self.assertEqual(observed["submit_attempts"], 0)
+                self.assertEqual(page.locator('input[type=file]').count(), 1)
+                self.assertEqual(page.locator('input[type=file]').evaluate_all(
+                    "(els) => els.map(el => el.files.length)"), [0])
+            finally:
+                browser.close()
+
+    def test_same_url_button_modal_is_observed_without_field_interaction(self):
+        from playwright.sync_api import sync_playwright
+        from ejs.services.smartrecruiters_shadow import inspect_shadow_form
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                context = browser.new_context()
+                context.route(self.POSTING, lambda route: route.fulfill(
+                    status=200, content_type="text/html",
+                    body="<button type='button' id='apply'>I'm interested</button>"
+                         "<script>document.querySelector('#apply').addEventListener('click',"
+                         "() => {const x=document.createElement('input');"
+                         "x.setAttribute('aria-label','First name');"
+                         "document.body.appendChild(x);})</script>"
+                ))
+                page = context.new_page()
+                page.goto(self.POSTING)
+                result = follow_one_read_only_apply_entry(
+                    page, context, self.POSTING, timeout_ms=5000
+                )
+                self.assertEqual(result["status"], "FOLLOWED")
+                self.assertFalse(result["url_changed"])
+                self.assertEqual(page.locator('input').count(), 1)
+                observed = inspect_shadow_form(page)
+                self.assertEqual(observed["form_value_write_attempts"], 0)
+            finally:
+                browser.close()
+
+    def test_form_inside_submit_button_never_runs(self):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                context = browser.new_context()
+                page = context.new_page()
+                page.set_content("<form><button type='submit'>Apply</button></form>"
+                                 "<script>window.submitted=0;"
+                                 "document.querySelector('form').onsubmit=e=>{"
+                                 "e.preventDefault();window.submitted++}</script>")
+                result = follow_one_read_only_apply_entry(
+                    page, context, self.POSTING, timeout_ms=5000
+                )
+                self.assertEqual(result["status"], "NO_APPROVED_CTA")
+                self.assertEqual(result["attempt_count"], 0)
+                self.assertEqual(page.evaluate("window.submitted"), 0)
+            finally:
+                browser.close()
+
+    def test_button_post_is_blocked_and_not_misreported_as_success(self):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                context = browser.new_context()
+                context.route(self.POSTING, lambda route: route.fulfill(
+                    status=200, content_type="text/html",
+                    body="<button type='button' id='apply'>I'm interested</button>"
+                         "<script>document.querySelector('#apply').addEventListener('click',"
+                         "() => {fetch('/oneclick-ui/collect',{method:'POST',body:'x'}).catch(()=>{})})"
+                         "</script>"
+                ))
+                page = context.new_page()
+                page.goto(self.POSTING)
+                result = follow_one_read_only_apply_entry(
+                    page, context, self.POSTING, timeout_ms=5000
+                )
+                self.assertEqual(result["status"], "NETWORK_FENCE_BLOCKED")
+                self.assertIn("NON_GET_REQUEST", result["blocked_request_types"])
+                self.assertEqual(result["attempt_count"], 1)
+            finally:
+                browser.close()
+
+    def test_untrusted_external_navigation_does_not_go_through(self):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                context = browser.new_context()
+                context.route(self.POSTING, lambda route: route.fulfill(
+                    status=200, content_type="text/html",
+                    body="<button type='button' id='apply'>I'm interested</button>"
+                         "<script>document.querySelector('#apply').addEventListener('click',"
+                         "() => {location.href='https://evil.example/collect'})</script>"
+                ))
+                page = context.new_page()
+                page.goto(self.POSTING)
+                result = follow_one_read_only_apply_entry(
+                    page, context, self.POSTING, timeout_ms=5000
+                )
+                self.assertEqual(result["status"], "NETWORK_FENCE_BLOCKED")
+                self.assertIn("UNTRUSTED_NAVIGATION", result["blocked_request_types"])
+                # Chromium may display an internal error page after an aborted
+                # navigation; the security invariant is no external load.
+                self.assertNotEqual(page.url, "https://evil.example/collect")
+            finally:
+                browser.close()
+
 
 
 if __name__ == "__main__":

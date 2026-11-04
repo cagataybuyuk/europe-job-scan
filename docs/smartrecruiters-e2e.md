@@ -91,3 +91,37 @@ host-label isolation and zero-event assertions. The captured live inventory
 remains preliminary: exact final target binding, role eligibility, two ambiguous
 dropzones and the required unnamed autocomplete still need current review.
 No successful live safe-fill, upload or submit is claimed.
+
+
+## MVP-001 read-only application-entry navigation — 2026-11-04 (PROPOSED PR, NOT DEPLOYED)
+
+Issue #73: the exact-source Rotork job-page run 41832756322 completed safely but
+observed only the hidden WeChat share field and no visible application controls.
+This is a posting-page versus real application-entry boundary, not evidence
+that the form or the vacancy was eligible for an application.
+
+The proposed `gd004-live-inspection.yml` change uses the existing browser
+inspection session to identify **one** exact visible, enabled `I'm interested`,
+`Apply`, `Apply now` or `Apply for this job` entry. Navigation is opt-in
+through `--auto-open-apply` in that workflow, never a general credential
+or submit control. An anchor may be followed only when its *observed* HTTPS URL
+belongs to `jobs.smartrecruiters.com/oneclick-ui`; no requisition-derived URL
+is fabricated. A unique out-of-form, non-submit button may be clicked once to
+expose a same-page modal. Ambiguous, hidden, disabled, form-contained,
+LinkedIn/SSO and unknown CTAs stop without an attempt.
+
+A network fence rejects non-GET/HEAD methods and navigation outside the trusted
+SmartRecruiters host during the transition. Unsafe requests or navigation
+failures prevent manifest promotion. Afterwards the existing read-only
+Shadow DOM/form inventory, CAPTCHA/expired/auth boundary classification and
+zero form-write/upload/submit assertions run as before. Result is at most
+`manifest_review_candidate`, never `safe_fill_allowed`. A successful
+workflow exit alone is **not** acceptance of a real application form.
+
+Targeted regression includes exact CTA/URL selection, link entry,
+same-URL modal, blocked submit-type controls, blocked POST and blocked external
+navigation. No new cron, workflow dispatch, secrets, tracker writes,
+candidate data, CV upload, final submit, or environment approval bypass.
+This code requires CI + reviewer approval before protected-main merge; new
+live read-only target evidence is required after merge. Autonomous production
+execution and independent trusted authority remain separate gates.

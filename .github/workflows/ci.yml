@@ -134,6 +134,8 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - name: Run 40 upload/E2E tests
         run: python -m pytest -q tests/unit/test_file1_upload_runtime.py tests/unit/test_smartrecruiters_e2e.py
+      - name: Run SmartRecruiters bounded read-only application-entry tests
+        run: python -m pytest -q tests/unit/test_smartrecruiters_live_inspector.py tests/unit/test_smartrecruiters_live_route.py
 
   gd004-zero-cost-regression:
     runs-on: ubuntu-latest
