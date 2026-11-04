@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import shutil
 import sys
+import subprocess
 
 from ejs.apps.github_runner.canary_policy import validate_canary_approval
 from ejs.contracts.browser import BrowserInspectionRequest
@@ -19,6 +20,7 @@ from ejs.domain.template_history import MappingConfidence as HistoryMappingConfi
 from ejs.persistence.tmh_memory import InMemoryTmhRepository
 from ejs.services.browser_worker import BrowserRuntimeConfig, PlaywrightBrowserWorker
 from ejs.services.smartrecruiters_executor import PlaywrightSmartRecruitersExecutor
+from ejs.services.live_canary_manifest import load_reviewed_manifest
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -60,23 +62,25 @@ def _fixture_plans(cv_path: Path) -> tuple[tuple[PrefillFieldPlan, ...], tuple[F
     return fields, uploads, resolutions
 
 
-def _manifest_request(manifest_path: Path, *, cv_path: Path, target_url: str, source_sha: str, run_id: str, inspected_fp: str) -> SmartRecruitersExecutionRequest:
-    data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if str(data.get("source_sha", "")) != source_sha:
-        raise ValueError("live canary manifest source_sha must match the immutable checkout SHA")
-    if data.get("target_url") and str(data["target_url"]) != target_url:
-        raise ValueError("live canary manifest target_url does not match workflow target")
+def _manifest_request(manifest_path: Path, *, cv_path: Path, target_url: str, source_sha: str, run_id: str, inspected_fp: str,
+                      facts_path: Path, manifest_sha256: str, facts_sha256: str) -> SmartRecruitersExecutionRequest:
+    data = load_reviewed_manifest(
+        manifest_path, facts_path=facts_path, manifest_sha256=manifest_sha256,
+        facts_sha256=facts_sha256, source_sha=source_sha, target_url=target_url,
+    )
+    if data["expected_form_fingerprint"] != inspected_fp:
+        raise PermissionError("REVIEWED_FORM_FINGERPRINT_MISMATCH")
     def field(item: dict) -> PrefillFieldPlan:
         return PrefillFieldPlan(
             str(item["field_plan_key"]), str(item["control_key"]), str(item["canonical_field"]), str(item["control_type"]), str(item["value"]),
-            str(item["provenance_ref"]), FieldOwnership(item.get("ownership", "AUTO_SAFE")), ResolverStatus(item.get("resolver_status", "Resolved")),
-            MappingConfidence(item.get("mapping_confidence", "High")), bool(item.get("review_required", False)), bool(item.get("required", True)),
+            str(item["provenance_ref"]), FieldOwnership(item["ownership"]), ResolverStatus(item["resolver_status"]),
+            MappingConfidence(item["mapping_confidence"]), item["review_required"], item["required"],
         )
     def upload(item: dict) -> FileUploadPlan:
         asset = ApprovedFileAsset(
             ArtifactType(item.get("artifact_type", "cv")), str(item["artifact_version"]), str(item["source_ref"]), str(item["asset_ref"]), str(cv_path),
             str(item.get("expected_file_name", cv_path.name)), str(item.get("expected_mime_type", "application/pdf")),
-            str(item["expected_sha256"]), int(item["expected_size_bytes"]), bool(item.get("approved", True)),
+            str(item["expected_sha256"]), item["expected_size_bytes"], item["approved"],
         )
         return FileUploadPlan(str(item["upload_plan_key"]), str(item["control_key"]), str(item.get("canonical_field", "document.cv")), asset, str(item["provenance_ref"]), MappingConfidence(item.get("mapping_confidence", "High")), bool(item.get("required", True)))
     def resolution(item: dict) -> ControlResolution:
@@ -90,7 +94,7 @@ def _manifest_request(manifest_path: Path, *, cv_path: Path, target_url: str, so
         execution_id=f"execution:gd004:safe-fill-upload:{run_id}", bridge_request_id=f"bridge:gd004:canary:{run_id}",
         route_key="route:gd004:safe-fill-upload-canary", opportunity_key=str(data["opportunity_key"]), requisition_id=str(data["requisition_id"]),
         application_url=target_url, observed_at=str(data.get("observed_at") or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")),
-        expected_form_fingerprint=str(data.get("expected_form_fingerprint") or inspected_fp), candidate_profile_version=str(data["candidate_profile_version"]),
+        expected_form_fingerprint=data["expected_form_fingerprint"], candidate_profile_version=str(data["candidate_profile_version"]),
         application_status="To Apply", readiness_confidence="High", unresolved_required=0,
         field_plan=tuple(field(x) for x in data["field_plan"]), upload_plan=tuple(upload(x) for x in data["upload_plan"]),
         control_resolutions=tuple(resolution(x) for x in data["control_resolutions"]), rollout_stage=RolloutStage.R1_PREFILL,
@@ -99,8 +103,13 @@ def _manifest_request(manifest_path: Path, *, cv_path: Path, target_url: str, so
 
 def run(args: argparse.Namespace) -> int:
     source_sha = args.source_sha
-    validate_canary_approval(phrase=args.approval_phrase, source_sha=source_sha, expected_sha=source_sha, target_mode=args.target_mode)
+    # The checkout is independent of the CLI claim; no self-comparison.
+    checked_out_sha = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+    validate_canary_approval(phrase=args.approval_phrase, source_sha=source_sha, expected_sha=checked_out_sha, target_mode=args.target_mode)
     if args.target_mode == "live":
+        dirty = subprocess.check_output(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=normal"], text=True)
+        if dirty.strip():
+            raise PermissionError("LIVE_CANARY_REQUIRES_CLEAN_CHECKOUT")
         if not args.target_url or not args.target_url.startswith("https://"):
             raise ValueError("live canary target must be an HTTPS URL")
         if not args.manifest:
@@ -109,6 +118,10 @@ def run(args: argparse.Namespace) -> int:
         if not cv_path or not cv_path.exists():
             raise FileNotFoundError("live canary requires an approved CV asset on the runner")
         target_url = args.target_url
+        # Validate independent review digests and facts BEFORE opening a browser.
+        reviewed_data = load_reviewed_manifest(Path(args.manifest), facts_path=Path(args.facts),
+                               manifest_sha256=args.manifest_sha256, facts_sha256=args.facts_sha256,
+                               source_sha=source_sha, target_url=target_url)
     else:
         cv_path = Path(args.cv_path or FIXTURE_CV).resolve()
         target = Path(args.fixture or FIXTURE).resolve()
@@ -118,15 +131,20 @@ def run(args: argparse.Namespace) -> int:
     if not cv_path.exists():
         raise FileNotFoundError("canary CV asset is missing")
     config = BrowserRuntimeConfig(executable_path=args.executable_path or (shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome") or ""), navigation_timeout_ms=10_000, settle_timeout_ms=50)
-    inspector = PlaywrightBrowserWorker(config)
     observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    inspected = inspector.inspect(BrowserInspectionRequest(
-        bridge_request_id=f"bridge:gd004:canary:{args.run_id}", route_key="route:gd004:safe-fill-upload-canary",
-        opportunity_key="fixture:gd004:safe-fill-upload" if args.target_mode == "fixture" else "live:gd004:safe-fill-upload",
-        requisition_id="gd004-canary-001", application_url=target_url, adapter_key="ats:smartrecruiters", observed_at=observed_at,
-    ))
+    # Live inspection and preparation must share the executor's fenced context.
+    # The generic BrowserWorker has no network fence and must not open a live
+    # page here. The executor compares this reviewed fingerprint before writes.
+    if args.target_mode == "fixture":
+        inspector = PlaywrightBrowserWorker(config)
+        inspected = inspector.inspect(BrowserInspectionRequest(
+            bridge_request_id=f"bridge:gd004:canary:{args.run_id}", route_key="route:gd004:safe-fill-upload-canary",
+            opportunity_key="fixture:gd004:safe-fill-upload", requisition_id="gd004-canary-001",
+            application_url=target_url, adapter_key="ats:smartrecruiters", observed_at=observed_at,
+        ))
     if args.target_mode == "live":
-        request = _manifest_request(Path(args.manifest).resolve(), cv_path=cv_path, target_url=target_url, source_sha=source_sha, run_id=args.run_id, inspected_fp=inspected.form_fingerprint)
+        request = _manifest_request(Path(args.manifest).resolve(), cv_path=cv_path, target_url=target_url, source_sha=source_sha, run_id=args.run_id, inspected_fp=reviewed_data["expected_form_fingerprint"], facts_path=Path(args.facts),
+                                    manifest_sha256=args.manifest_sha256, facts_sha256=args.facts_sha256)
     else:
         fields, uploads, resolutions = _fixture_plans(cv_path)
         request = SmartRecruitersExecutionRequest(
@@ -142,7 +160,7 @@ def run(args: argparse.Namespace) -> int:
         "form_value_write_attempts": result.form_value_write_attempts, "file_upload_attempts": result.file_upload_attempts,
         "submit_attempts": result.submit_attempts, "observed_form_fingerprint": result.observed_form_fingerprint,
         "final_form_fingerprint": result.final_form_fingerprint, "review_gate_reached": result.review_gate_reached,
-        "approved_asset": all(item.expected_mime_type == "application/pdf" for item in result.file_results),
+        "approved_asset": bool(result.file_results) and all(item.expected_mime_type == "application/pdf" for item in result.file_results),
         "error_code": result.error_code, "evidence": "safe-fill and one approved CV upload; final submit disabled",
     }
     print(json.dumps(output, sort_keys=True))
@@ -156,6 +174,9 @@ def main() -> int:
     parser.add_argument("--target-mode", choices=("fixture", "live"), default="fixture")
     parser.add_argument("--target-url", default="")
     parser.add_argument("--manifest", default="", help="Approved live target manifest JSON")
+    parser.add_argument("--facts", default="", help="Private verified facts reviewed separately from code")
+    parser.add_argument("--manifest-sha256", default="", help="Independently approved manifest digest")
+    parser.add_argument("--facts-sha256", default="", help="Independently approved verified facts digest")
     parser.add_argument("--fixture", default="")
     parser.add_argument("--cv-path", default="")
     parser.add_argument("--executable-path", default="")
@@ -167,5 +188,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"GD004_CANARY_ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print("GD004_CANARY_ERROR: OPERATION_BLOCKED", file=sys.stderr)
         raise SystemExit(2)

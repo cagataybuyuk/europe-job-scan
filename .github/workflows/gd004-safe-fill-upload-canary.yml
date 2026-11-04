@@ -41,6 +41,7 @@ jobs:
       EJS_FINAL_SUBMIT: 'false'
       EJS_KILL_SWITCH: 'true'
       EJS_CANARY_APPROVAL: ${{ inputs.approval_phrase }}
+      EJS_CANARY_INPUT_DIR: ${{ runner.temp }}/ejs-canary-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,28 +73,35 @@ jobs:
         if: inputs.target_mode == 'live'
         env:
           CANARY_MANIFEST: ${{ secrets.EJS_LIVE_CANARY_MANIFEST_JSON }}
+          CANARY_FACTS: ${{ secrets.EJS_LIVE_CANARY_FACTS_JSON }}
           CANARY_CV_B64_PART1: ${{ secrets.EJS_LIVE_CANARY_CV_B64_PART1 }}
           CANARY_CV_B64_PART2: ${{ secrets.EJS_LIVE_CANARY_CV_B64_PART2 }}
         shell: bash
         run: |
+          umask 077
+          mkdir "$EJS_CANARY_INPUT_DIR"
+          test -n "$CANARY_FACTS"
           test -n "$CANARY_MANIFEST"
           test -n "$CANARY_CV_B64_PART1"
           test -n "$CANARY_CV_B64_PART2"
-          printf '%s\n' "$CANARY_MANIFEST" > canary-manifest.json
+          printf '%s' "$CANARY_MANIFEST" > "$EJS_CANARY_INPUT_DIR/canary-manifest.json"
+          printf '%s' "$CANARY_FACTS" > "$EJS_CANARY_INPUT_DIR/canary-facts.json"
           printf '%s%s' "$CANARY_CV_B64_PART1" "$CANARY_CV_B64_PART2" |
-            base64 --decode > approved-canary-cv.pdf
-          test -s approved-canary-cv.pdf
-          test "$(head -c 4 approved-canary-cv.pdf)" = "%PDF"
+            base64 --decode > "$EJS_CANARY_INPUT_DIR/approved-canary-cv.pdf"
+          test -s "$EJS_CANARY_INPUT_DIR/approved-canary-cv.pdf"
+          test "$(head -c 4 "$EJS_CANARY_INPUT_DIR/approved-canary-cv.pdf")" = "%PDF"
 
       - name: Execute bounded safe-fill + one approved CV upload
         env:
           TARGET_MODE: ${{ inputs.target_mode }}
           TARGET_URL: ${{ inputs.target_url }}
+          REVIEWED_MANIFEST_SHA256: ${{ secrets.EJS_LIVE_CANARY_MANIFEST_SHA256 }}
+          REVIEWED_FACTS_SHA256: ${{ secrets.EJS_LIVE_CANARY_FACTS_SHA256 }}
         shell: bash
         run: |
           args=(--source-sha "${{ inputs.expected_sha }}" --approval-phrase "$EJS_CANARY_APPROVAL" --target-mode "$TARGET_MODE" --run-id "$GITHUB_RUN_ID")
           if [ -n "$TARGET_URL" ]; then args+=(--target-url "$TARGET_URL"); fi
-          if [ "$TARGET_MODE" = live ]; then args+=(--manifest canary-manifest.json --cv-path approved-canary-cv.pdf); fi
+          if [ "$TARGET_MODE" = live ]; then args+=(--manifest "$EJS_CANARY_INPUT_DIR/canary-manifest.json" --cv-path "$EJS_CANARY_INPUT_DIR/approved-canary-cv.pdf" --facts "$EJS_CANARY_INPUT_DIR/canary-facts.json" --manifest-sha256 "$REVIEWED_MANIFEST_SHA256" --facts-sha256 "$REVIEWED_FACTS_SHA256"); fi
           python -m ejs.apps.github_runner.safe_fill_upload_canary "${args[@]}" | tee canary-evidence.json
 
       - name: Confirm final submit remains disabled
@@ -109,3 +117,10 @@ jobs:
           name: gd004-safe-fill-upload-canary-${{ github.run_id }}
           path: canary-evidence.json
           retention-days: 14
+
+      - name: Remove private input assets
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$EJS_CANARY_INPUT_DIR/canary-manifest.json" "$EJS_CANARY_INPUT_DIR/canary-facts.json" "$EJS_CANARY_INPUT_DIR/approved-canary-cv.pdf"
+          if [ -d "$EJS_CANARY_INPUT_DIR" ]; then rmdir "$EJS_CANARY_INPUT_DIR"; fi
