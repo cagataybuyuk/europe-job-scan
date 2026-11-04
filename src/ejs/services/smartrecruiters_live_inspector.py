@@ -16,6 +16,141 @@ from ejs.services.browser_worker import BrowserRuntimeConfig
 from ejs.services.smartrecruiters_shadow import inspect_shadow_form, summarize_shadow_form
 
 
+
+# A narrowly scoped exception to passive inspection: one reviewed entry into
+# SmartRecruiters' application UI, never a form write/upload/submit.
+# Only the explicitly opt-in CLI/workflow mode uses this capability.
+_APPLY_LABELS = frozenset({"i'm interested", "apply", "apply now", "apply for this job"})
+_APPLY_CTA_SCAN = r"""
+() => {
+  const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+  const visible = el => {
+    for (let node = el; node; node = node.parentElement || (node.getRootNode().host || null)) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || node.hidden) return false;
+    }
+    return el.getClientRects().length > 0;
+  };
+  const results = [];
+  const visit = root => {
+    for (const el of Array.from(root.querySelectorAll('*'))) {
+      if (el.matches('a[href],button')) {
+        const label = normalize(el.getAttribute('aria-label') || el.textContent);
+        const tag = el.tagName.toLowerCase();
+        results.push({
+          tag, label,
+          href: tag === 'a' ? el.href : '',
+          type: el.getAttribute('type') || '',
+          visible: visible(el),
+          disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+          in_form: !!el.closest('form')
+        });
+      }
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+  return results;
+}
+"""
+
+
+def _is_trusted_apply_destination(url: str) -> bool:
+    parsed = urlparse(url)
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "jobs.smartrecruiters.com"
+        and parsed.port in (None, 443)
+        and not parsed.username and not parsed.password
+        and (parsed.path == "/oneclick-ui" or parsed.path.startswith("/oneclick-ui/"))
+    )
+
+
+def _is_trusted_navigation_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "jobs.smartrecruiters.com"
+        and parsed.port in (None, 443)
+        and not parsed.username and not parsed.password
+    )
+
+
+def select_apply_entry(observed: list[dict], posting_url: str) -> dict:
+    """Pure, fail-closed choice; never guesses a URL from a requisition ID."""
+    if not _is_trusted_navigation_url(posting_url):
+        return {"status": "UNTRUSTED_POSTING_URL"}
+    matches = []
+    for item in observed:
+        if not isinstance(item, dict) or item.get("visible") is not True or item.get("disabled") is not False:
+            continue
+        if item.get("in_form") is not False:
+            continue
+        label = " ".join(str(item.get("label", "")).replace("’", "'").casefold().split())
+        if label not in _APPLY_LABELS:
+            continue
+        tag = item.get("tag")
+        if tag == "a":
+            href = str(item.get("href") or "")
+            if _is_trusted_apply_destination(href) and href != posting_url:
+                matches.append({"kind": "link", "href": href, "label": item.get("label", "")})
+        elif tag == "button" and str(item.get("type") or "").casefold() in ("", "button"):
+            matches.append({"kind": "button", "label": item.get("label", "")})
+    if len(matches) != 1:
+        return {"status": "NO_APPROVED_CTA" if not matches else "AMBIGUOUS_APPLY_CTA"}
+    return {"status": "APPROVED_CTA", **matches[0]}
+
+
+def follow_one_read_only_apply_entry(page, context, posting_url: str, *, timeout_ms: int) -> dict:
+    """One CTA navigation only; deny non-GET traffic and untrusted navigations.
+
+    A button may open a same-URL modal; navigation itself is not a permission
+    to enter facts, upload files, authenticate or submit a form.
+    """
+    try:
+        entry = select_apply_entry(page.evaluate(_APPLY_CTA_SCAN), posting_url)
+    except Exception as exc:
+        return {"status": "CTA_SCAN_FAILED", "error_type": type(exc).__name__, "attempt_count": 0}
+    if entry["status"] != "APPROVED_CTA":
+        return {"status": entry["status"], "attempt_count": 0}
+
+    blocked = []
+    def fence(route):
+        request = route.request
+        if request.method.upper() not in ("GET", "HEAD"):
+            blocked.append("NON_GET_REQUEST")
+            route.abort()
+            return
+        if request.is_navigation_request() and not _is_trusted_navigation_url(request.url):
+            blocked.append("UNTRUSTED_NAVIGATION")
+            route.abort()
+            return
+        route.fallback()
+
+    context.route("**/*", fence)
+    try:
+        if entry["kind"] == "link":
+            page.goto(entry["href"], wait_until="domcontentloaded", timeout=timeout_ms)
+        else:
+            locator = page.get_by_role("button", name=entry["label"], exact=True)
+            if locator.count() != 1:
+                return {"status": "CTA_LOCATOR_CHANGED", "attempt_count": 0}
+            # Only an exact, unique, visible non-submit application-entry button.
+            locator.click(timeout=min(timeout_ms, 5000), no_wait_after=True)
+        page.wait_for_timeout(1200)
+        if blocked:
+            return {"status": "NETWORK_FENCE_BLOCKED", "attempt_count": 1,
+                    "blocked_request_types": sorted(set(blocked))}
+        if not _is_trusted_navigation_url(page.url):
+            return {"status": "UNTRUSTED_FINAL_URL", "attempt_count": 1}
+        return {"status": "FOLLOWED", "kind": entry["kind"],
+                "url_changed": page.url != posting_url, "attempt_count": 1}
+    except Exception as exc:
+        return {"status": "ENTRY_NAVIGATION_FAILED", "attempt_count": 1, "error_type": type(exc).__name__}
+    finally:
+        context.unroute("**/*", fence)
+
+
 PAGE_STRUCTURE_DIAGNOSTICS = r"""
 () => {
   const all = [];
@@ -73,6 +208,7 @@ class LiveInspectionRequest:
     application_url: str
     timeout_ms: int = 20_000
     render_wait_ms: int = 8_000
+    auto_open_apply: bool = False
 
 
 def validate_live_url(url: str) -> None:
@@ -250,6 +386,23 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
                 network_idle_observed = False
 
             main_diag, render_wait = _wait_for_render_structure(page, budget_ms=request.render_wait_ms)
+            apply_navigation = {"status": "NOT_REQUESTED", "attempt_count": 0}
+            if request.auto_open_apply:
+                # Do not interact at all on an expired, auth, CAPTCHA or already
+                # visible form surface. The sole permitted action is an entry CTA.
+                pre_form = inspect_shadow_form(page)
+                pre_state, _ = discovery_state(pre_form)
+                pre_body = (page.locator("body").inner_text(timeout=request.timeout_ms) or "").casefold()
+                challenged = any(x in pre_body for x in ("captcha", "verify you are human", "checking your browser"))
+                expired = any(x in pre_body for x in ("sorry, this job has expired", "this job has expired"))
+                if pre_state == "form_structure_not_discovered" and not challenged and not expired:
+                    apply_navigation = follow_one_read_only_apply_entry(
+                        page, context, request.application_url, timeout_ms=request.timeout_ms
+                    )
+                    if apply_navigation["status"] == "FOLLOWED":
+                        main_diag, render_wait = _wait_for_render_structure(page, budget_ms=request.render_wait_ms)
+                else:
+                    apply_navigation = {"status": "ALREADY_FORM_OR_BOUNDARY", "attempt_count": 0}
             final_url = page.url
             reports = [scope_shadow_report(inspect_shadow_form(page), "document")]
             frame_diagnostics = []
@@ -293,6 +446,13 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
             state, error_code = discovery_state(form)
             if captcha:
                 state, error_code = "captcha_boundary", "CAPTCHA_BOUNDARY"
+            # A blocked/failed navigation must not promote partially rendered
+            # controls to a manifest-review candidate.
+            if apply_navigation["status"] in {
+                "NETWORK_FENCE_BLOCKED", "UNTRUSTED_FINAL_URL", "ENTRY_NAVIGATION_FAILED",
+                "CTA_SCAN_FAILED", "CTA_LOCATOR_CHANGED",
+            }:
+                state, error_code = "form_structure_not_discovered", "FORM_STRUCTURE_NOT_DISCOVERED"
 
             captcha_evidence = []
             if body_captcha:
@@ -309,6 +469,7 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
                 "cross_origin_frame_count": cross_origin_frames,
                 "challenge_frame_origins": sorted(set(challenge_frame_origins)),
                 "captcha_evidence": captcha_evidence,
+                "apply_navigation": apply_navigation,
                 "frames": frame_diagnostics,
             }
             return {
@@ -337,9 +498,13 @@ def main() -> int:
     parser.add_argument("--url", required=True, dest="application_url")
     parser.add_argument("--timeout-ms", type=int, default=20_000)
     parser.add_argument("--render-wait-ms", type=int, default=8_000)
+    parser.add_argument("--auto-open-apply", action="store_true",
+                        help="One bounded SmartRecruiters application-entry navigation, never form input")
     parser.add_argument("--output", default="")
     args = parser.parse_args()
-    report = inspect_live_page(LiveInspectionRequest(args.application_url, args.timeout_ms, args.render_wait_ms))
+    report = inspect_live_page(LiveInspectionRequest(
+        args.application_url, args.timeout_ms, args.render_wait_ms, args.auto_open_apply
+    ))
     payload = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2)
     if args.output:
         Path(args.output).write_text(payload + "\n", encoding="utf-8")
