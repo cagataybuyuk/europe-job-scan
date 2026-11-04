@@ -243,3 +243,16 @@ def test_service_worker_registration_is_blocked_before_script_request(chromium_c
         assert result.form_value_write_attempts == 7
         assert result.file_upload_attempts == 1
         assert all(method == "GET" and path == "/application" for method, path in seen)
+
+
+def test_locator_identity_drift_cannot_hide_behind_same_semantic_fingerprint(chromium_config):
+    script = """firstName.addEventListener('input',()=>{
+      document.querySelector('label[for="lastName"]').htmlFor='renamedLast';
+      document.getElementById('lastName').id='renamedLast';
+    })"""
+    with local_form(script) as (target, seen):
+        result = PlaywrightSmartRecruitersExecutor(chromium_config).execute(request_for(chromium_config, target))
+        assert result.error_code == "PREPARE_FORM_DRIFT"
+        assert result.form_value_write_attempts == 1
+        assert result.file_upload_attempts == 0
+        assert result.submit_attempts == 0

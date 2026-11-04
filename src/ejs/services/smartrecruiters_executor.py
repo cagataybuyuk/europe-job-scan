@@ -197,7 +197,10 @@ class PlaywrightSmartRecruitersExecutor:
                             opportunity_key=request.opportunity_key, requisition_id=request.requisition_id,
                             apply_url=final_url, ats_family=ats_family, observed_at=request.observed_at,
                             controls=current_controls)
-                        if current_fp != observed_fp:
+                        # The semantic fingerprint intentionally omits DOM IDs.
+                        # Retain exact observed locator identities as well: an ID
+                        # rename/rebind must stop before resolving the old locator.
+                        if current_controls != controls or current_fp != observed_fp:
                             raise PrepareBoundaryError("PREPARE_FORM_DRIFT")
 
                     require_current_surface()
