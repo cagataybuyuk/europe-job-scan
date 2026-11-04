@@ -118,6 +118,22 @@ def select_apply_entry(observed: list[dict], posting_url: str) -> dict:
             "candidate_count": len(matches), "distinct_destination_count": 1}
 
 
+def summarize_blocked_request(method: str, resource_type: str, url: str, is_navigation: bool) -> dict:
+    """Bounded, non-identifying network-fence evidence; never retain URLs or query strings."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host != "jobs.smartrecruiters.com" and not host.endswith(".smartrecruiters.com"):
+        host = "external_redacted"
+    return {
+        "method": method.upper() if method.upper() in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"} else "OTHER",
+        "resource_type": resource_type if resource_type in {
+            "document", "script", "stylesheet", "image", "font", "xhr", "fetch", "other"
+        } else "other",
+        "host": host,
+        "navigation": bool(is_navigation),
+    }
+
+
 def follow_one_read_only_apply_entry(page, context, posting_url: str, *, timeout_ms: int) -> dict:
     """One CTA navigation only; deny non-GET traffic and untrusted navigations.
 
@@ -132,14 +148,19 @@ def follow_one_read_only_apply_entry(page, context, posting_url: str, *, timeout
         return {**entry, "attempt_count": 0}
 
     blocked = []
+    blocked_details = []
     def fence(route):
         request = route.request
         if request.method.upper() not in ("GET", "HEAD"):
             blocked.append("NON_GET_REQUEST")
+            if len(blocked_details) < 12:
+                blocked_details.append(summarize_blocked_request(request.method, request.resource_type, request.url, request.is_navigation_request()))
             route.abort()
             return
         if request.is_navigation_request() and not _is_trusted_navigation_url(request.url):
             blocked.append("UNTRUSTED_NAVIGATION")
+            if len(blocked_details) < 12:
+                blocked_details.append(summarize_blocked_request(request.method, request.resource_type, request.url, True))
             route.abort()
             return
         route.fallback()
@@ -157,7 +178,9 @@ def follow_one_read_only_apply_entry(page, context, posting_url: str, *, timeout
         page.wait_for_timeout(1200)
         if blocked:
             return {"status": "NETWORK_FENCE_BLOCKED", "attempt_count": 1,
-                    "blocked_request_types": sorted(set(blocked))}
+                    "blocked_request_types": sorted(set(blocked)),
+                    "blocked_request_samples": blocked_details,
+                    "blocked_sample_limit": 12}
         if not _is_trusted_navigation_url(page.url):
             return {"status": "UNTRUSTED_FINAL_URL", "attempt_count": 1}
         return {"status": "FOLLOWED", "kind": entry["kind"],

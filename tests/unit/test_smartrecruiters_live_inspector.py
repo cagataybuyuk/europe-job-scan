@@ -205,6 +205,32 @@ class BoundedApplyEntryPolicyTests(unittest.TestCase):
         self.assertEqual(value["kind"], "button")
 
 
+class NetworkFenceDiagnosticTests(unittest.TestCase):
+    def test_redacts_external_host_path_query_and_fragment(self):
+        from ejs.services.smartrecruiters_live_inspector import summarize_blocked_request
+        value = summarize_blocked_request("POST", "fetch",
+            "https://identity.example.net/private/token?email=secret@example.com#fragment", False)
+        self.assertEqual(value, {"method": "POST", "resource_type": "fetch",
+                                 "host": "external_redacted", "navigation": False})
+        self.assertNotIn("secret", str(value))
+        self.assertNotIn("identity.example.net", str(value))
+
+    def test_trusted_host_only_no_path_or_query(self):
+        from ejs.services.smartrecruiters_live_inspector import summarize_blocked_request
+        value = summarize_blocked_request("GET", "document",
+            "https://jobs.smartrecruiters.com/oneclick-ui/private?token=secret", True)
+        self.assertEqual(value, {"method": "GET", "resource_type": "document",
+                                 "host": "jobs.smartrecruiters.com", "navigation": True})
+        self.assertNotIn("token", str(value))
+
+    def test_unknown_method_and_resource_type_are_bucketed(self):
+        from ejs.services.smartrecruiters_live_inspector import summarize_blocked_request
+        value = summarize_blocked_request("CUSTOM", "websocket", "https://untrusted.test/x", False)
+        self.assertEqual(value["method"], "OTHER")
+        self.assertEqual(value["resource_type"], "other")
+        self.assertEqual(value["host"], "external_redacted")
+
+
 @unittest.skipUnless(importlib.util.find_spec("playwright"), "Playwright is not installed")
 class BoundedApplyEntryBrowserTests(unittest.TestCase):
     POSTING = "https://jobs.smartrecruiters.com/Acme/123-job"
