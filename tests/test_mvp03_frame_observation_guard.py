@@ -10,7 +10,7 @@ def test_same_origin_frame_read_failure_cannot_certify_form():
     assert 'same_origin_frame_observation_failed = True' in source
     assert 'elif same_origin_frame_observation_failed:' in source
     assert '"FRAME_OBSERVATION_INCOMPLETE"' in source
-    assert source.index('elif same_origin_frame_observation_failed:') < source.index('if apply_navigation["status"] in {')
+    assert source.index('elif same_origin_frame_observation_failed:') < source.index('if not captcha and apply_navigation["status"] in {')
 
 
 def test_captcha_boundary_precedes_incomplete_frame_boundary():
