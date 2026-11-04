@@ -1,0 +1,119 @@
+name: GD-004 Autonomous Read-only Entry Canary
+
+# Runs once when this workflow is first merged to main. Subsequent code
+# changes require a deliberate reviewed edit to this exact workflow file.
+# No cron, no PROD job selection, no employer-facing form mutation.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gd004-auto-readonly-entry.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.repository == 'cagataybuyuk/europe-job-scan' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EJS_FORM_WRITE: 'false'
+      EJS_FILE_UPLOAD: 'false'
+      EJS_FINAL_SUBMIT: 'false'
+      EJS_KILL_SWITCH: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Assert immutable read-only boundary
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          APPROVAL: APPROVE-TEST-LIVE-INSPECTION
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$APPROVAL" = "APPROVE-TEST-LIVE-INSPECTION"
+          test "$EJS_FORM_WRITE" = "false"
+          test "$EJS_FILE_UPLOAD" = "false"
+          test "$EJS_FINAL_SUBMIT" = "false"
+          test "$EJS_KILL_SWITCH" = "true"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Inspect approved target without mutation authority
+        env:
+          TARGET_URL: https://jobs.smartrecruiters.com/Rotork1/744000156409389
+        run: |
+          python -m ejs.services.smartrecruiters_live_inspector \
+            --url "$TARGET_URL" \
+            --auto-open-apply \
+            --output live-inspection.json
+      - name: Reassert zero side effects and fail-closed discovery state
+        run: |
+          python - <<'PY'
+          import json
+          report = json.load(open('live-inspection.json', encoding='utf-8'))
+          assert report['inspection_only'] is True
+          navigation = report.get('diagnostics', {}).get('apply_navigation', {})
+          assert navigation.get('attempt_count') in {0, 1}
+          if navigation.get('status') in {
+              'NETWORK_FENCE_BLOCKED', 'UNTRUSTED_FINAL_URL',
+              'ENTRY_NAVIGATION_FAILED', 'CTA_SCAN_FAILED', 'CTA_LOCATOR_CHANGED',
+          }:
+              assert report.get('runtime_state') != 'inspected'
+          assert report.get('live_execution_ready') is False
+          assert report.get('form_value_write_attempts', 0) == 0
+          assert report.get('file_upload_attempts', 0) == 0
+          assert report.get('submit_attempts', 0) == 0
+          assert report.get('runtime_state') in {
+              'inspected',
+              'captcha_boundary',
+              'form_structure_not_discovered',
+              'job_expired',
+              'auth_boundary',
+          }
+          if report.get('runtime_state') == 'form_structure_not_discovered':
+              assert report.get('error_code') == 'FORM_STRUCTURE_NOT_DISCOVERED'
+          if report.get('runtime_state') == 'job_expired':
+              assert report.get('error_code') == 'JOB_EXPIRED'
+          if report.get('runtime_state') == 'auth_boundary':
+              assert report.get('error_code') == 'AUTH_BOUNDARY'
+          if report.get('runtime_state') == 'captcha_boundary':
+              assert report.get('error_code') == 'CAPTCHA_BOUNDARY'
+              assert report.get('captcha_observed') is True
+          PY
+      - name: Route inspection evidence without execution authority
+        run: |
+          python -m ejs.services.smartrecruiters_live_route \
+            --input live-inspection.json \
+            --output live-route.json
+      - name: Reassert routing cannot authorize execution
+        run: |
+          python - <<'PY'
+          import json
+          inspection = json.load(open('live-inspection.json', encoding='utf-8'))
+          route = json.load(open('live-route.json', encoding='utf-8'))
+          assert route['route'] in {'human_handoff', 'manifest_review_candidate', 'diagnostic_review'}
+          assert route.get('automation_resume_allowed') is False
+          assert route.get('safe_fill_allowed') is False
+          assert route.get('final_submit_allowed') is False
+          if inspection.get('runtime_state') in {'job_expired', 'auth_boundary'}:
+              assert route.get('manifest_review_allowed') is False
+              assert route.get('reason_code') in {'JOB_EXPIRED', 'AUTH_BOUNDARY', 'CAPTCHA_BOUNDARY'}
+          if inspection.get('runtime_state') == 'captcha_boundary':
+              assert route.get('route') == 'human_handoff'
+              assert route.get('reason_code') == 'CAPTCHA_BOUNDARY'
+              assert route.get('manifest_review_allowed') is False
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gd004-auto-readonly-entry-${{ github.run_id }}
+          path: |
+            live-inspection.json
+            live-route.json
+          retention-days: 14
