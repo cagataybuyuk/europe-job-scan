@@ -343,6 +343,32 @@ def combine_shadow_reports(reports: list[dict]) -> dict:
     return summarize_shadow_form({"controls": controls, "actions": actions})
 
 
+def summarize_step_boundary(form: dict) -> dict:
+    """Describe only the currently observed step; never advance a form."""
+    controls = form.get("controls", [])
+    actions = form.get("actions", [])
+    visible_controls = sum(
+        c.get("visible") is True and c.get("disabled") is not True
+        for c in controls if isinstance(c, dict)
+    )
+    next_labels = {"next", "continue", "proceed"}
+    next_actions = [
+        a for a in actions if isinstance(a, dict)
+        and a.get("visible") is True and a.get("disabled") is not True
+        and " ".join(str(a.get("label", "")).casefold().split()) in next_labels
+    ]
+    return {
+        "current_step_only": True,
+        "visible_enabled_control_count": visible_controls,
+        "next_action_count": len(next_actions),
+        "additional_steps_possible": bool(next_actions),
+        "later_steps_inspected": False,
+        "step_navigation_attempts": 0,
+        "multi_step_complete": False,
+        "requires_separate_review_for_step_navigation": bool(next_actions),
+    }
+
+
 def discovery_state(form: dict) -> tuple[str, str]:
     # Job-status/cookie/share UI must not masquerade as an application form.
     actions = form.get("actions", [])
@@ -556,6 +582,7 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
             }
             return {
                 "human_handoff": human_handoff,
+                "step_boundary": summarize_step_boundary(form),
                 "runtime_state": state,
                 "error_code": error_code,
                 "requested_url": request.application_url,

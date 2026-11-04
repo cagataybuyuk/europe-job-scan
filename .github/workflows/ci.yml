@@ -139,7 +139,7 @@ jobs:
       - run: python -m pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
       - name: Run MVP-03 malformed observation and privacy tests
-        run: python -m pytest -q tests/test_mvp03_observation_boundaries.py tests/unit/test_smartrecruiters_shadow.py tests/test_mvp03_frame_observation_guard.py tests/test_mvp03_dynamic_render_signals.py tests/test_mvp03_human_handoff_contract.py tests/test_mvp03_captcha_precedence.py
+        run: python -m pytest -q tests/test_mvp03_observation_boundaries.py tests/unit/test_smartrecruiters_shadow.py tests/test_mvp03_frame_observation_guard.py tests/test_mvp03_dynamic_render_signals.py tests/test_mvp03_human_handoff_contract.py tests/test_mvp03_captcha_precedence.py tests/test_mvp03_multistep_boundary.py
 
   browser-prefill-regression:
     runs-on: ubuntu-latest
