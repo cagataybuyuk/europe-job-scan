@@ -84,3 +84,21 @@ def test_spoofed_or_malformed_ats_origin_is_not_trusted(url):
     assert result["review_candidate"] is False
     assert "EMPLOYER_SOURCE_UNVERIFIED" in result["reasons"]
     assert result["execution_authorized"] is False
+
+
+@pytest.mark.parametrize("url", [
+    "https://jobs.smartrecruiters.com/not-a-job",
+    "https://jobs.smartrecruiters.com/Employer/123/extra",
+    "https://jobs.smartrecruiters.com/Employer/123?redirect=https://evil.example",
+    "https://jobs.smartrecruiters.com/Employer/123#fragment",
+    "https://jobs.smartrecruiters.com//123",
+    "https://jobs.smartrecruiters.com/Employer/",
+])
+def test_noncanonical_posting_url_is_not_reviewable(url):
+    result = evaluate_vacancy_evidence(
+        replace(complete(), employer_posting_url=url), now=NOW
+    )
+    assert "EMPLOYER_SOURCE_UNVERIFIED" in result["reasons"]
+    assert result["review_candidate"] is False
+    assert result["ats_write_authorized"] is False
+    assert result["submit_authorized"] is False
