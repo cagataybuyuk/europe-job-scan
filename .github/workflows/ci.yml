@@ -111,6 +111,7 @@ jobs:
           tests/test_live_canary_manifest.py
           tests/test_mvp04_vacancy_evidence_gate.py
           tests/test_mvp05_answer_provenance_gate.py
+          tests/test_mvp06_cv_asset_gate.py
           tests/test_submission_ledger.py
           tests/test_durable_submission.py
 
