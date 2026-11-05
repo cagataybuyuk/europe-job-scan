@@ -32,7 +32,7 @@ def evaluate_cv_asset(asset: object, approval: object) -> dict:
             reasons.append("UNSUPPORTED_TYPE")
         if asset.get("approved_filename") != approval.get("approved_filename") or not (
             isinstance(asset.get("approved_filename"), str)
-            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.pdf", asset["approved_filename"], re.IGNORECASE)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.pdf", asset["approved_filename"], re.IGNORECASE)
         ):
             reasons.append("INVALID_OR_CHANGED_FILENAME")
         if approval.get("user_approved") is not True or approval.get("scope") != "one_cv_asset":
