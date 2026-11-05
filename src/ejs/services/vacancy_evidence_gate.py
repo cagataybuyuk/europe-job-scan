@@ -45,7 +45,9 @@ def evaluate_vacancy_evidence(
             and source.hostname == "jobs.smartrecruiters.com"
             and source.port in (None, 443)
             and not source.username and not source.password
-            and source.path.startswith("/") and source.path != "/"
+            and len(source.path.strip("/").split("/")) == 2
+            and all(segment and segment not in {".", ".."} for segment in source.path.strip("/").split("/"))
+            and not source.query and not source.fragment
         )
     except (TypeError, ValueError):
         trusted_source = False
