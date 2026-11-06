@@ -178,3 +178,29 @@ def test_obfuscated_legal_key_never_leaks_answer_or_source_reference():
     assert 'PRIVATE_LEGAL_ANSWER' not in str(result)
     assert 'SECRET_SOURCE_REF' not in str(result)
     assert result['submit_authorized'] is False
+
+
+@pytest.mark.parametrize('key', [
+    'wo rk_authorization', 'work_auth orization',
+    'visa_spon sorship', 'compensation.expected_sal ary',
+    'consent.mark eting', 'work_right.eu_ee a',
+    'candidate.first_name\u200b',
+])
+def test_intraword_or_invisible_field_obfuscation_is_never_review_ready(key):
+    result = evaluate_answer_manifest({'fields': [field(key, 'PRIVATE_ANSWER', source_type='user_explicit')]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_0:UNSUPPORTED_FIELD' in result['reasons']
+    assert result['write_authorized'] is False
+    assert result['upload_authorized'] is False
+    assert result['submit_authorized'] is False
+    assert 'PRIVATE_ANSWER' not in str(result)
+
+
+def test_obfuscated_key_cannot_create_a_second_authorized_legal_field():
+    result = evaluate_answer_manifest({'fields': [
+        field('work_authorization', 'yes', source_type='user_explicit'),
+        field('work_auth orization', 'yes', source_type='user_explicit'),
+    ]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_1:UNSUPPORTED_FIELD' in result['reasons']
+    assert result['submit_authorized'] is False
