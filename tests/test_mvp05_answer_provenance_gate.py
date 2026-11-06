@@ -121,3 +121,32 @@ def test_explicit_legal_whitespace_alias_never_grants_mutation_authority(key):
     assert result['write_authorized'] is False
     assert result['upload_authorized'] is False
     assert result['submit_authorized'] is False
+
+
+@pytest.mark.parametrize('key', [
+    'work\u00a0.\u00a0authorization',  # nonbreaking spaces
+    'work\t.\nauthorization',  # tab/newline separator padding
+    'consent\u2009.\u2009marketing',  # thin spaces
+    'compensation\r.\texpected_salary',
+])
+def test_unicode_and_control_whitespace_cannot_hide_legal_alias(key):
+    result = evaluate_answer_manifest({'fields': [field(key, 'yes')]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_0:USER_CONFIRMATION_REQUIRED' in result['reasons']
+    assert result['write_authorized'] is False
+    assert result['upload_authorized'] is False
+    assert result['submit_authorized'] is False
+
+
+@pytest.mark.parametrize('key', [
+    'work\u200b.authorization',  # zero-width space is not normalized: fail closed as unsupported
+    'work\u2060.authorization',  # word joiner
+    'work.authorization\u200b',
+])
+def test_invisible_nonwhitespace_key_obfuscation_fails_closed(key):
+    result = evaluate_answer_manifest({'fields': [field(key, 'yes', source_type='user_explicit')]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_0:UNSUPPORTED_FIELD' in result['reasons']
+    assert result['write_authorized'] is False
+    assert result['upload_authorized'] is False
+    assert result['submit_authorized'] is False
