@@ -86,3 +86,121 @@ def test_existing_submit_policy_sponsorship_canonical_key_is_recognized():
     result = evaluate_answer_manifest({'fields': [field('work.requires_sponsorship', True, source_type='user_explicit')]})
     assert result['status'] == 'REVIEW_READY'
     assert result['write_authorized'] is False
+
+
+@pytest.mark.parametrize('key', [
+    'work . authorization', ' work_right . eu_eea ',
+    'work . requires_sponsorship', 'work_right . sponsorship_required',
+    'compensation . expected_salary', 'consent . marketing',
+    ' WORK _ AUTHORIZATION ', 'visa _ sponsorship',
+])
+def test_whitespace_normalized_legal_keys_still_require_user_confirmation(key):
+    result = evaluate_answer_manifest({'fields': [field(key, 'yes')]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_0:USER_CONFIRMATION_REQUIRED' in result['reasons']
+    assert result['write_authorized'] is False
+    assert result['submit_authorized'] is False
+
+
+def test_normalized_legal_alias_duplicate_is_blocked():
+    result = evaluate_answer_manifest({'fields': [
+        field('work . authorization', 'yes', source_type='user_explicit'),
+        field('work_authorization', 'yes', source_type='user_explicit'),
+    ]})
+    assert 'field_1:INVALID_OR_DUPLICATE_KEY' in result['reasons']
+    assert result['status'] == 'BLOCKED'
+
+
+@pytest.mark.parametrize('key', [
+    'work . authorization', 'work_right . sponsorship_required',
+    'compensation . expected_salary', 'consent . marketing',
+])
+def test_explicit_legal_whitespace_alias_never_grants_mutation_authority(key):
+    result = evaluate_answer_manifest({'fields': [field(key, 'yes', source_type='user_explicit')]})
+    assert result['status'] == 'REVIEW_READY'
+    assert result['write_authorized'] is False
+    assert result['upload_authorized'] is False
+    assert result['submit_authorized'] is False
+
+
+@pytest.mark.parametrize('key', [
+    'work\u00a0.\u00a0authorization',  # nonbreaking spaces
+    'work\t.\nauthorization',  # tab/newline separator padding
+    'consent\u2009.\u2009marketing',  # thin spaces
+    'compensation\r.\texpected_salary',
+])
+def test_unicode_and_control_whitespace_cannot_hide_legal_alias(key):
+    result = evaluate_answer_manifest({'fields': [field(key, 'yes')]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_0:USER_CONFIRMATION_REQUIRED' in result['reasons']
+    assert result['write_authorized'] is False
+    assert result['upload_authorized'] is False
+    assert result['submit_authorized'] is False
+
+
+@pytest.mark.parametrize('key', [
+    'work\u200b.authorization',  # zero-width space is not normalized: fail closed as unsupported
+    'work\u2060.authorization',  # word joiner
+    'work.authorization\u200b',
+])
+def test_invisible_nonwhitespace_key_obfuscation_fails_closed(key):
+    result = evaluate_answer_manifest({'fields': [field(key, 'yes', source_type='user_explicit')]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_0:UNSUPPORTED_FIELD' in result['reasons']
+    assert result['write_authorized'] is False
+    assert result['upload_authorized'] is False
+    assert result['submit_authorized'] is False
+
+
+@pytest.mark.parametrize('alias', [
+    'work\u00a0.\u00a0authorization',
+    'WORK\t_\nAUTHORIZATION',
+    'work_right\u2009.\u2009eu_eea',
+])
+def test_whitespace_alias_and_canonical_legal_key_are_one_duplicate(alias):
+    result = evaluate_answer_manifest({'fields': [
+        field(alias, 'yes', source_type='user_explicit'),
+        field('work_authorization', 'yes', source_type='user_explicit'),
+    ]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_1:INVALID_OR_DUPLICATE_KEY' in result['reasons']
+    assert result['write_authorized'] is False
+    assert result['upload_authorized'] is False
+    assert result['submit_authorized'] is False
+
+
+def test_obfuscated_legal_key_never_leaks_answer_or_source_reference():
+    item = field('work\u200b.authorization', 'PRIVATE_LEGAL_ANSWER', source_type='user_explicit')
+    item['provenance']['source_ref'] = 'private:SECRET_SOURCE_REF'
+    result = evaluate_answer_manifest({'fields': [item]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_0:UNSUPPORTED_FIELD' in result['reasons']
+    assert 'PRIVATE_LEGAL_ANSWER' not in str(result)
+    assert 'SECRET_SOURCE_REF' not in str(result)
+    assert result['submit_authorized'] is False
+
+
+@pytest.mark.parametrize('key', [
+    'wo rk_authorization', 'work_auth orization',
+    'visa_spon sorship', 'compensation.expected_sal ary',
+    'consent.mark eting', 'work_right.eu_ee a',
+    'candidate.first_name\u200b',
+])
+def test_intraword_or_invisible_field_obfuscation_is_never_review_ready(key):
+    result = evaluate_answer_manifest({'fields': [field(key, 'PRIVATE_ANSWER', source_type='user_explicit')]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_0:UNSUPPORTED_FIELD' in result['reasons']
+    assert result['write_authorized'] is False
+    assert result['upload_authorized'] is False
+    assert result['submit_authorized'] is False
+    assert 'PRIVATE_ANSWER' not in str(result)
+
+
+def test_obfuscated_key_cannot_create_a_second_authorized_legal_field():
+    result = evaluate_answer_manifest({'fields': [
+        field('work_authorization', 'yes', source_type='user_explicit'),
+        field('work_auth orization', 'yes', source_type='user_explicit'),
+    ]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_1:UNSUPPORTED_FIELD' in result['reasons']
+    assert result['submit_authorized'] is False

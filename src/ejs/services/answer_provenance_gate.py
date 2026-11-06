@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import math
+import re
 from ejs.contracts.prefill import SAFE_VERIFIED_FIELDS, DYNAMIC_AI_FIELDS
 
 LEGAL_FIELDS = frozenset({
@@ -60,7 +61,7 @@ def evaluate_answer_manifest(manifest: object) -> dict:
         if not isinstance(key, str) or not key.strip() or len(key) > 128:
             errors.append(f'{prefix}:INVALID_OR_DUPLICATE_KEY')
             continue
-        key = key.strip().casefold()
+        key = re.sub(r'\s*([._])\s*', r'\1', key.strip().casefold())
         key = _ALIASES.get(key, key)
         if key not in _ALLOWED_FIELDS:
             errors.append(f'{prefix}:UNSUPPORTED_FIELD')
