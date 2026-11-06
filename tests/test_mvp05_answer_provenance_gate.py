@@ -86,3 +86,26 @@ def test_existing_submit_policy_sponsorship_canonical_key_is_recognized():
     result = evaluate_answer_manifest({'fields': [field('work.requires_sponsorship', True, source_type='user_explicit')]})
     assert result['status'] == 'REVIEW_READY'
     assert result['write_authorized'] is False
+
+
+@pytest.mark.parametrize('key', [
+    'work . authorization', ' work_right . eu_eea ',
+    'work . requires_sponsorship', 'work_right . sponsorship_required',
+    'compensation . expected_salary', 'consent . marketing',
+    ' WORK _ AUTHORIZATION ', 'visa _ sponsorship',
+])
+def test_whitespace_normalized_legal_keys_still_require_user_confirmation(key):
+    result = evaluate_answer_manifest({'fields': [field(key, 'yes')]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_0:USER_CONFIRMATION_REQUIRED' in result['reasons']
+    assert result['write_authorized'] is False
+    assert result['submit_authorized'] is False
+
+
+def test_normalized_legal_alias_duplicate_is_blocked():
+    result = evaluate_answer_manifest({'fields': [
+        field('work . authorization', 'yes', source_type='user_explicit'),
+        field('work_authorization', 'yes', source_type='user_explicit'),
+    ]})
+    assert 'field_1:INVALID_OR_DUPLICATE_KEY' in result['reasons']
+    assert result['status'] == 'BLOCKED'
