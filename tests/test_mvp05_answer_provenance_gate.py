@@ -150,3 +150,31 @@ def test_invisible_nonwhitespace_key_obfuscation_fails_closed(key):
     assert result['write_authorized'] is False
     assert result['upload_authorized'] is False
     assert result['submit_authorized'] is False
+
+
+@pytest.mark.parametrize('alias', [
+    'work\u00a0.\u00a0authorization',
+    'WORK\t_\nAUTHORIZATION',
+    'work_right\u2009.\u2009eu_eea',
+])
+def test_whitespace_alias_and_canonical_legal_key_are_one_duplicate(alias):
+    result = evaluate_answer_manifest({'fields': [
+        field(alias, 'yes', source_type='user_explicit'),
+        field('work_authorization', 'yes', source_type='user_explicit'),
+    ]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_1:INVALID_OR_DUPLICATE_KEY' in result['reasons']
+    assert result['write_authorized'] is False
+    assert result['upload_authorized'] is False
+    assert result['submit_authorized'] is False
+
+
+def test_obfuscated_legal_key_never_leaks_answer_or_source_reference():
+    item = field('work\u200b.authorization', 'PRIVATE_LEGAL_ANSWER', source_type='user_explicit')
+    item['provenance']['source_ref'] = 'private:SECRET_SOURCE_REF'
+    result = evaluate_answer_manifest({'fields': [item]})
+    assert result['status'] == 'BLOCKED'
+    assert 'field_0:UNSUPPORTED_FIELD' in result['reasons']
+    assert 'PRIVATE_LEGAL_ANSWER' not in str(result)
+    assert 'SECRET_SOURCE_REF' not in str(result)
+    assert result['submit_authorized'] is False
