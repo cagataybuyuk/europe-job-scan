@@ -109,3 +109,15 @@ def test_normalized_legal_alias_duplicate_is_blocked():
     ]})
     assert 'field_1:INVALID_OR_DUPLICATE_KEY' in result['reasons']
     assert result['status'] == 'BLOCKED'
+
+
+@pytest.mark.parametrize('key', [
+    'work . authorization', 'work_right . sponsorship_required',
+    'compensation . expected_salary', 'consent . marketing',
+])
+def test_explicit_legal_whitespace_alias_never_grants_mutation_authority(key):
+    result = evaluate_answer_manifest({'fields': [field(key, 'yes', source_type='user_explicit')]})
+    assert result['status'] == 'REVIEW_READY'
+    assert result['write_authorized'] is False
+    assert result['upload_authorized'] is False
+    assert result['submit_authorized'] is False
