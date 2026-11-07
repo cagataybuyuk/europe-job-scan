@@ -66,3 +66,19 @@ def test_invalid_target_country_fails_closed(target):
     assert result["status"] == "BLOCKED"
     assert all(result[key] is False for key in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("target,changes", [
+    (" Portugal ", {}),
+    ("Portugal\n", {}),
+    ("Portugal", {"country": "Portugal\n"}),
+    ("Portugal\t", {"country": "Portugal\t"}),
+    ("Portugal", {"country": "Portugal\x00"}),
+    ("Portugal", {"source_ref": "private:attestation\nforged"}),
+    ("Portugal", {"source_ref": " private:attestation"}),
+])
+def test_country_and_provenance_ambiguity_fails_closed(target, changes):
+    result = evaluate_work_rights(evidence(**changes), target)
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
