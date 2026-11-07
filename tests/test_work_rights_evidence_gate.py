@@ -44,3 +44,25 @@ def test_unhashable_or_nonstring_status_fails_closed_without_exception(bad_state
     assert result["status"] == "BLOCKED"
     assert "UNKNOWN_STATUS" in result["reasons"]
     assert all(result[key] is False for key in ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("changes", [
+    {"verified": "true"}, {"verified": 1}, {"current": "true"},
+    {"current": 1}, {"source_type": " user_explicit "},
+    {"state": " VERIFIED "}, {"state": "verified"},
+    {"country": " Portugal "}, {"country": None},
+    {"source_ref": "   "},
+])
+def test_ambiguous_legal_evidence_never_authorizes_mutation(changes):
+    result = evaluate_work_rights(evidence(**changes), "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("target", [None, "", "   ", [], {}, 1, True])
+def test_invalid_target_country_fails_closed(target):
+    result = evaluate_work_rights(evidence(), target)
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
