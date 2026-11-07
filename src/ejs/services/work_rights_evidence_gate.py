@@ -13,7 +13,7 @@ def evaluate_work_rights(evidence: object, target_country: str) -> dict:
         reasons.append("MISSING_EVIDENCE_OR_TARGET")
     else:
         state = evidence.get("state")
-        if state not in STATES:
+        if not isinstance(state, str) or state not in STATES:
             reasons.append("UNKNOWN_STATUS")
         if evidence.get("country") != target_country:
             reasons.append("COUNTRY_MISMATCH")
@@ -25,9 +25,9 @@ def evaluate_work_rights(evidence: object, target_country: str) -> dict:
             reasons.append("STALE_OR_UNKNOWN")
         if not isinstance(evidence.get("source_ref"), str) or not evidence["source_ref"].strip():
             reasons.append("MISSING_SOURCE_REF")
-        if state == "INELIGIBLE":
+        if isinstance(state, str) and state == "INELIGIBLE":
             reasons.append("INELIGIBLE")
-        elif state == "UNKNOWN":
+        elif isinstance(state, str) and state == "UNKNOWN":
             reasons.append("UNKNOWN_ELIGIBILITY")
     return {
         "status": "BLOCKED" if reasons else "REVIEW_READY",
