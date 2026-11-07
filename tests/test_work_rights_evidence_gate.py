@@ -82,3 +82,16 @@ def test_country_and_provenance_ambiguity_fails_closed(target, changes):
     assert result["status"] == "BLOCKED"
     assert all(result[key] is False for key in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+@pytest.mark.parametrize("target,changes", [
+    ("Portugal", {"country": "Portu\\u200bgal"}),
+    ("Portu\\u200bgal", {"country": "Portu\\u200bgal"}),
+    ("Portugal", {"source_ref": "private:attestation\\u200b"}),
+    ("Portugal", {"source_ref": "private:attestation\\u00a0"}),
+    ("Portugal", {"country": "Portugal\\u202e"}),
+])
+def test_invisible_unicode_in_legal_evidence_fails_closed(target, changes):
+    result = evaluate_work_rights(evidence(**changes), target)
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
