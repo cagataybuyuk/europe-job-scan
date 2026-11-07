@@ -36,3 +36,11 @@ def test_diagnostics_never_leak_source_reference():
     secret = "private:SECRET"
     result = evaluate_work_rights(evidence(state="UNKNOWN", source_ref=secret), "Portugal")
     assert secret not in str(result)
+
+
+@pytest.mark.parametrize("bad_state", [[], {}, {"status": "VERIFIED"}, ["VERIFIED"], 1, True, None])
+def test_unhashable_or_nonstring_status_fails_closed_without_exception(bad_state):
+    result = evaluate_work_rights(evidence(state=bad_state), "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert "UNKNOWN_STATUS" in result["reasons"]
+    assert all(result[key] is False for key in ("write_authorized", "upload_authorized", "submit_authorized"))
