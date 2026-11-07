@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import unicodedata
+
+def _ambiguous_text(value: str) -> bool:
+    """Reject invisible/format characters and Unicode separators in legal evidence."""
+    return any(unicodedata.category(ch).startswith(("C", "Z")) for ch in value)
+
 
 STATES = frozenset({"VERIFIED", "INELIGIBLE", "UNKNOWN"})
 
@@ -15,7 +21,7 @@ def evaluate_work_rights(evidence: object, target_country: str) -> dict:
         state = evidence.get("state")
         if not isinstance(state, str) or state not in STATES:
             reasons.append("UNKNOWN_STATUS")
-        if (not isinstance(evidence.get("country"), str) or not evidence["country"].strip()\n                or evidence["country"] != evidence["country"].strip()\n                or target_country != target_country.strip()\n                or any(ord(ch) < 32 or ord(ch) == 127 for ch in evidence["country"] + target_country)\n                or evidence["country"] != target_country):
+        if (not isinstance(evidence.get("country"), str) or not evidence["country"].strip()\n                or evidence["country"] != evidence["country"].strip()\n                or target_country != target_country.strip()\n                or _ambiguous_text(evidence["country"] + target_country)\n                or evidence["country"] != target_country):
             reasons.append("COUNTRY_MISMATCH")
         if evidence.get("source_type") != "user_explicit":
             reasons.append("USER_CONFIRMATION_REQUIRED")
@@ -23,7 +29,7 @@ def evaluate_work_rights(evidence: object, target_country: str) -> dict:
             reasons.append("UNVERIFIED")
         if evidence.get("current") is not True:
             reasons.append("STALE_OR_UNKNOWN")
-        if (not isinstance(evidence.get("source_ref"), str) or not evidence["source_ref"].strip()\n                or evidence["source_ref"] != evidence["source_ref"].strip()\n                or any(ord(ch) < 32 or ord(ch) == 127 for ch in evidence["source_ref"])):
+        if (not isinstance(evidence.get("source_ref"), str) or not evidence["source_ref"].strip()\n                or evidence["source_ref"] != evidence["source_ref"].strip()\n                or _ambiguous_text(evidence["source_ref"])):
             reasons.append("MISSING_SOURCE_REF")
         if isinstance(state, str) and state == "INELIGIBLE":
             reasons.append("INELIGIBLE")
