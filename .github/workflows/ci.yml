@@ -114,6 +114,11 @@ jobs:
           tests/test_mvp06_cv_asset_gate.py
           tests/test_submission_ledger.py
           tests/test_durable_submission.py
+          tests/test_single_application_inputs.py
+          tests/test_oneclick_target.py
+          tests/test_single_application_runtime.py
+          tests/test_application_outcome.py
+          tests/test_single_application_bootstrap.py
 
   mvp01-render-regression:
     runs-on: ubuntu-latest
@@ -177,7 +182,7 @@ jobs:
       - run: python -m pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
       - name: Run 40 upload/E2E tests
-        run: python -m pytest -q tests/unit/test_file1_upload_runtime.py tests/unit/test_smartrecruiters_e2e.py tests/test_prepare_network_fence.py tests/test_fenced_application_session.py tests/test_durable_submission_browser.py
+        run: python -m pytest -q tests/unit/test_file1_upload_runtime.py tests/unit/test_smartrecruiters_e2e.py tests/test_prepare_network_fence.py tests/test_fenced_application_session.py tests/test_durable_submission_browser.py tests/test_oneclick_browser.py
       - name: Run SmartRecruiters bounded read-only application-entry tests
         run: python -m pytest -q tests/unit/test_smartrecruiters_live_inspector.py tests/unit/test_smartrecruiters_live_route.py
 
