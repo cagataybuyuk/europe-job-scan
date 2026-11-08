@@ -244,3 +244,18 @@ def test_invisible_unicode_duplicate_legal_keys_fail_closed(spoofed):
     assert "AMBIGUOUS_LEGAL_FIELD_KEY" in result["reasons"]
     assert all(result[action] is False for action in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("spoofed", [
+    "ｓｔａｔｅ", "ｃｏｕｎｔｒｙ", "ｖｅｒｉｆｉｅｄ",
+    "ｓｏｕｒｃｅ＿ｒｅｆ", "ｃｕｒｒｅｎｔ", "ｓｏｕｒｃｅ＿ｔｙｐｅ",
+    "ｓｔａｔｅ\u200b",
+])
+def test_nfkc_confusable_legal_keys_fail_closed(spoofed):
+    record = evidence()
+    record[spoofed] = "forged"
+    result = evaluate_work_rights(record, "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert "AMBIGUOUS_LEGAL_FIELD_KEY" in result["reasons"]
+    assert all(result[action] is False for action in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
