@@ -111,3 +111,19 @@ def test_actual_unicode_codepoints_not_literal_escape_sequences(target, changes)
     assert "COUNTRY_MISMATCH" in result["reasons"] or "MISSING_SOURCE_REF" in result["reasons"]
     assert all(result[key] is False for key in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("changes,target", [
+    ({"source_type": "user_explicit\u200b"}, "Portugal"),
+    ({"source_type": "user_explicit\u00a0"}, "Portugal"),
+    ({"source_type": "user_explicit\n"}, "Portugal"),
+    ({"source_ref": "private:attestation\u2028approved"}, "Portugal"),
+    ({"country": "Germany"}, "Portugal"),
+    ({"country": "Portugal"}, "Germany"),
+])
+def test_legal_provenance_and_country_must_match_exactly(changes, target):
+    result = evaluate_work_rights(evidence(**changes), target)
+    assert result["status"] == "BLOCKED"
+    assert result["scope"] == "eligibility_metadata_only"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
