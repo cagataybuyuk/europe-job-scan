@@ -157,21 +157,34 @@ def test_additional_unicode_format_and_control_characters_fail_closed(target, ch
                ("write_authorized", "upload_authorized", "submit_authorized"))
 
 
-@pytest.mark.parametrize("spoofed_key", [
-    " state", "state ", "sta te", "state\\t", "state\\u00a0",
-    "source_type ", " source_type", "verified ", "current ", "country ",
+@pytest.mark.parametrize("canonical,spoofed", [
+    ("state", " state"), ("state", "state "), ("state", "sta te"),
+    ("state", "state\t"), ("state", "state\u00a0"),
+    ("source_type", "source_type "), ("source_type", " source_type"),
+    ("verified", "verified "), ("current", "current "),
+    ("country", "country "), ("source_ref", "source_ref\u200b"),
 ])
-def test_whitespace_spoofed_legal_keys_cannot_replace_required_evidence(spoofed_key):
-    original_key = spoofed_key.strip().replace(" ", "")
-    if original_key not in {"state", "source_type", "verified", "current", "country"}:
-        original_key = spoofed_key.strip()
+def test_whitespace_spoofed_legal_keys_cannot_replace_required_evidence(canonical, spoofed):
     record = evidence()
-    record.pop(original_key, None)
-    record[spoofed_key] = {
-        "state": "VERIFIED", "source_type": "user_explicit",
-        "verified": True, "current": True, "country": "Portugal",
-    }[original_key]
+    original = record.pop(canonical)
+    record[spoofed] = original
     result = evaluate_work_rights(record, "Portugal")
     assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("state", "UNKNOWN"), ("state", "INELIGIBLE"),
+    ("country", "Germany"), ("verified", False),
+    ("current", False), ("source_ref", ""),
+])
+def test_eligibility_blockers_remain_denied_even_with_spoofed_write_approval(field, value):
+    record = evidence(**{field: value})
+    record.update(write_authorized=True, upload_authorized=True,
+                  submit_authorized=True, final_submit=True)
+    result = evaluate_work_rights(record, "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert result["scope"] == "eligibility_metadata_only"
     assert all(result[key] is False for key in
                ("write_authorized", "upload_authorized", "submit_authorized"))
