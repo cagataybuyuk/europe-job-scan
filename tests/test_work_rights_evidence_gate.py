@@ -155,3 +155,23 @@ def test_additional_unicode_format_and_control_characters_fail_closed(target, ch
     assert result["status"] == "BLOCKED"
     assert all(result[key] is False for key in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("spoofed_key", [
+    " state", "state ", "sta te", "state\\t", "state\\u00a0",
+    "source_type ", " source_type", "verified ", "current ", "country ",
+])
+def test_whitespace_spoofed_legal_keys_cannot_replace_required_evidence(spoofed_key):
+    original_key = spoofed_key.strip().replace(" ", "")
+    if original_key not in {"state", "source_type", "verified", "current", "country"}:
+        original_key = spoofed_key.strip()
+    record = evidence()
+    record.pop(original_key, None)
+    record[spoofed_key] = {
+        "state": "VERIFIED", "source_type": "user_explicit",
+        "verified": True, "current": True, "country": "Portugal",
+    }[original_key]
+    result = evaluate_work_rights(record, "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
