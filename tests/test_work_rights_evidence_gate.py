@@ -230,3 +230,17 @@ def test_duplicate_whitespace_spoofed_legal_key_fails_closed(spoofed, value):
     assert "AMBIGUOUS_LEGAL_FIELD_KEY" in result["reasons"]
     assert all(result[action] is False for action in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("spoofed", [
+    "source_ref\u200b", "state\u2060", "country\u200d",
+    "verified\u202e", "source_type\ufeff", "current\u200b",
+])
+def test_invisible_unicode_duplicate_legal_keys_fail_closed(spoofed):
+    record = evidence()
+    record[spoofed] = "forged"
+    result = evaluate_work_rights(record, "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert "AMBIGUOUS_LEGAL_FIELD_KEY" in result["reasons"]
+    assert all(result[action] is False for action in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
