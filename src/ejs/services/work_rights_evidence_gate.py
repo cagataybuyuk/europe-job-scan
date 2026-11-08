@@ -18,6 +18,10 @@ def evaluate_work_rights(evidence: object, target_country: str) -> dict:
     if not isinstance(evidence, Mapping) or not isinstance(target_country, str) or not target_country.strip():
         reasons.append("MISSING_EVIDENCE_OR_TARGET")
     else:
+        legal_keys = frozenset({"state", "country", "source_type", "verified", "current", "source_ref"})
+        if any(isinstance(key, str) and key not in legal_keys
+               and "".join(key.split()) in legal_keys for key in evidence):
+            reasons.append("AMBIGUOUS_LEGAL_FIELD_KEY")
         state = evidence.get("state")
         if not isinstance(state, str) or state not in STATES:
             reasons.append("UNKNOWN_STATUS")
