@@ -20,7 +20,7 @@ def evaluate_work_rights(evidence: object, target_country: str) -> dict:
     else:
         legal_keys = frozenset({"state", "country", "source_type", "verified", "current", "source_ref"})
         if any(isinstance(key, str) and key not in legal_keys
-               and "".join(ch for ch in key if not ch.isspace() and unicodedata.category(ch) not in ("Cf", "Cc", "Zs", "Zl", "Zp")) in legal_keys for key in evidence):
+               and unicodedata.normalize("NFKC", "".join(ch for ch in key if not ch.isspace() and unicodedata.category(ch) not in ("Cf", "Cc", "Zs", "Zl", "Zp"))) in legal_keys for key in evidence):
             reasons.append("AMBIGUOUS_LEGAL_FIELD_KEY")
         state = evidence.get("state")
         if not isinstance(state, str) or state not in STATES:
