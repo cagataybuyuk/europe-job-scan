@@ -127,3 +127,31 @@ def test_legal_provenance_and_country_must_match_exactly(changes, target):
     assert result["scope"] == "eligibility_metadata_only"
     assert all(result[key] is False for key in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("extra", [
+    {"write_authorized": True},
+    {"upload_authorized": True, "submit_authorized": True},
+    {"visa_sponsorship": "approved"},
+    {"work_authorization": "yes", "approved_by": "employer"},
+    {"scope": "PROD", "final_submit": True},
+])
+def test_untrusted_evidence_cannot_escalate_ats_authority(extra):
+    result = evaluate_work_rights(evidence(**extra), "Portugal")
+    assert result["scope"] == "eligibility_metadata_only"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("target,changes", [
+    ("Portu\u200bgal", {}),
+    ("Portugal\u202e", {"country": "Portugal\u202e"}),
+    ("Portugal\u00a0", {"country": "Portugal\u00a0"}),
+    ("Portugal", {"source_ref": "private:attestation\u2060"}),
+    ("Portugal", {"source_ref": "private:attestation\x7f"}),
+])
+def test_additional_unicode_format_and_control_characters_fail_closed(target, changes):
+    result = evaluate_work_rights(evidence(**changes), target)
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
