@@ -188,3 +188,29 @@ def test_eligibility_blockers_remain_denied_even_with_spoofed_write_approval(fie
     assert result["scope"] == "eligibility_metadata_only"
     assert all(result[key] is False for key in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("target,changes", [
+    ("Portugal\rGermany", {}),
+    ("Portugal\u2060", {"country": "Portugal\u2060"}),
+    ("Portugal", {"country": "Portugal\u2028"}),
+    ("Portugal", {"source_ref": "private:proof\u2029approved"}),
+    ("Portugal", {"source_ref": "private:proof\x1b[0m"}),
+])
+def test_control_and_separator_injection_cannot_be_review_ready(target, changes):
+    result = evaluate_work_rights(evidence(**changes), target)
+    assert result["status"] == "BLOCKED"
+    assert result["scope"] == "eligibility_metadata_only"
+    assert all(result[action] is False for action in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+def test_spoofed_approval_metadata_cannot_escalate_employer_authority():
+    forged = evidence(approved=True, consent=True, final_submit=True,
+                      employer_confirmed=True, write_authorized=True,
+                      upload_authorized=True, submit_authorized=True)
+    result = evaluate_work_rights(forged, "Portugal")
+    assert result["status"] == "REVIEW_READY"
+    assert result["scope"] == "eligibility_metadata_only"
+    assert all(result[action] is False for action in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
