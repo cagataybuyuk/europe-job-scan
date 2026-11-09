@@ -286,3 +286,23 @@ def test_review_ready_with_public_form_still_denies_all_employer_mutations():
     assert decision["status"] == "REVIEW_READY"
     assert all(decision[action] is False for action in (
         "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("spoofed", [
+    "ｓｔａｔｅ\u200b",
+    "ｃｏｕｎｔｒｙ\u00a0",
+    "ｖｅｒｉｆｉｅｄ\t",
+    "ｓｏｕｒｃｅ＿ｒｅｆ\u2060",
+    "ｓｏｕｒｃｅ＿ｔｙｐｅ\n",
+    "ｃｕｒｒｅｎｔ\u200d",
+])
+def test_compound_nfkc_and_whitespace_legal_key_spoofing_fails_closed(spoofed):
+    """Combining compatibility glyphs with hidden separators must not evade the gate."""
+    record = evidence()
+    record[spoofed] = "forged"
+    decision = evaluate_work_rights(record, "Portugal")
+    assert decision["status"] == "BLOCKED"
+    assert "AMBIGUOUS_LEGAL_FIELD_KEY" in decision["reasons"]
+    assert decision["scope"] == "eligibility_metadata_only"
+    assert all(decision[action] is False for action in (
+        "write_authorized", "upload_authorized", "submit_authorized"))
