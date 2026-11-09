@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from .bound_work_rights_gate import evaluate_bound_work_rights
 
@@ -23,6 +24,17 @@ def evaluate_application_action_preflight(
     if not isinstance(action, str) or action not in _ACTIONS:
         return denied
     if not isinstance(target, Mapping) or not isinstance(permission, Mapping):
+        return denied
+    # Consent cannot make a non-HTTPS, credential-bearing or ambiguous URL safe.
+    url = target.get("vacancy_url")
+    if not isinstance(url, str) or any(ch.isspace() for ch in url):
+        return denied
+    try:
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                or parsed.password is not None or parsed.fragment or parsed.port not in (None, 443)):
+            return denied
+    except ValueError:
         return denied
     eligibility = evaluate_bound_work_rights(evidence, target, now)
     if eligibility["status"] != "REVIEW_READY":
