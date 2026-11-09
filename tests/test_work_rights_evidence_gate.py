@@ -259,3 +259,30 @@ def test_nfkc_confusable_legal_keys_fail_closed(spoofed):
     assert "AMBIGUOUS_LEGAL_FIELD_KEY" in result["reasons"]
     assert all(result[action] is False for action in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("changes,target", [
+    ({"state": "UNKNOWN"}, "Portugal"),
+    ({"state": "INELIGIBLE"}, "Portugal"),
+    ({"verified": False}, "Portugal"),
+    ({"current": False}, "Portugal"),
+    ({"source_type": "web_guess"}, "Portugal"),
+    ({"country": "Germany"}, "Portugal"),
+    ({"source_ref": ""}, "Portugal"),
+])
+def test_public_form_discovery_cannot_override_eligibility_gate(changes, target):
+    """Even a fully visible public form is not employer mutation authority."""
+    public_form_discovered = True
+    assert public_form_discovered
+    decision = evaluate_work_rights(evidence(**changes), target)
+    assert decision["status"] == "BLOCKED"
+    assert decision["scope"] == "eligibility_metadata_only"
+    assert all(decision[action] is False for action in (
+        "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+def test_review_ready_with_public_form_still_denies_all_employer_mutations():
+    decision = evaluate_work_rights(evidence(), "Portugal")
+    assert decision["status"] == "REVIEW_READY"
+    assert all(decision[action] is False for action in (
+        "write_authorized", "upload_authorized", "submit_authorized"))
