@@ -32,3 +32,29 @@ def test_matching_evidence_still_does_not_grant_mutation():
     result = evaluate_bound_work_rights(evidence(), TARGET, NOW)
     assert result["status"] == "REVIEW_READY"
     assert all(result[k] is False for k in ("write_authorized", "upload_authorized", "submit_authorized"))
+
+@pytest.mark.parametrize("change", [
+    {"candidate_id": " candidate-1"},
+    {"candidate_id": "candidate-1 "},
+    {"employer_id": " employer-1"},
+    {"employer_id": "employer-1\n"},
+    {"vacancy_url": "https://employer.example/jobs/123/"},
+    {"vacancy_url": "https://employer.example/jobs/123?source=other"},
+    {"expires_at": NOW + timedelta(microseconds=1)},
+])
+def test_identity_url_binding_and_boundary_are_fail_closed(change):
+    # Exact target binding and expiry must never silently broaden authorization.
+    result = evaluate_bound_work_rights({**evidence(), **change}, TARGET, NOW)
+    if "expires_at" in change:
+        assert result["status"] == "REVIEW_READY"
+    else:
+        assert result["status"] == "BLOCKED"
+    assert all(result[k] is False for k in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+@pytest.mark.parametrize("now", [None, "2026-11-09", datetime(2026, 11, 9)])
+def test_invalid_clock_fails_closed(now):
+    result = evaluate_bound_work_rights(evidence(), TARGET, now)
+    assert result["status"] == "BLOCKED"
+    assert all(result[k] is False for k in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
