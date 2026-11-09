@@ -58,3 +58,27 @@ def test_invalid_clock_fails_closed(now):
     assert result["status"] == "BLOCKED"
     assert all(result[k] is False for k in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+@pytest.mark.parametrize("target_change", [
+    {"candidate_id": "candidate-2"},
+    {"employer_id": "employer-2"},
+    {"vacancy_url": "https://other.example/jobs/123"},
+    {"country": "Germany"},
+    {"candidate_id": None},
+    {"employer_id": 123},
+    {"vacancy_url": ""},
+])
+def test_target_substitution_never_grants_authority(target_change):
+    result = evaluate_bound_work_rights(evidence(), {**TARGET, **target_change}, NOW)
+    assert result["status"] == "BLOCKED"
+    assert result["write_authorized"] is False
+    assert result["upload_authorized"] is False
+    assert result["submit_authorized"] is False
+
+
+@pytest.mark.parametrize("bad_evidence", [None, [], "VERIFIED", 1, {}])
+def test_malformed_evidence_fails_closed(bad_evidence):
+    result = evaluate_bound_work_rights(bad_evidence, TARGET, NOW)
+    assert result["status"] == "BLOCKED"
+    assert all(result[k] is False for k in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
