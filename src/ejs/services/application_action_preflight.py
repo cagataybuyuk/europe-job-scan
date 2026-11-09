@@ -1,0 +1,48 @@
+"""Pure preflight for an exact-target employer mutation request.
+
+This function never executes an ATS action and never grants network authority.
+A successful preflight is only one prerequisite for separately reviewed execution.
+"""
+from __future__ import annotations
+
+from collections.abc import Mapping
+from datetime import datetime
+
+from .bound_work_rights_gate import evaluate_bound_work_rights
+
+_ACTIONS = frozenset({"write", "upload", "submit"})
+
+
+def evaluate_application_action_preflight(
+    evidence: object, target: object, permission: object,
+    action: object, now: datetime,
+) -> dict:
+    denied = {"status": "BLOCKED", "reason": "ACTION_NOT_AUTHORIZED",
+              "write_authorized": False, "upload_authorized": False,
+              "submit_authorized": False, "network_authorized": False}
+    if action not in _ACTIONS if isinstance(action, str) else True:
+        return denied
+    if not isinstance(target, Mapping) or not isinstance(permission, Mapping):
+        return denied
+    eligibility = evaluate_bound_work_rights(evidence, target, now)
+    if eligibility["status"] != "REVIEW_READY":
+        return denied
+    # Exact-target, exact-action, time-bounded, independently approved consent.
+    keys = ("candidate_id", "employer_id", "vacancy_url")
+    if any(not isinstance(permission.get(key), str)
+           or permission[key] != target.get(key) for key in keys):
+        return denied
+    if permission.get("action") != action or permission.get("approved") is not True:
+        return denied
+    if permission.get("reviewed") is not True or permission.get("revoked") is not False:
+        return denied
+    expiry = permission.get("expires_at")
+    if not isinstance(expiry, datetime) or expiry.tzinfo is None:
+        return denied
+    if not isinstance(now, datetime) or now.tzinfo is None:
+        return denied
+    if expiry <= now:
+        return denied
+    # Still not an executable capability: the ATS writer must enforce its own
+    # kill switch, endpoint allowlist, asset hashes, readback and idempotency.
+    return {**denied, "status": "PREFLIGHT_READY", "reason": None}
