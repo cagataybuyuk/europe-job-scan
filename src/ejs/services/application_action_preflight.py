@@ -20,7 +20,7 @@ def evaluate_application_action_preflight(
     denied = {"status": "BLOCKED", "reason": "ACTION_NOT_AUTHORIZED",
               "write_authorized": False, "upload_authorized": False,
               "submit_authorized": False, "network_authorized": False}
-    if action not in _ACTIONS if isinstance(action, str) else True:
+    if not isinstance(action, str) or action not in _ACTIONS:
         return denied
     if not isinstance(target, Mapping) or not isinstance(permission, Mapping):
         return denied
