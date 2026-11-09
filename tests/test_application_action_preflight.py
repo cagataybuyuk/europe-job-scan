@@ -80,3 +80,25 @@ def test_target_substitution_blocks():
 def test_naive_or_invalid_clock_blocks():
     assert check(now=datetime(2026, 11, 9))["status"] == "BLOCKED"
     assert check(now=None)["status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize("url", [
+    "http://employer.example/jobs/1",
+    "javascript:alert(1)",
+    "https://user:pass@employer.example/jobs/1",
+    "https://employer.example:8443/jobs/1",
+    "https://employer.example/jobs/1#submit",
+    "https://employer.example/jobs/1\\n",
+    "https://employer.example:invalid/jobs/1",
+    "https:///jobs/1",
+])
+def test_unsafe_exact_match_url_never_makes_preflight_ready(url):
+    # Even if all three records agree, an unsafe target must fail closed.
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    grant = {**permission(), "vacancy_url": url}
+    result = check(ev=ev, target=target, grant=grant)
+    assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert all(result[k] is False for k in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
