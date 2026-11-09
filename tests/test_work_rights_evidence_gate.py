@@ -306,3 +306,25 @@ def test_compound_nfkc_and_whitespace_legal_key_spoofing_fails_closed(spoofed):
     assert decision["scope"] == "eligibility_metadata_only"
     assert all(decision[action] is False for action in (
         "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("bad_key", [None, 0, False, 1.5, ("state",), b"verified"])
+def test_nonstring_mapping_keys_fail_closed_without_leaking_or_authorizing(bad_key):
+    record = evidence()
+    record[bad_key] = "VERIFIED"
+    decision = evaluate_work_rights(record, "Portugal")
+    assert decision["status"] == "BLOCKED"
+    assert "AMBIGUOUS_LEGAL_FIELD_KEY" in decision["reasons"]
+    assert decision["scope"] == "eligibility_metadata_only"
+    assert all(decision[action] is False for action in (
+        "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+def test_nonstring_mapping_key_with_missing_required_field_still_denied():
+    record = evidence()
+    del record["state"]
+    record[None] = "VERIFIED"
+    decision = evaluate_work_rights(record, "Portugal")
+    assert decision["status"] == "BLOCKED"
+    assert "UNKNOWN_STATUS" in decision["reasons"]
+    assert "AMBIGUOUS_LEGAL_FIELD_KEY" in decision["reasons"]
