@@ -199,3 +199,20 @@ def test_invalid_clock_fails_closed_before_eligibility_gate(bad_now, monkeypatch
     assert result["write_authorized"] is False
     assert result["upload_authorized"] is False
     assert result["submit_authorized"] is False
+
+
+@pytest.mark.parametrize("eligibility_state", ["UNKNOWN", "INELIGIBLE"])
+@pytest.mark.parametrize("action", ["write", "upload", "submit"])
+def test_no_foreign_work_rights_never_grants_any_ats_mutation(eligibility_state, action):
+    """A general application preference cannot override missing work authorization.
+
+    Sponsorship possibility is not evidence of a current country-specific right.
+    This is a pure preflight: no ATS transport or employer mutation occurs.
+    """
+    ev = {**evidence(), "state": eligibility_state}
+    result = check(ev=ev, grant=permission(action), action=action)
+    assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert all(result[key] is False for key in (
+        "write_authorized", "upload_authorized", "submit_authorized"
+    ))
