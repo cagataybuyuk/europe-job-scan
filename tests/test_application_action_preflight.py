@@ -183,3 +183,19 @@ def test_special_use_hosts_never_authorize_employer_mutation(url):
         assert result["network_authorized"] is False
         assert all(result[k] is False for k in (
             "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("bad_now", [None, "2026-11-09", 0, {}, [], datetime(2026, 11, 9)])
+def test_invalid_clock_fails_closed_before_eligibility_gate(bad_now, monkeypatch):
+    def must_not_evaluate(*args, **kwargs):
+        raise AssertionError("eligibility must not execute for invalid clock")
+    monkeypatch.setattr(
+        "ejs.services.application_action_preflight.evaluate_bound_work_rights",
+        must_not_evaluate,
+    )
+    result = check(now=bad_now)
+    assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert result["write_authorized"] is False
+    assert result["upload_authorized"] is False
+    assert result["submit_authorized"] is False
