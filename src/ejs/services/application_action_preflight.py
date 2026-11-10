@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from urllib.parse import urlsplit
+import unicodedata
 
 from .bound_work_rights_gate import evaluate_bound_work_rights
 
@@ -27,7 +28,9 @@ def evaluate_application_action_preflight(
         return denied
     # Consent cannot make a non-HTTPS, credential-bearing or ambiguous URL safe.
     url = target.get("vacancy_url")
-    if not isinstance(url, str) or any(ch.isspace() for ch in url):
+    if (not isinstance(url, str) or any(
+            ch.isspace() or ch == "\\\\" or unicodedata.category(ch).startswith("C")
+            for ch in url)):
         return denied
     try:
         parsed = urlsplit(url)
