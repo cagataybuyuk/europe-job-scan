@@ -29,7 +29,7 @@ def evaluate_application_action_preflight(
     # Consent cannot make a non-HTTPS, credential-bearing or ambiguous URL safe.
     url = target.get("vacancy_url")
     if (not isinstance(url, str) or any(
-            ch.isspace() or ch == "\\\\" or unicodedata.category(ch).startswith("C")
+            ch.isspace() or ch == "\\" or unicodedata.category(ch).startswith("C")
             for ch in url)):
         return denied
     try:
