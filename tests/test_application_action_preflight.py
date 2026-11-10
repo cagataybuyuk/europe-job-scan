@@ -102,3 +102,21 @@ def test_unsafe_exact_match_url_never_makes_preflight_ready(url):
     assert result["network_authorized"] is False
     assert all(result[k] is False for k in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("url", [
+    "https://employer.example\\\\@attacker.example/jobs/1",
+    "https://employer.example/jobs/1\\\\other",
+    "https://employer.example/jobs/1\\x00",
+    "https://employer.example/jobs/1\\x1f",
+    "https://employer.example/jobs/1\\u200b",
+    "https://employer.example/jobs/1\\u202e",
+])
+def test_control_and_backslash_url_ambiguity_denied_even_with_matching_consent(url):
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    grant = {**permission(), "vacancy_url": url}
+    result = check(ev=ev, target=target, grant=grant)
+    assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert result["submit_authorized"] is False
