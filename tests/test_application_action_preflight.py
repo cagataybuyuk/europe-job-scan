@@ -145,3 +145,23 @@ def test_nonpublic_ats_destinations_denied_even_with_matching_evidence(url):
         assert result["network_authorized"] is False
         assert all(result[k] is False for k in (
             "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("url", [
+    "https://localhost./jobs/1",
+    "https://service.localhost./jobs/1",
+    "https://internal.local./jobs/1",
+    "https://employer.example./jobs/1",
+    "https://local%68ost/jobs/1",
+    "https://employer%2eexample/jobs/1",
+])
+def test_ambiguous_dns_host_denied_for_every_mutation_action(url):
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    for action in ("write", "upload", "submit"):
+        grant = {**permission(action), "vacancy_url": url}
+        result = check(ev=ev, target=target, grant=grant, action=action)
+        assert result["status"] == "BLOCKED"
+        assert result["network_authorized"] is False
+        assert all(result[k] is False for k in (
+            "write_authorized", "upload_authorized", "submit_authorized"))
