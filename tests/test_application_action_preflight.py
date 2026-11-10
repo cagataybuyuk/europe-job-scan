@@ -165,3 +165,21 @@ def test_ambiguous_dns_host_denied_for_every_mutation_action(url):
         assert result["network_authorized"] is False
         assert all(result[k] is False for k in (
             "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("url", [
+    "https://ats.internal/jobs/1",
+    "https://gateway.home.arpa/jobs/1",
+    "https://hidden.onion/jobs/1",
+    "https://nonexistent.invalid/jobs/1",
+])
+def test_special_use_hosts_never_authorize_employer_mutation(url):
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    for action in ("write", "upload", "submit"):
+        grant = {**permission(action), "vacancy_url": url}
+        result = check(ev=ev, target=target, grant=grant, action=action)
+        assert result["status"] == "BLOCKED"
+        assert result["network_authorized"] is False
+        assert all(result[k] is False for k in (
+            "write_authorized", "upload_authorized", "submit_authorized"))
