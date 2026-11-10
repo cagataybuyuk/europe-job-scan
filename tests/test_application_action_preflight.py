@@ -216,3 +216,18 @@ def test_no_foreign_work_rights_never_grants_any_ats_mutation(eligibility_state,
     assert all(result[key] is False for key in (
         "write_authorized", "upload_authorized", "submit_authorized"
     ))
+
+
+@pytest.mark.parametrize("action", ["write", "upload", "submit"])
+@pytest.mark.parametrize("sponsorship", ["UNKNOWN", "POSSIBLE", "OFFERED", True])
+def test_sponsorship_claim_cannot_replace_verified_country_work_right(action, sponsorship):
+    """Unverified sponsorship claims must not become employer mutation authority."""
+    ev = {**evidence(), "state": "UNKNOWN", "sponsorship": sponsorship}
+    target = {**TARGET, "sponsorship": sponsorship}
+    grant = {**permission(action), "sponsorship": sponsorship}
+    result = check(ev=ev, target=target, grant=grant, action=action)
+    assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert result["write_authorized"] is False
+    assert result["upload_authorized"] is False
+    assert result["submit_authorized"] is False
