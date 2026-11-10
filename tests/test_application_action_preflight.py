@@ -231,3 +231,22 @@ def test_sponsorship_claim_cannot_replace_verified_country_work_right(action, sp
     assert result["write_authorized"] is False
     assert result["upload_authorized"] is False
     assert result["submit_authorized"] is False
+
+
+@pytest.mark.parametrize("url", [
+    "https://2130706433/jobs/1",
+    "https://0177.0.0.1/jobs/1",
+    "https://0x7f000001/jobs/1",
+    "https://0x7f.0x0.0x0.0x1/jobs/1",
+    "https://192.168.001.001/jobs/1",
+])
+def test_legacy_numeric_ip_aliases_never_grant_mutation_preflight(url):
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    for action in ("write", "upload", "submit"):
+        grant = {**permission(action), "vacancy_url": url}
+        result = check(ev=ev, target=target, grant=grant, action=action)
+        assert result["status"] == "BLOCKED"
+        assert result["network_authorized"] is False
+        assert not any(result[k] for k in (
+            "write_authorized", "upload_authorized", "submit_authorized"))
