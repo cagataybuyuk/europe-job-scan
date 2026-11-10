@@ -53,6 +53,8 @@ def evaluate_application_action_preflight(
     else:
         if not address.is_global:
             return denied
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        return denied
     eligibility = evaluate_bound_work_rights(evidence, target, now)
     if eligibility["status"] != "REVIEW_READY":
         return denied
@@ -66,7 +68,7 @@ def evaluate_application_action_preflight(
     if permission.get("reviewed") is not True or permission.get("revoked") is not False:
         return denied
     expiry = permission.get("expires_at")
-    if not isinstance(expiry, datetime) or expiry.tzinfo is None:
+    if not isinstance(expiry, datetime) or expiry.tzinfo is None or expiry.utcoffset() is None:
         return denied
     if not isinstance(now, datetime) or now.tzinfo is None:
         return denied
