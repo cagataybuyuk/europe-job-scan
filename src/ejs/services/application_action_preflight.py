@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+from ipaddress import ip_address
 from urllib.parse import urlsplit
 import unicodedata
 
@@ -39,6 +40,18 @@ def evaluate_application_action_preflight(
             return denied
     except ValueError:
         return denied
+    # Do not accept loopback, link-local, private or otherwise non-public
+    # destinations as employer ATS endpoints, even with matching consent.
+    host = parsed.hostname
+    if host == "localhost" or host.endswith((".localhost", ".local")):
+        return denied
+    try:
+        address = ip_address(host)
+    except ValueError:
+        pass  # Domain names require independent DNS/redirect checks at execution.
+    else:
+        if not address.is_global:
+            return denied
     eligibility = evaluate_bound_work_rights(evidence, target, now)
     if eligibility["status"] != "REVIEW_READY":
         return denied
