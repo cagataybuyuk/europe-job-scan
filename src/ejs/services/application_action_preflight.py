@@ -43,7 +43,8 @@ def evaluate_application_action_preflight(
     # Do not accept loopback, link-local, private or otherwise non-public
     # destinations as employer ATS endpoints, even with matching consent.
     host = parsed.hostname
-    if host == "localhost" or host.endswith((".localhost", ".local")):
+    if (host.endswith(".") or "%" in host or host == "localhost"
+            or host.endswith((".localhost", ".local"))):
         return denied
     try:
         address = ip_address(host)
