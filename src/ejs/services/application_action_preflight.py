@@ -46,6 +46,13 @@ def evaluate_application_action_preflight(
     if (host.endswith(".") or "%" in host or host == "localhost"
             or host.endswith((".localhost", ".local", ".internal", ".home.arpa", ".onion", ".invalid"))):
         return denied
+    # Numeric/legacy IPv4 spellings may resolve to private addresses even when
+    # ip_address() rejects their syntax (e.g. 2130706433 or 0177.0.0.1).
+    # Never allow ambiguous numeric hostnames through to a later ATS transport.
+    labels = host.split(".")
+    if all(label.isascii() and (label.isdecimal() or label.lower().startswith("0x"))
+           for label in labels):
+        return denied
     try:
         address = ip_address(host)
     except ValueError:
