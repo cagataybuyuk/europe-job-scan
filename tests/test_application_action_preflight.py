@@ -120,3 +120,28 @@ def test_control_and_backslash_url_ambiguity_denied_even_with_matching_consent(u
     assert result["status"] == "BLOCKED"
     assert result["network_authorized"] is False
     assert result["submit_authorized"] is False
+
+@pytest.mark.parametrize("url", [
+    "https://localhost/jobs/1",
+    
+    "https://internal.local/jobs/1",
+    "https://service.localhost/jobs/1",
+    "https://127.0.0.1/jobs/1",
+    "https://10.0.0.8/jobs/1",
+    "https://192.168.1.20/jobs/1",
+    "https://169.254.169.254/latest/meta-data",
+    "https://[::1]/jobs/1",
+    "https://[fc00::1]/jobs/1",
+    "https://0.0.0.0/jobs/1",
+])
+def test_nonpublic_ats_destinations_denied_even_with_matching_evidence(url):
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    grant = {**permission(), "vacancy_url": url}
+    for action in ("write", "upload", "submit"):
+        grant_for_action = {**grant, "action": action}
+        result = check(ev=ev, target=target, grant=grant_for_action, action=action)
+        assert result["status"] == "BLOCKED"
+        assert result["network_authorized"] is False
+        assert all(result[k] is False for k in (
+            "write_authorized", "upload_authorized", "submit_authorized"))
