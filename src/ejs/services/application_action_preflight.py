@@ -44,7 +44,7 @@ def evaluate_application_action_preflight(
     # destinations as employer ATS endpoints, even with matching consent.
     host = parsed.hostname
     if (host.endswith(".") or "%" in host or host == "localhost"
-            or host.endswith((".localhost", ".local"))):
+            or host.endswith((".localhost", ".local", ".internal", ".home.arpa", ".onion", ".invalid"))):
         return denied
     try:
         address = ip_address(host)
