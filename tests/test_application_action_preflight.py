@@ -250,3 +250,24 @@ def test_legacy_numeric_ip_aliases_never_grant_mutation_preflight(url):
         assert result["network_authorized"] is False
         assert not any(result[k] for k in (
             "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("url", [
+    "https://employer.example/jobs/1%0aInjected",
+    "https://employer.example/jobs/1%0D%0AHeader",
+    "https://employer.example/jobs/1?token=%00",
+    "https://employer.example/jobs/1%1f",
+    "https://employer.example/jobs/1%7F",
+])
+@pytest.mark.parametrize("action", ["write", "upload", "submit"])
+def test_percent_encoded_control_bytes_block_all_ats_mutations(url, action):
+    """Consent to an exact URL does not permit encoded control-byte ambiguity."""
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    grant = {**permission(action), "vacancy_url": url}
+    result = check(ev=ev, target=target, grant=grant, action=action)
+    assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert all(result[key] is False for key in (
+        "write_authorized", "upload_authorized", "submit_authorized"
+    ))
