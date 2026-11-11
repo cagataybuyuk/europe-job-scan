@@ -1,0 +1,354 @@
+import json
+import pytest
+from ejs.services.work_rights_evidence_gate import evaluate_work_rights
+
+
+def evidence(**changes):
+    result = dict(state="VERIFIED", country="Portugal", source_type="user_explicit",
+                  verified=True, current=True, source_ref="private:user-attestation")
+    result.update(changes)
+    return result
+
+
+@pytest.mark.parametrize("changes", [
+    {"state": "UNKNOWN"}, {"state": "INELIGIBLE"}, {"state": "yes"},
+    {"country": "Germany"}, {"source_type": "web_guess"},
+    {"verified": False}, {"current": False}, {"source_ref": ""},
+])
+def test_unsafe_or_mismatched_evidence_fails_closed(changes):
+    result = evaluate_work_rights(evidence(**changes), "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert not any(result[key] for key in ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("value", [None, {}, [], "yes"])
+def test_invalid_evidence_fails_closed(value):
+    assert evaluate_work_rights(value, "Portugal")["status"] == "BLOCKED"
+
+
+def test_review_ready_never_authorizes_employer_mutation():
+    result = evaluate_work_rights(evidence(), "Portugal")
+    assert result["status"] == "REVIEW_READY"
+    assert result["scope"] == "eligibility_metadata_only"
+    assert result["submit_authorized"] is result["upload_authorized"] is result["write_authorized"] is False
+
+
+def test_diagnostics_never_leak_source_reference():
+    secret = "private:SECRET"
+    result = evaluate_work_rights(evidence(state="UNKNOWN", source_ref=secret), "Portugal")
+    assert secret not in str(result)
+
+
+@pytest.mark.parametrize("bad_state", [[], {}, {"status": "VERIFIED"}, ["VERIFIED"], 1, True, None])
+def test_unhashable_or_nonstring_status_fails_closed_without_exception(bad_state):
+    result = evaluate_work_rights(evidence(state=bad_state), "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert "UNKNOWN_STATUS" in result["reasons"]
+    assert all(result[key] is False for key in ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("changes", [
+    {"verified": "true"}, {"verified": 1}, {"current": "true"},
+    {"current": 1}, {"source_type": " user_explicit "},
+    {"state": " VERIFIED "}, {"state": "verified"},
+    {"country": " Portugal "}, {"country": None},
+    {"source_ref": "   "},
+])
+def test_ambiguous_legal_evidence_never_authorizes_mutation(changes):
+    result = evaluate_work_rights(evidence(**changes), "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("target", [None, "", "   ", [], {}, 1, True])
+def test_invalid_target_country_fails_closed(target):
+    result = evaluate_work_rights(evidence(), target)
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("target,changes", [
+    (" Portugal ", {}),
+    ("Portugal\n", {}),
+    ("Portugal", {"country": "Portugal\n"}),
+    ("Portugal\t", {"country": "Portugal\t"}),
+    ("Portugal", {"country": "Portugal\x00"}),
+    ("Portugal", {"source_ref": "private:attestation\nforged"}),
+    ("Portugal", {"source_ref": " private:attestation"}),
+])
+def test_country_and_provenance_ambiguity_fails_closed(target, changes):
+    result = evaluate_work_rights(evidence(**changes), target)
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+@pytest.mark.parametrize("target,changes", [
+    ("Portugal", {"country": "Portu\u200bgal"}),
+    ("Portu\u200bgal", {"country": "Portu\u200bgal"}),
+    ("Portugal", {"source_ref": "private:attestation\u200b"}),
+    ("Portugal", {"source_ref": "private:attestation\u00a0"}),
+    ("Portugal", {"country": "Portugal\u202e"}),
+])
+def test_invisible_unicode_in_legal_evidence_fails_closed(target, changes):
+    result = evaluate_work_rights(evidence(**changes), target)
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("target,changes", [
+    ("Portugal", {"country": "Portu\u200bgal"}),
+    ("Portu\u200bgal", {"country": "Portu\u200bgal"}),
+    ("Portugal", {"source_ref": "private:attestation\u200b"}),
+    ("Portugal", {"source_ref": "private:attestation\u00a0"}),
+    ("Portugal", {"country": "Portugal\u202e"}),
+])
+def test_actual_unicode_codepoints_not_literal_escape_sequences(target, changes):
+    # repr(dict) escapes nonprintable Unicode; inspect the actual JSON text.
+    assert any(ord(ch) > 127 for ch in target + json.dumps(changes, ensure_ascii=False))
+    result = evaluate_work_rights(evidence(**changes), target)
+    assert result["status"] == "BLOCKED"
+    assert "COUNTRY_MISMATCH" in result["reasons"] or "MISSING_SOURCE_REF" in result["reasons"]
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("country", ["United Kingdom", "Czech Republic", "United States"])
+def test_exact_multiword_country_names_are_review_ready_without_authority(country):
+    result = evaluate_work_rights(evidence(country=country), country)
+    assert result["status"] == "REVIEW_READY"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("country", [
+    " United Kingdom", "United Kingdom ", "United\tKingdom",
+    "United\u00a0Kingdom", "United\u2009Kingdom", "United\u200bKingdom",
+])
+def test_multiword_country_padding_or_ambiguous_separator_still_blocks(country):
+    result = evaluate_work_rights(evidence(country=country), country)
+    assert result["status"] == "BLOCKED"
+    assert "COUNTRY_MISMATCH" in result["reasons"]
+
+
+def test_country_spacing_is_not_normalized_into_a_different_identity():
+    assert evaluate_work_rights(evidence(country="United  Kingdom"), "United Kingdom")["status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize("changes,target", [
+    ({"source_type": "user_explicit\u200b"}, "Portugal"),
+    ({"source_type": "user_explicit\u00a0"}, "Portugal"),
+    ({"source_type": "user_explicit\n"}, "Portugal"),
+    ({"source_ref": "private:attestation\u2028approved"}, "Portugal"),
+    ({"country": "Germany"}, "Portugal"),
+    ({"country": "Portugal"}, "Germany"),
+])
+def test_legal_provenance_and_country_must_match_exactly(changes, target):
+    result = evaluate_work_rights(evidence(**changes), target)
+    assert result["status"] == "BLOCKED"
+    assert result["scope"] == "eligibility_metadata_only"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("extra", [
+    {"write_authorized": True},
+    {"upload_authorized": True, "submit_authorized": True},
+    {"visa_sponsorship": "approved"},
+    {"work_authorization": "yes", "approved_by": "employer"},
+    {"scope": "PROD", "final_submit": True},
+])
+def test_untrusted_evidence_cannot_escalate_ats_authority(extra):
+    result = evaluate_work_rights(evidence(**extra), "Portugal")
+    assert result["scope"] == "eligibility_metadata_only"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("target,changes", [
+    ("Portu\u200bgal", {}),
+    ("Portugal\u202e", {"country": "Portugal\u202e"}),
+    ("Portugal\u00a0", {"country": "Portugal\u00a0"}),
+    ("Portugal", {"source_ref": "private:attestation\u2060"}),
+    ("Portugal", {"source_ref": "private:attestation\x7f"}),
+])
+def test_additional_unicode_format_and_control_characters_fail_closed(target, changes):
+    result = evaluate_work_rights(evidence(**changes), target)
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("canonical,spoofed", [
+    ("state", " state"), ("state", "state "), ("state", "sta te"),
+    ("state", "state\t"), ("state", "state\u00a0"),
+    ("source_type", "source_type "), ("source_type", " source_type"),
+    ("verified", "verified "), ("current", "current "),
+    ("country", "country "), ("source_ref", "source_ref\u200b"),
+])
+def test_whitespace_spoofed_legal_keys_cannot_replace_required_evidence(canonical, spoofed):
+    record = evidence()
+    original = record.pop(canonical)
+    record[spoofed] = original
+    result = evaluate_work_rights(record, "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("state", "UNKNOWN"), ("state", "INELIGIBLE"),
+    ("country", "Germany"), ("verified", False),
+    ("current", False), ("source_ref", ""),
+])
+def test_eligibility_blockers_remain_denied_even_with_spoofed_write_approval(field, value):
+    record = evidence(**{field: value})
+    record.update(write_authorized=True, upload_authorized=True,
+                  submit_authorized=True, final_submit=True)
+    result = evaluate_work_rights(record, "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert result["scope"] == "eligibility_metadata_only"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("target,changes", [
+    ("Portugal\rGermany", {}),
+    ("Portugal\u2060", {"country": "Portugal\u2060"}),
+    ("Portugal", {"country": "Portugal\u2028"}),
+    ("Portugal", {"source_ref": "private:proof\u2029approved"}),
+    ("Portugal", {"source_ref": "private:proof\x1b[0m"}),
+])
+def test_control_and_separator_injection_cannot_be_review_ready(target, changes):
+    result = evaluate_work_rights(evidence(**changes), target)
+    assert result["status"] == "BLOCKED"
+    assert result["scope"] == "eligibility_metadata_only"
+    assert all(result[action] is False for action in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+def test_spoofed_approval_metadata_cannot_escalate_employer_authority():
+    forged = evidence(approved=True, consent=True, final_submit=True,
+                      employer_confirmed=True, write_authorized=True,
+                      upload_authorized=True, submit_authorized=True)
+    result = evaluate_work_rights(forged, "Portugal")
+    assert result["status"] == "REVIEW_READY"
+    assert result["scope"] == "eligibility_metadata_only"
+    assert all(result[action] is False for action in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("spoofed,value", [
+    (" state", "INELIGIBLE"), ("sta te", "UNKNOWN"),
+    ("country\u00a0", "Germany"), ("verified\t", False),
+    ("source_ref\u200b", "private:forged"),
+    ("source_type\n", "web_guess"),
+])
+def test_duplicate_whitespace_spoofed_legal_key_fails_closed(spoofed, value):
+    record = evidence()
+    record[spoofed] = value
+    result = evaluate_work_rights(record, "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert "AMBIGUOUS_LEGAL_FIELD_KEY" in result["reasons"]
+    assert all(result[action] is False for action in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("spoofed", [
+    "source_ref\u200b", "state\u2060", "country\u200d",
+    "verified\u202e", "source_type\ufeff", "current\u200b",
+])
+def test_invisible_unicode_duplicate_legal_keys_fail_closed(spoofed):
+    record = evidence()
+    record[spoofed] = "forged"
+    result = evaluate_work_rights(record, "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert "AMBIGUOUS_LEGAL_FIELD_KEY" in result["reasons"]
+    assert all(result[action] is False for action in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("spoofed", [
+    "ｓｔａｔｅ", "ｃｏｕｎｔｒｙ", "ｖｅｒｉｆｉｅｄ",
+    "ｓｏｕｒｃｅ＿ｒｅｆ", "ｃｕｒｒｅｎｔ", "ｓｏｕｒｃｅ＿ｔｙｐｅ",
+    "ｓｔａｔｅ\u200b",
+])
+def test_nfkc_confusable_legal_keys_fail_closed(spoofed):
+    record = evidence()
+    record[spoofed] = "forged"
+    result = evaluate_work_rights(record, "Portugal")
+    assert result["status"] == "BLOCKED"
+    assert "AMBIGUOUS_LEGAL_FIELD_KEY" in result["reasons"]
+    assert all(result[action] is False for action in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("changes,target", [
+    ({"state": "UNKNOWN"}, "Portugal"),
+    ({"state": "INELIGIBLE"}, "Portugal"),
+    ({"verified": False}, "Portugal"),
+    ({"current": False}, "Portugal"),
+    ({"source_type": "web_guess"}, "Portugal"),
+    ({"country": "Germany"}, "Portugal"),
+    ({"source_ref": ""}, "Portugal"),
+])
+def test_public_form_discovery_cannot_override_eligibility_gate(changes, target):
+    """Even a fully visible public form is not employer mutation authority."""
+    public_form_discovered = True
+    assert public_form_discovered
+    decision = evaluate_work_rights(evidence(**changes), target)
+    assert decision["status"] == "BLOCKED"
+    assert decision["scope"] == "eligibility_metadata_only"
+    assert all(decision[action] is False for action in (
+        "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+def test_review_ready_with_public_form_still_denies_all_employer_mutations():
+    decision = evaluate_work_rights(evidence(), "Portugal")
+    assert decision["status"] == "REVIEW_READY"
+    assert all(decision[action] is False for action in (
+        "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("spoofed", [
+    "ｓｔａｔｅ\u200b",
+    "ｃｏｕｎｔｒｙ\u00a0",
+    "ｖｅｒｉｆｉｅｄ\t",
+    "ｓｏｕｒｃｅ＿ｒｅｆ\u2060",
+    "ｓｏｕｒｃｅ＿ｔｙｐｅ\n",
+    "ｃｕｒｒｅｎｔ\u200d",
+])
+def test_compound_nfkc_and_whitespace_legal_key_spoofing_fails_closed(spoofed):
+    """Combining compatibility glyphs with hidden separators must not evade the gate."""
+    record = evidence()
+    record[spoofed] = "forged"
+    decision = evaluate_work_rights(record, "Portugal")
+    assert decision["status"] == "BLOCKED"
+    assert "AMBIGUOUS_LEGAL_FIELD_KEY" in decision["reasons"]
+    assert decision["scope"] == "eligibility_metadata_only"
+    assert all(decision[action] is False for action in (
+        "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("bad_key", [None, 0, False, 1.5, ("state",), b"verified"])
+def test_nonstring_mapping_keys_fail_closed_without_leaking_or_authorizing(bad_key):
+    record = evidence()
+    record[bad_key] = "VERIFIED"
+    decision = evaluate_work_rights(record, "Portugal")
+    assert decision["status"] == "BLOCKED"
+    assert "AMBIGUOUS_LEGAL_FIELD_KEY" in decision["reasons"]
+    assert decision["scope"] == "eligibility_metadata_only"
+    assert all(decision[action] is False for action in (
+        "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+def test_nonstring_mapping_key_with_missing_required_field_still_denied():
+    record = evidence()
+    del record["state"]
+    record[None] = "VERIFIED"
+    decision = evaluate_work_rights(record, "Portugal")
+    assert decision["status"] == "BLOCKED"
+    assert "UNKNOWN_STATUS" in decision["reasons"]
+    assert "AMBIGUOUS_LEGAL_FIELD_KEY" in decision["reasons"]
