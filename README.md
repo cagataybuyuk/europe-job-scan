@@ -2,9 +2,22 @@
 
 Canonical source repository for the Europe Job Scan autonomous application system.
 
+## Current delivery status
+
+The first reviewed Version 1 REF7089X application was confirmed on 7 November
+2026 through the separately reviewed interactive CUA canary. Its canonical
+single-application slot is consumed. The local command and its synthetic browser
+tests provide a separate execution lane; unattended LinkedIn return handling,
+profile correction and central outcome reconciliation have their own acceptance
+gates. No multi-job production rollout is enabled by this result.
+
+See [`docs/MVP_INTEGRATED_SINGLE_APPLICATION.md`](docs/MVP_INTEGRATED_SINGLE_APPLICATION.md)
+for the current local lane, evidence and remaining limits. Older milestone
+documents retain their original test/authority scope.
+
 ## Production target
 
-The first production launch target is a **daily multi-ATS autonomous application runtime**, not a single-ATS MVP. Priority launch coverage is LinkedIn (external routing + Easy Apply where safely automatable), SmartRecruiters, Workday, Greenhouse, Lever and ADP Workforce Now. Unsupported/ambiguous/challenged applications fail closed into `human_review`; CAPTCHA/MFA bypass and invented candidate facts remain forbidden.
+The longer-term production target is a **daily multi-ATS autonomous application runtime**. Priority coverage is LinkedIn (external routing + Easy Apply where safely automatable), SmartRecruiters, Workday, Greenhouse, Lever and ADP Workforce Now. Each adapter requires its own acceptance and rollout authority. Unsupported/ambiguous/challenged applications fail closed into `human_review`; CAPTCHA/MFA bypass and invented candidate facts remain forbidden.
 
 Canonical launch plan: [`docs/PRODUCTION_MULTI_ATS_LAUNCH_PLAN.md`](docs/PRODUCTION_MULTI_ATS_LAUNCH_PLAN.md).
 
@@ -35,7 +48,10 @@ python -m playwright install chromium
 python -m pytest -q
 ```
 
-GitHub CI deliberately runs the regression suite in three partitions because the full browser suite can exceed a single short-lived runner/tool wall-clock while each deterministic partition is stable.
+GitHub CI runs eight jobs covering static guards, core regression, three MVP
+inspection/network suites, browser prefill, upload/E2E and the GD-004 runtime.
+Windows bootstrap has a separate workflow. Each workflow's explicit pytest list
+must include new regression suites; a green unrelated job does not test them.
 
 ## Apps Script
 

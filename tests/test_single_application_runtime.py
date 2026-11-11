@@ -67,6 +67,12 @@ class RecordingBrowser:
         if self.entry_barrier is not None:
             self.entry_barrier.wait(timeout=10)
 
+    def accept_reviewed_entry_return(self, observation_id, manifest):
+        self.calls.append(("accept_return", observation_id))
+        if observation_id != "fixture-reviewed-return":
+            raise PermissionError("APPLICATION_RETURN_OBSERVATION_REQUIRED")
+        assert manifest["steps"][0]["url"] == self.target.entry_url
+
     def inspect(self):
         self.calls.append(("inspect", self.index))
         screen = self.screens[self.index]
@@ -437,3 +443,54 @@ def test_private_values_cv_name_and_exception_text_are_not_exposed(scenario, cap
         assert private not in public and private.encode() not in scenario.ledger.path.read_bytes()
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
+
+
+def resume(scenario, observation_id="fixture-reviewed-return", authority=ON):
+    return SingleApplicationRuntime(scenario.browser, scenario.ledger, clock=scenario.clock).resume_reviewed_return(
+        scenario.manifest, scenario.facts, scenario.target, scenario.cv_path,
+        observation_id=observation_id, authority=authority, posting_payload=scenario.posting)
+
+
+def test_reviewed_return_continues_owned_page_without_navigation(scenario):
+    result = resume(scenario)
+    assert result['status'] == 'EMPLOYER_CONFIRMED'
+    assert scenario.browser.count('open') == 0
+    assert scenario.browser.count('accept_return') == scenario.browser.count('preferred_entry') == 1
+    assert scenario.browser.count('upload') == scenario.browser.count('submit') == 1
+
+
+@pytest.mark.parametrize('token', [None, '', ' ', 1, True, 'x' * 513])
+def test_invalid_return_reference_cannot_fall_back_to_native_navigation(scenario, token):
+    assert resume(scenario, token)['status'] == 'BLOCKED'
+    assert not scenario.browser.calls and not scenario.ledger.has_intent()
+
+
+def test_rejected_return_never_opens_or_mutates_another_page(scenario):
+    assert resume(scenario, 'wrong-reference')['status'] == 'BLOCKED'
+    assert scenario.browser.count('accept_return') == 1
+    assert scenario.browser.count('open') == scenario.browser.count('write') == scenario.browser.count('upload') == 0
+    assert not scenario.ledger.has_intent()
+
+
+def test_return_does_not_enable_runtime_or_consume_review_when_authority_off(scenario):
+    assert resume(scenario, authority=SubmitAuthority())['status'] == 'RUNTIME_DISABLED'
+    assert not scenario.browser.calls and not scenario.ledger.has_intent()
+
+
+def test_completed_single_scope_stops_before_consuming_return_capability(scenario):
+    scenario.run()
+    before = len(scenario.browser.calls)
+    assert resume(scenario)['status'] == 'DUPLICATE_OR_UNCERTAIN'
+    assert len(scenario.browser.calls) == before
+
+
+def test_handoff_is_explicit_and_never_falls_back_or_consumes_intent(scenario):
+    def handoff():
+        raise PermissionError('APPLICATION_LINKEDIN_HUMAN_HANDOFF_REQUIRED')
+    scenario.browser.preferred_entry = handoff
+    result = scenario.run()
+    assert result['status'] == 'HUMAN_HANDOFF_REQUIRED'
+    assert result['fresh_return_review_required'] is True and result['native_fallback_allowed'] is False
+    assert scenario.browser.count('open') == 1
+    assert scenario.browser.count('write') == scenario.browser.count('upload') == scenario.browser.count('submit') == 0
+    assert not scenario.ledger.has_intent()

@@ -5,6 +5,7 @@ runs before the fixture fulfiller, so denied requests never reach even a fixture
 endpoint. No cookies, real employer traffic, OAuth grants or mailbox are used.
 """
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -353,7 +354,7 @@ def test_visible_awli_hands_off_before_any_fill_upload_or_intent(chromium, fixtu
     review_shapes(chromium, fixture, monkeypatch, awli=True)
     with actual_driver(chromium, fixture, monkeypatch, awli=True) as (browser, boundary, seen, _):
         result = run(fixture, browser)
-        assert result["status"] == "BLOCKED"
+        assert result["status"] == "HUMAN_HANDOFF_REQUIRED"
         assert browser.page.locator("#first").input_value() == browser.page.locator("#email").input_value() == ""
         assert [method for method, _, _ in seen] == ["GET"]
         assert boundary.upload_requests_allowed == boundary.application_requests_allowed == 0
@@ -605,3 +606,144 @@ def test_spl_option_requires_unique_visible_host_in_its_real_associated_menu(chr
             browser.write(binding)
         assert browser.readback(binding) == ""
         assert boundary.application_requests_allowed == 0 and not fixture.ledger.has_intent()
+
+
+WIDGET_URL = ('https://www.linkedin.com/talentwidgets/apply-with-linkedin'
+    '#xdOrigin=https%3A%2F%2Fjobs.smartrecruiters.com&xdChannel=01234567-89ab-4cde-8f01-234567890abc')
+
+
+def reviewed_return(browser, fixture):
+    observation = browser.observe_entry_return()
+    assert set(observation) == {'observation_id', 'surface_fingerprint', 'observed_at'}
+    assert len(observation['observation_id']) == 48
+    reviewed = deepcopy(fixture.manifest)
+    reviewed['steps'][0]['fingerprint'] = observation['surface_fingerprint']
+    reviewed['entry_return_review'] = dict(observation_id=observation['observation_id'],
+        surface_fingerprint=observation['surface_fingerprint'], reviewed_at=datetime.now(timezone.utc).isoformat(),
+        reviewer_ref=reviewed['reviewer_ref'], return_url=fixture.target.entry_url)
+    return observation, reviewed
+
+
+def pending_return(browser, fixture):
+    browser.open(fixture.target.entry_url)
+    with pytest.raises(PermissionError, match='^APPLICATION_LINKEDIN_HUMAN_HANDOFF_REQUIRED$'):
+        browser.preferred_entry()
+    return reviewed_return(browser, fixture)
+
+
+def test_entry_return_actual_resume_preserves_page_then_uploads_advances_and_submits_once(chromium, fixture, monkeypatch):
+    # External pin/fact-loader validation has its own suite. This fixture tests
+    # the trusted caller seam and actual retained browser+ledger integration.
+    review_shapes(chromium, fixture, monkeypatch, awli=True)
+    with actual_driver(chromium, fixture, monkeypatch, awli=True) as (browser, _, seen, _):
+        assert run(fixture, browser)['status'] == 'HUMAN_HANDOFF_REQUIRED'
+        page = browser.page
+        observation, reviewed = reviewed_return(browser, fixture)
+        monkeypatch.setattr(browser, 'open', lambda *_: pytest.fail('Resume must not navigate/open again'))
+        result = SingleApplicationRuntime(browser, fixture.ledger).resume_reviewed_return(
+            reviewed, fixture.facts, fixture.target, fixture.cv, authority=ON,
+            observation_id=observation['observation_id'], posting_payload=fixture.posting)
+        assert result['status'] == 'EMPLOYER_CONFIRMED', result
+        assert browser.page is page and [method for method, _, _ in seen] == ['GET', 'POST', 'POST']
+        assert fixture.ledger.snapshot()['status'] == 'Confirmed'
+        with pytest.raises(PermissionError):
+            browser.accept_reviewed_entry_return(observation['observation_id'], reviewed)
+
+
+@pytest.mark.parametrize('mutation', ['field', 'body', 'dom', 'reload', 'expired', 'old-review', 'wrong-token'])
+def test_entry_return_rejects_changed_stale_or_unreviewed_owned_surface(chromium, fixture, monkeypatch, mutation):
+    with actual_driver(chromium, fixture, monkeypatch, awli=True) as (browser, _, _, _):
+        observation, reviewed = pending_return(browser, fixture)
+        if mutation == 'field': browser.page.locator('#first').fill('Changed synthetic value')
+        if mutation == 'body': browser.page.locator('body').evaluate("el=>el.append('Changed review body')")
+        if mutation == 'dom': browser.page.locator('#first').evaluate("el=>el.style.marginTop='1px'")
+        if mutation == 'reload': browser.page.reload()
+        if mutation == 'expired':
+            import ejs.services.oneclick_browser as module
+            stamp = browser._entry_observation['observed_at']
+            monkeypatch.setattr(module, 'monotonic', lambda: stamp + 121)
+        if mutation == 'old-review': reviewed.pop('entry_return_review')
+        token = 'f' * 48 if mutation == 'wrong-token' else observation['observation_id']
+        with pytest.raises(PermissionError, match='^APPLICATION_ENTRY_RETURN_REJECTED$'):
+            browser.accept_reviewed_entry_return(token, reviewed)
+        with pytest.raises(PermissionError):  # Rejected capabilities are consumed too.
+            browser.accept_reviewed_entry_return(observation['observation_id'], reviewed)
+        assert not fixture.ledger.has_intent()
+
+
+@pytest.mark.parametrize('foreign_page', [False, True])
+def test_entry_return_rejects_foreign_page_and_new_popup_even_when_closed(chromium, fixture, monkeypatch, foreign_page):
+    with actual_driver(chromium, fixture, monkeypatch, awli=True) as (browser, _, _, _):
+        observation, reviewed = pending_return(browser, fixture)
+        other = browser.context.new_page()
+        if foreign_page:
+            browser.page = other
+        else:
+            other.close()
+        with pytest.raises(PermissionError):
+            browser.accept_reviewed_entry_return(observation['observation_id'], reviewed)
+        assert not fixture.ledger.has_intent()
+
+
+@pytest.mark.parametrize('challenge', ['otp', 'password', 'unknown-required', 'write', 'blocked-get'])
+def test_entry_return_rejects_auth_unknown_controls_and_faults_before_observing_values(chromium, fixture, monkeypatch, challenge):
+    with actual_driver(chromium, fixture, monkeypatch, awli=True) as (browser, boundary, _, _):
+        browser.open(fixture.target.entry_url)
+        with pytest.raises(PermissionError): browser.preferred_entry()
+        if challenge == 'otp':
+            browser.page.locator('body').evaluate("el=>el.insertAdjacentHTML('beforeend','<input aria-label=\"Verification code\" autocomplete=\"one-time-code\" value=\"SYNTHETIC_CODE_DO_NOT_HASH\">')")
+        if challenge == 'password':
+            browser.page.locator('body').evaluate("el=>el.insertAdjacentHTML('beforeend','<input type=password aria-label=\"Password\">')")
+        if challenge == 'unknown-required':
+            browser.page.locator('body').evaluate("el=>el.insertAdjacentHTML('beforeend','<input required aria-label=\"Unknown required\">')")
+        if challenge == 'write': browser.write(fixture.manifest['steps'][0]['fields'][0])
+        if challenge == 'blocked-get':
+            browser.page.evaluate("async()=>{await fetch('/unreviewed-read').catch(()=>{});}")
+            assert browser._entry_network_fault and boundary.blocked_write_count == 0
+        with pytest.raises(PermissionError): browser.observe_entry_return()
+        assert not fixture.ledger.has_intent()
+
+
+def test_entry_return_closed_historical_popup_is_rechecked_and_readiness_consumed_once(chromium, fixture, monkeypatch):
+    with actual_driver(chromium, fixture, monkeypatch, awli=True) as (browser, _, seen, _):
+        browser.open(fixture.target.entry_url)
+        with pytest.raises(PermissionError): browser.preferred_entry()
+        popup = browser.context.new_page()
+        popup.close()
+        observation, reviewed = reviewed_return(browser, fixture)
+        browser.accept_reviewed_entry_return(observation['observation_id'], reviewed)
+        browser.preferred_entry()
+        with pytest.raises(PermissionError, match='^APPLICATION_ENTRY_RETURN_CONSUMED$'):
+            browser.preferred_entry()
+        assert len(seen) == 1 and not fixture.ledger.has_intent()
+
+
+def test_entry_return_only_same_loaded_public_widget_is_exempt_from_challenge(chromium, fixture, monkeypatch):
+    with actual_driver(chromium, fixture, monkeypatch) as (browser, _, _, _):
+        # Only this synthetic public widget document is fulfilled by the test
+        # page route. Production LinkedIn navigation remains denied unchanged.
+        browser.page.route(WIDGET_URL.split('#')[0], lambda route: route.fulfill(
+            status=200, content_type='text/html', body='<button>Apply with LinkedIn</button>'))
+        browser.open(fixture.target.entry_url)
+        browser.page.evaluate("url=>{const f=document.createElement('iframe');f.src=url;document.body.append(f);}", WIDGET_URL)
+        browser.page.frame_locator('iframe').get_by_role('button', name='Apply with LinkedIn').wait_for()
+        with pytest.raises(PermissionError): browser.preferred_entry()
+        observation, reviewed = reviewed_return(browser, fixture)
+        browser.accept_reviewed_entry_return(observation['observation_id'], reviewed)
+        assert browser.inspect()['challenge'] is False
+        browser.preferred_entry()
+        browser.page.locator('body').evaluate("el=>el.insertAdjacentHTML('beforeend','<iframe srcdoc=\"unknown auth\"></iframe>')")
+        assert browser.inspect()['challenge'] is True
+
+
+@pytest.mark.parametrize('bad_url', [
+    WIDGET_URL.replace('https://www.linkedin.com', 'http://www.linkedin.com'),
+    WIDGET_URL.replace('www.linkedin.com', 'linkedin.com.evil.test'),
+    WIDGET_URL.replace('/talentwidgets/apply-with-linkedin', '/oauth/authorize'),
+    WIDGET_URL.replace('jobs.smartrecruiters.com', 'evil.test'),
+    WIDGET_URL.replace('#xdOrigin=', '?xdOrigin='),
+    WIDGET_URL + '&xdOrigin=https%3A%2F%2Fjobs.smartrecruiters.com',
+])
+def test_entry_return_widget_url_recognition_never_expands_to_foreign_auth(bad_url):
+    from ejs.services.oneclick_browser import _widget_url
+    assert not _widget_url(bad_url)

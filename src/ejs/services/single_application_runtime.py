@@ -143,6 +143,7 @@ class ConfirmationObservation:
 class ApplicationBrowser(Protocol):
     def open(self, url: str) -> None: ...
     def preferred_entry(self) -> None: ...
+    def accept_reviewed_entry_return(self, observation_id: str, manifest: dict) -> None: ...
     def inspect(self) -> dict: ...
     def write(self, binding: dict) -> None: ...
     def readback(self, binding: dict) -> object: ...
@@ -180,7 +181,29 @@ class SingleApplicationRuntime:
 
     def run(self, manifest: dict, facts: dict, target: OneClickTarget, cv_path: Path,
             *, authority: SubmitAuthority | None = None, posting_payload: bytes | None = None) -> dict:
+        return self._run(manifest, facts, target, cv_path, authority=authority,
+                         posting_payload=posting_payload)
+
+    def resume_reviewed_return(self, manifest: dict, facts: dict, target: OneClickTarget, cv_path: Path,
+                               *, observation_id: str, authority: SubmitAuthority | None = None,
+                               posting_payload: bytes | None = None) -> dict:
+        """Continue the same owned page after a separately pinned return review.
+
+        No open/goto, native fallback or authority change is performed. The
+        browser must consume its own fresh, single-use observation capability;
+        an employer/manifest cannot provide an arbitrary page or attest a grant.
+        """
+        if type(observation_id) is not str or not observation_id.strip() or len(observation_id) > 512:
+            return {'status': 'BLOCKED', 'submit_click_attempts': 0, 'applied': False,
+                    'error_code': 'APPLICATION_RETURN_OBSERVATION_REQUIRED'}
+        return self._run(manifest, facts, target, cv_path, authority=authority,
+                         posting_payload=posting_payload, entry_observation_id=observation_id)
+
+    def _run(self, manifest: dict, facts: dict, target: OneClickTarget, cv_path: Path,
+             *, authority: SubmitAuthority | None = None, posting_payload: bytes | None = None,
+             entry_observation_id: str | None = None) -> dict:
         started = False
+        entry_in_progress = False
         try:
             authority = authority or SubmitAuthority()
             require(isinstance(authority, SubmitAuthority))
@@ -200,8 +223,13 @@ class SingleApplicationRuntime:
             # bootstrap never accepts one from a manifest or CLI argument.
             verify_posting(target, manifest, facts, posting_payload if posting_payload is not None else fetch_posting(target), now)
             cv = read_approved_cv(cv_path, manifest['cv'])
-            self.browser.open(target.entry_url)
+            entry_in_progress = True
+            if entry_observation_id is None:
+                self.browser.open(target.entry_url)
+            else:
+                self.browser.accept_reviewed_entry_return(entry_observation_id, manifest)
             self.browser.preferred_entry()
+            entry_in_progress = False
             observed = []
             uploads = []
             for index, step in enumerate(manifest['steps']):
@@ -271,6 +299,10 @@ class SingleApplicationRuntime:
             code = str(error) if isinstance(error, PermissionError) else ''
             if re.fullmatch(r'(?:APPLICATION|ONECLICK)_[A-Z0-9_]{1,100}', code) is None:
                 code = 'APPLICATION_RUNTIME_BLOCKED'
+            if not started and entry_in_progress and code == 'APPLICATION_LINKEDIN_HUMAN_HANDOFF_REQUIRED':
+                return {'status': 'HUMAN_HANDOFF_REQUIRED', 'submit_click_attempts': 0,
+                        'applied': False, 'error_code': code, 'fresh_return_review_required': True,
+                        'native_fallback_allowed': False}
             return {'status': 'SUBMITTED_UNCONFIRMED' if started else 'BLOCKED',
                     'submit_click_attempts': None if started else 0, 'dispatch_intent_recorded': started,
                     'applied': False, 'applications_write_performed': False, 'error_code': code}
