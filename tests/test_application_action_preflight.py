@@ -290,3 +290,22 @@ def test_encoded_backslash_never_authorizes_ats_mutation(url, action):
     assert all(result[key] is False for key in (
         "write_authorized", "upload_authorized", "submit_authorized"
     ))
+
+
+@pytest.mark.parametrize("url", [
+    "https://exämple.com/jobs/1",
+    "https://ｅxample.com/jobs/1",
+    "https://example。com/jobs/1",
+])
+@pytest.mark.parametrize("action", ["write", "upload", "submit"])
+def test_unicode_hostname_cannot_grant_mutation_authority(url, action):
+    """Downstream IDNA mapping must not silently change the reviewed target."""
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    grant = {**permission(action), "vacancy_url": url}
+    result = check(ev=ev, target=target, grant=grant, action=action)
+    assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert all(result[key] is False for key in (
+        "write_authorized", "upload_authorized", "submit_authorized"
+    ))
