@@ -328,3 +328,22 @@ def test_malformed_dns_labels_never_grant_employer_mutation(url, action):
     assert result["network_authorized"] is False
     assert not any(result[key] for key in (
         "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+def test_dns_guard_is_executable_and_rejects_invalid_labels():
+    """Regression: an escaped newline must not comment out the DNS guard."""
+    for hostname in ("bad..example", "-bad.example", "bad-.example", "bad_name.example"):
+        url = f"https://{hostname}/jobs/1"
+        target = {**TARGET, "vacancy_url": url}
+        ev = {**evidence(), "vacancy_url": url}
+        grant = {**permission(), "vacancy_url": url}
+        result = check(ev=ev, target=target, grant=grant)
+        assert result["status"] == "BLOCKED"
+        assert result["network_authorized"] is False
+
+
+def test_valid_dns_label_does_not_grant_network_or_submit_authority():
+    result = check()
+    assert result["status"] == "PREFLIGHT_READY"
+    assert result["network_authorized"] is False
+    assert result["submit_authorized"] is False
