@@ -365,3 +365,22 @@ def test_localdomain_alias_never_authorizes_employer_mutation(url, action):
     assert result["network_authorized"] is False
     assert all(result[key] is False for key in (
         "write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("url", [
+    "https://intranet/jobs/1",
+    "https://printer/jobs/1",
+    "https://service.123/jobs/1",
+    "https://service.0x7f/jobs/1",
+])
+@pytest.mark.parametrize("action", ["write", "upload", "submit"])
+def test_search_domain_and_numeric_tld_hosts_fail_closed(url, action):
+    """Exact consent cannot authorize locally resolved or numeric pseudo-TLD hosts."""
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    grant = {**permission(action), "vacancy_url": url}
+    result = check(ev=ev, target=target, grant=grant, action=action)
+    assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert all(result[k] is False for k in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
