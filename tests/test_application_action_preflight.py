@@ -347,3 +347,21 @@ def test_valid_dns_label_does_not_grant_network_or_submit_authority():
     assert result["status"] == "PREFLIGHT_READY"
     assert result["network_authorized"] is False
     assert result["submit_authorized"] is False
+
+
+@pytest.mark.parametrize("url", [
+    "https://localhost.localdomain/jobs/1",
+    "https://host.localdomain/jobs/1",
+    "https://LOCALHOST.LOCALDOMAIN/jobs/1",
+])
+@pytest.mark.parametrize("action", ["write", "upload", "submit"])
+def test_localdomain_alias_never_authorizes_employer_mutation(url, action):
+    """Local resolver aliases are not public employer ATS destinations."""
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    grant = {**permission(action), "vacancy_url": url}
+    result = check(ev=ev, target=target, grant=grant, action=action)
+    assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert all(result[key] is False for key in (
+        "write_authorized", "upload_authorized", "submit_authorized"))
