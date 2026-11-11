@@ -119,6 +119,9 @@ jobs:
           tests/test_single_application_runtime.py
           tests/test_application_outcome.py
           tests/test_single_application_bootstrap.py
+          tests/test_work_rights_evidence_gate.py
+          tests/test_bound_work_rights_gate.py
+          tests/test_application_action_preflight.py
 
   mvp01-render-regression:
     runs-on: ubuntu-latest
