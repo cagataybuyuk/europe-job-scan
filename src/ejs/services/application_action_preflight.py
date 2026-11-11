@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from ipaddress import ip_address
+import re
 from urllib.parse import urlsplit
 import unicodedata
 
@@ -32,6 +33,10 @@ def evaluate_application_action_preflight(
     if (not isinstance(url, str) or any(
             ch.isspace() or ch == "\\" or unicodedata.category(ch).startswith("C")
             for ch in url)):
+        return denied
+    # Encoded ASCII controls can be decoded by a downstream ATS client or proxy.
+    # Reject them before an exact-target consent can reach the transport layer.
+    if re.search(r"%(?:0[0-9a-f]|1[0-9a-f]|7f)", url, re.IGNORECASE):
         return denied
     try:
         parsed = urlsplit(url)
