@@ -297,6 +297,23 @@ def _validate_runtime_sections(data: dict) -> None:
              and _bounded_text(confirmation.get("text"), 4096))
 
 
+def _validate_entry_return_review(data: dict, now: datetime) -> None:
+    if "entry_return_review" not in data:
+        return
+    review = data["entry_return_review"]
+    _require(isinstance(review, dict) and set(review) == {
+        "observation_id", "surface_fingerprint", "reviewed_at", "reviewer_ref", "return_url",
+    })
+    _require(isinstance(review.get("observation_id"), str)
+             and bool(re.fullmatch(r"[a-f0-9]{48}", review["observation_id"]))
+             and review.get("surface_fingerprint") == data["steps"][0]["fingerprint"]
+             and review.get("return_url") == data["steps"][0]["url"]
+             and review.get("reviewer_ref") == data["reviewer_ref"])
+    _fresh(review.get("reviewed_at"), now, 120)
+    stamp = datetime.fromisoformat(review["reviewed_at"].replace("Z", "+00:00"))
+    _require(stamp.utcoffset().total_seconds() == 0)
+
+
 def _validate_cv(cv: object) -> None:
     _require(isinstance(cv, dict) and isinstance(cv.get("sha256"), str)
              and bool(_HEX_64.fullmatch(cv["sha256"]))
@@ -361,6 +378,7 @@ def load_reviewed_application_inputs(manifest_path: Path, facts_path: Path, *, m
                 _validate_button(step.get("submit"),
                                  frozenset({"Submit", "Submit application", "Send application"}), selectors)
         _require(upload_count == 1)
+        _validate_entry_return_review(data, now)
         _validate_cv(data.get("cv"))
         return data, facts
     except Exception:

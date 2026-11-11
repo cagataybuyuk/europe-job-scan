@@ -10,6 +10,9 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
+import secrets
+from time import monotonic
+from urllib.parse import parse_qsl, urlsplit
 
 from ejs.services.oneclick_target import OneClickNetworkBoundary
 from ejs.services.single_application_runtime import ConfirmationObservation, UploadObservation, digest, require
@@ -82,6 +85,35 @@ _VALUE = "el => {" + _DOM_HELPERS + """
  if(el.tagName==='SELECT')return el.selectedOptions?.[0]?.textContent.trim()||'';
  return el.value||'';
 }"""
+_RETURN_DOM = "el => {" + _DOM_HELPERS + """
+ return [el,...descendants(el)].map(node=>({tag:node.tagName,shadow:!!node.shadowRoot,
+   children:node.children.length,attributes:Array.from(node.attributes).filter(x=>
+     ['id','name','role','type','class','style','hidden','required','disabled','checked','selected',
+      'autocomplete','for','tabindex','src','href','action','formaction'].includes(x.name)||x.name.startsWith('aria-')
+   ).map(x=>[x.name,x.value]).sort()}));
+}"""
+
+
+def _widget_url(url):
+    try:
+        require(type(url) is str and len(url) <= 4096 and url.isascii()
+                and not any(ord(c) < 33 or ord(c) == 127 for c in url) and '\\' not in url)
+        parsed = urlsplit(url)
+        require(parsed.scheme == 'https' and parsed.netloc in ('linkedin.com', 'www.linkedin.com')
+                and parsed.path == '/talentwidgets/apply-with-linkedin' and not parsed.query)
+        # Actual reviewed widget metadata uses these two public fragment keys,
+        # not a query/redirect/OAuth permission URL. No other keys are accepted.
+        pairs = parse_qsl(parsed.fragment, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+        require(len(pairs) == len({key for key, _ in pairs})
+                and all(re.fullmatch(r'[A-Za-z0-9_]{1,64}', key) and len(value) <= 2048
+                        and not any(ord(c) < 32 or ord(c) == 127 for c in value) for key, value in pairs))
+        values = dict(pairs)
+        require(set(values) == {'xdOrigin', 'xdChannel'}
+                and values['xdOrigin'] == 'https://jobs.smartrecruiters.com'
+                and re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', values['xdChannel']))
+        return True
+    except Exception:
+        return False
 
 
 class OneClickBrowser:
@@ -95,6 +127,14 @@ class OneClickBrowser:
         self._upload = None
         self._popup = False
         self._response = None
+        self._owned_page, self._owned_context, self._owned_boundary = self.page, context, boundary
+        self._owned_target = boundary.target
+        self._entry_handoff_pending = self._entry_observation_issued = self._returned_entry_reviewed = False
+        self._entry_return_ready = self._entry_return_consumed = self._returned_widget_allowed = False
+        self._entry_observation = self._accepted_entry_observation = self._handoff_widget = None
+        self._handoff_widget_src = None
+        self._entry_effect_attempts = self._popup_generation = self._document_generation = 0
+        self._entry_network_fault = False
         context.route('**/*', self._route)
         # Playwright >=1.48 is required for this lane (the legacy project minimum
         # remains unchanged). Do not silently continue if WebSocket fencing is absent.
@@ -104,10 +144,16 @@ class OneClickBrowser:
         context.route_web_socket('**/*', self._deny_socket)
         context.on('page', self._new_page)
         self.page.on('response', self._observe_response)
+        self.page.on('framenavigated', self._entry_navigation)
+
+    def _entry_navigation(self, frame):
+        if frame == self._owned_page.main_frame:
+            self._document_generation += 1
 
     def _new_page(self, page):
         if page != self.page:
             self._popup = True
+            self._popup_generation += 1
             # A new OAuth/CAPTCHA/permission window is a human handoff. It is
             # never inspected, granted permissions or populated by this driver.
 
@@ -119,6 +165,7 @@ class OneClickBrowser:
         if self.boundary.allows(request.method, request.url, request.resource_type, request.is_navigation_request()):
             route.fallback()
         else:
+            self._entry_network_fault = True
             route.abort('blockedbyclient')
 
     def _observe_response(self, response):
@@ -132,16 +179,151 @@ class OneClickBrowser:
                           '[role="combobox"], [role="checkbox"], [role="textbox"]').first.wait_for(state='attached', timeout=30_000)
 
     def preferred_entry(self):
+        if self._entry_return_ready:
+            self._entry_return_ready = False
+            self._entry_return_consumed = True
+            observation = self._accepted_entry_observation
+            require(0 <= monotonic() - observation['observed_at'] <= 120, 'APPLICATION_ENTRY_RETURN_REJECTED')
+            require(self._entry_snapshot()['proof'] == observation['proof'], 'APPLICATION_ENTRY_RETURN_REJECTED')
+            return
+        require(not self._entry_return_consumed, 'APPLICATION_ENTRY_RETURN_CONSUMED')
         # Exact visible action only, never an Easy Apply/profile/share link.
         action = self.page.get_by_role('button', name=re.compile(r'^Apply with LinkedIn$', re.I))
         link = self.page.get_by_role('link', name=re.compile(r'^Apply with LinkedIn$', re.I))
-        visible = [loc for loc in (action, link) if loc.count() == 1 and loc.is_visible()]
+        visible = self._visible(action) + self._visible(link)
+        widgets = []
+        for iframe in self.page.locator('iframe').all():
+            require(iframe.is_visible() and iframe.get_attribute('srcdoc') is None
+                    and _widget_url(iframe.get_attribute('src')), 'APPLICATION_ENTRY_SURFACE_REVIEW_REQUIRED')
+            widgets.append(iframe)
+        visible += widgets
         require(len(visible) <= 1, 'APPLICATION_ENTRY_AMBIGUOUS')
         if visible:
             # The first MVP's reviewed network lane deliberately has no OAuth
             # mutation authority. Return to a separately reviewed retained entry
             # after the actual human grant; no blind native retry is permitted.
+            self._entry_handoff_pending = True
+            if widgets:
+                self._handoff_widget = widgets[0].element_handle()
+                self._handoff_widget_src = widgets[0].get_attribute('src')
             raise PermissionError('APPLICATION_LINKEDIN_HUMAN_HANDOFF_REQUIRED')
+
+    def _returned_frames_clear(self):
+        for iframe in self.page.locator('iframe').all():
+            if (not self._returned_widget_allowed or self._handoff_widget is None or not iframe.is_visible()
+                    or iframe.get_attribute('srcdoc') is not None or iframe.get_attribute('src') != self._handoff_widget_src
+                    or not _widget_url(iframe.get_attribute('src'))
+                    or not iframe.evaluate('(el, owned) => el===owned', self._handoff_widget)):
+                return False
+            frame = iframe.element_handle().content_frame()
+            if frame is None or frame.url != self._handoff_widget_src:
+                return False
+        return True
+
+    def _entry_snapshot(self):
+        require(self.page is self._owned_page and self.context is self._owned_context
+                and self.boundary is self._owned_boundary and self.boundary.target is self._owned_target
+                and self.page.context is self.context
+                and not self.page.is_closed() and self.page.url == self.boundary.target.entry_url
+                and self._step == 0 and self._entry_effect_attempts == 0 and not self._submit_called
+                and self._upload is None and self.boundary.phase == 'read'
+                and self.boundary.application_attempts == self.boundary.application_requests_allowed == self.boundary.upload_requests_allowed == 0
+                and self.boundary.blocked_write_count == 0 and not self._entry_network_fault and not self._external_surface
+                and self.context.pages == [self.page], 'APPLICATION_ENTRY_RETURN_REJECTED')
+        # Check auth/challenge signals before reading or hashing field values.
+        body = self.page.locator('body').inner_text()
+        require(not re.search(r'verification code|one.time.code|passcode|security code|captcha|verify you are human|'
+                              r'access denied|sign in to continue|log in to continue|two.factor|authentication|verify your email',
+                              body, re.I), 'APPLICATION_ENTRY_RETURN_REJECTED')
+        controls = self._controls()
+        required_known = []
+        step = self.manifest['steps'][0]
+        for binding in step['fields'] + ([step['upload']] if 'upload' in step else []):
+            required_known.append(self._locator(binding))
+        for locator, info in controls:
+            signals = ' '.join(str(locator.get_attribute(attr) or '') for attr in ('type', 'autocomplete', 'name', 'id')) + ' ' + info['label']
+            require(info['kind'] in ('text', 'email', 'tel', 'number', 'select', 'checkbox', 'radio', 'file')
+                    and not re.search(r'password|passcode|one.time.code|\botp\b|\bpin\b|security.code|verification.code|email.code|sms.code|captcha', signals, re.I)
+                    and info['label'].casefold().strip() not in ('code', 'pin', 'otp')
+                    and (not info['required'] or any(locator.evaluate('(el, known) => el===known', known.element_handle())
+                                                    for known in required_known)), 'APPLICATION_ENTRY_RETURN_REJECTED')
+        frames = self.page.locator('iframe').all()
+        if frames:
+            require(len(frames) == 1 and self._handoff_widget is not None, 'APPLICATION_ENTRY_RETURN_REJECTED')
+            iframe = frames[0]
+            require(iframe.is_visible() and iframe.get_attribute('srcdoc') is None
+                    and iframe.get_attribute('src') == self._handoff_widget_src and _widget_url(self._handoff_widget_src)
+                    and iframe.evaluate('(el, owned) => el===owned', self._handoff_widget), 'APPLICATION_ENTRY_RETURN_REJECTED')
+            frame = iframe.element_handle().content_frame()
+            require(frame is not None and frame.url == self._handoff_widget_src, 'APPLICATION_ENTRY_RETURN_REJECTED')
+        shape = sorted([info for _, info in controls], key=lambda x: json.dumps(x, sort_keys=True))
+        proof = digest({'dom': self.page.locator('body').evaluate(_RETURN_DOM),
+                        'body': hashlib.sha256(body.encode()).hexdigest(),
+                        'controls': [(info, locator.evaluate(_VALUE)) for locator, info in controls],
+                        'document': self._document_generation, 'popups': self._popup_generation})
+        return {'proof': proof, 'surface_fingerprint': digest(shape), 'widget_present': bool(frames)}
+
+    def observe_entry_return(self):
+        """Observe only the retained owned entry; never export values or credentials."""
+        require(self._entry_handoff_pending and not self._entry_observation_issued, 'APPLICATION_ENTRY_RETURN_REJECTED')
+        snapshot = self._entry_snapshot()
+        observation = {**snapshot, 'observation_id': secrets.token_hex(24),
+                       'observed_at': monotonic(), 'observed_utc': datetime.now(timezone.utc)}
+        self._entry_observation, self._entry_observation_issued = observation, True
+        return {'observation_id': observation['observation_id'],
+                'surface_fingerprint': observation['surface_fingerprint'],
+                'observed_at': observation['observed_utc'].isoformat()}
+
+    def accept_reviewed_entry_return(self, observation_id, manifest):
+        """Consume once after the caller loads externally pinned fresh facts/review.
+
+        The independent reviewer must inspect the actual values/profile before
+        externally pinning this nonce-bound manifest; a structural fingerprint
+        is not candidate verification. This API does not perform human OAuth,
+        verify the external pin itself or grant network/credential permissions.
+        """
+        observation, self._entry_observation = self._entry_observation, None
+        require(observation is not None and self._entry_handoff_pending, 'APPLICATION_ENTRY_RETURN_REJECTED')
+        try:
+            require(type(observation_id) is str and secrets.compare_digest(observation_id, observation['observation_id'])
+                    and 0 <= monotonic() - observation['observed_at'] <= 120)
+            review = manifest['entry_return_review']
+            require(type(review) is dict and set(review) == {'observation_id', 'surface_fingerprint', 'reviewed_at', 'reviewer_ref', 'return_url'}
+                    and review['observation_id'] == observation_id
+                    and review['surface_fingerprint'] == observation['surface_fingerprint']
+                    and review['return_url'] == self.boundary.target.entry_url
+                    and review['reviewer_ref'] == manifest['reviewer_ref']
+                    and type(review['reviewer_ref']) is str and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', review['reviewer_ref']))
+            reviewed = datetime.fromisoformat(review['reviewed_at'].replace('Z', '+00:00'))
+            require(reviewed.tzinfo is not None and reviewed.utcoffset().total_seconds() == 0
+                    and observation['observed_utc'] <= reviewed <= datetime.now(timezone.utc)
+                    and (datetime.now(timezone.utc) - reviewed).total_seconds() <= 120)
+            current = self._entry_snapshot()
+            require(current['proof'] == observation['proof']
+                    and manifest['steps'][0]['url'] == self.boundary.target.entry_url
+                    and manifest['steps'][0]['fingerprint'] == observation['surface_fingerprint'])
+            old_manifest = self.manifest
+            self.manifest = manifest
+            self._returned_widget_allowed = observation['widget_present']
+            self._returned_entry_reviewed = True
+            historical_popup = self._popup
+            self._popup = False  # Only now, after observing all extra pages closed.
+            try:
+                actual = self.inspect()
+                expected = {binding['key'] for binding in manifest['steps'][0]['fields'] if binding['required']}
+                if 'upload' in manifest['steps'][0]:
+                    expected.add(manifest['steps'][0]['upload']['key'])
+                require(actual['fingerprint'] == observation['surface_fingerprint'] and actual['challenge'] is False
+                        and actual['unexpected_write'] is False and actual['unreviewed_prefill'] is False
+                        and actual['required_keys'] == expected)
+            except Exception:
+                self.manifest, self._popup = old_manifest, historical_popup
+                self._returned_entry_reviewed = self._returned_widget_allowed = False
+                raise
+            self._accepted_entry_observation = observation
+            self._entry_return_ready = True
+        except Exception:
+            raise PermissionError('APPLICATION_ENTRY_RETURN_REJECTED') from None
 
     def _locator(self, binding):
         locator = self.page.locator(binding['selector'])
@@ -212,7 +394,8 @@ class OneClickBrowser:
         # including optional fields/options; it contains no entered values/IDs.
         shape = sorted([info for _, info in controls], key=lambda x: json.dumps(x, sort_keys=True))
         body = self.page.locator('body').inner_text().casefold()
-        challenge = self._popup or bool(self.page.locator('iframe').count()) or any(
+        challenge = self._popup or (not self._returned_frames_clear() if self._returned_entry_reviewed
+                                   else bool(self.page.locator('iframe').count())) or any(
             text in body for text in ('verify you are human', 'complete the captcha', 'verification code', 'access denied'))
         form_valid = self.page.locator('input,select,textarea').evaluate_all(
             "els => els.filter(x=>x.type!=='hidden'&&!x.disabled).every(x=>x.checkValidity())")
@@ -237,6 +420,7 @@ class OneClickBrowser:
         kind, value = binding['kind'], binding['value']
         if self.readback(binding) == value:
             return
+        self._entry_effect_attempts += 1
         if kind == 'select':
             if locator.evaluate("el => el.tagName==='SELECT'"):
                 locator.select_option(label=value)
@@ -322,6 +506,7 @@ class OneClickBrowser:
         locator = self._locator(binding)
         require(locator.evaluate('(el)=>el.type') == 'file')
         endpoint = self.boundary.target.resume_upload_url(filename)
+        self._entry_effect_attempts += 1
         self.boundary.begin_upload()
         try:
             with self.page.expect_response(lambda r: r.url == endpoint and r.request.method == 'POST', timeout=30_000) as pending:
@@ -346,6 +531,7 @@ class OneClickBrowser:
                 and self.boundary.blocked_write_count == 0)
         locator = self._locator(binding)
         require(locator.inner_text().strip() == binding['label'] and binding['label'] in ('Next', 'Continue'))
+        self._entry_effect_attempts += 1
         locator.click()
         self.page.wait_for_url(expected_url, timeout=15_000)
         self._step += 1
@@ -356,6 +542,7 @@ class OneClickBrowser:
         locator = self._locator(binding)
         require(locator.inner_text().strip() == binding['label'] and binding['label'] in ('Submit', 'Submit application', 'Send application'))
         self._submit_called = True
+        self._entry_effect_attempts += 1
         self.boundary.begin_submit()
         with self.page.expect_response(lambda r: r.url == self.boundary.target.application_url
                                       and r.request.method == 'POST', timeout=30_000) as pending:

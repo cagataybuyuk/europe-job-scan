@@ -85,7 +85,11 @@ test fulfills a synthetic HTTPS document locally and denies every other request;
 no employer request is sent and no submit is clicked. Test databases are separate
 private temporary files, never the canonical first-live ledger.
 
-Remaining before real completion: independently verified suitable vacancy,
-pinned facts/asset approval, retained-session scoped form/step adapter, reviewed
-exact write endpoints, actual submit driver and authenticated employer confirmation
-observer, plus controlled Applied reconciliation. All live TEST/PROD gates remain.
+This primitive's original remaining work is implemented in a separate local lane
+by PR #98; see [integrated execution and current acceptance limits](MVP_INTEGRATED_SINGLE_APPLICATION.md).
+That lane connects pinned facts/CV bytes, multi-step observation, exact endpoints,
+one dispatch and employer confirmation. The first real application was separately
+confirmed through the reviewed interactive CUA canary on 7 November 2026. This is
+not proof of unattended execution by the local command. Retained human-auth
+handling, verified profile correction and central reconciliation retain their own
+acceptance gates. All live TEST/PROD gates and the consumed canonical slot remain.

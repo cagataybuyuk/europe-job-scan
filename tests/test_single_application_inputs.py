@@ -92,6 +92,58 @@ def test_pinned_manifest_is_returned_unchanged_and_facts_available_to_trusted_ca
     assert "submit_authorized" not in load_reviewed_application(mp, fp, **kw)
 
 
+def entry_return_review(manifest):
+    return dict(observation_id="d" * 48, surface_fingerprint=manifest["steps"][0]["fingerprint"],
+                reviewed_at=STAMP, reviewer_ref=manifest["reviewer_ref"], return_url=URL)
+
+
+def test_fresh_return_review_is_part_of_the_external_manifest_pin(tmp_path):
+    manifest, facts = inputs()
+    manifest["entry_return_review"] = entry_return_review(manifest)
+    mp, fp, kw = pinned(tmp_path, manifest, facts)
+    assert load_reviewed_application(mp, fp, **kw) == manifest
+    manifest["entry_return_review"]["observation_id"] = "e" * 48
+    write_private(mp, json.dumps(manifest).encode())
+    assert_blocked(lambda: load_reviewed_application(mp, fp, **kw))
+
+
+@pytest.mark.parametrize("mutation", [
+    "null", "bool", "empty", "token_missing", "token_bool", "token_short", "token_upper",
+    "fingerprint", "return_url", "reviewer", "reviewer_missing", "extra_grant",
+    "candidate_match", "stale", "future", "naive", "non_utc", "stamp_bool",
+])
+def test_return_review_is_exact_fresh_and_bound_to_first_step(tmp_path, mutation):
+    manifest, facts = inputs()
+    review = entry_return_review(manifest)
+    manifest["entry_return_review"] = review
+    if mutation == "null": manifest["entry_return_review"] = None
+    if mutation == "bool": manifest["entry_return_review"] = True
+    if mutation == "empty": review.clear()
+    if mutation == "token_missing": review.pop("observation_id")
+    if mutation == "token_bool": review["observation_id"] = True
+    if mutation == "token_short": review["observation_id"] = "d" * 47
+    if mutation == "token_upper": review["observation_id"] = "D" * 48
+    if mutation == "fingerprint": review["surface_fingerprint"] = "e" * 64
+    if mutation == "return_url": review["return_url"] = URL + "/screening"
+    if mutation == "reviewer": review["reviewer_ref"] = "another:reviewer"
+    if mutation == "reviewer_missing": review.pop("reviewer_ref")
+    if mutation == "extra_grant": review["submit_authorized"] = True
+    if mutation == "candidate_match": review["candidate_profile_match"] = True
+    if mutation == "stale": review["reviewed_at"] = (NOW - timedelta(seconds=121)).isoformat()
+    if mutation == "future": review["reviewed_at"] = (NOW + timedelta(seconds=1)).isoformat()
+    if mutation == "naive": review["reviewed_at"] = NOW.replace(tzinfo=None).isoformat()
+    if mutation == "non_utc": review["reviewed_at"] = NOW.astimezone(timezone(timedelta(hours=3))).isoformat()
+    if mutation == "stamp_bool": review["reviewed_at"] = True
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+def test_return_review_accepts_exact_expiry_boundary_in_utc(tmp_path):
+    manifest, facts = inputs()
+    manifest["entry_return_review"] = entry_return_review(manifest)
+    manifest["entry_return_review"]["reviewed_at"] = (NOW - timedelta(seconds=120)).isoformat()
+    assert load(tmp_path, manifest, facts) == manifest
+
+
 @pytest.mark.parametrize("which", ["manifest", "facts"])
 def test_external_hash_rejects_postreview_tampering(tmp_path, which):
     mp, fp, kw = pinned(tmp_path)
