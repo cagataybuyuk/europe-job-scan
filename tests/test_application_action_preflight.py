@@ -271,3 +271,22 @@ def test_percent_encoded_control_bytes_block_all_ats_mutations(url, action):
     assert all(result[key] is False for key in (
         "write_authorized", "upload_authorized", "submit_authorized"
     ))
+
+
+@pytest.mark.parametrize("url", [
+    "https://employer.example/jobs/1%5csubmit",
+    "https://employer.example/%5C@attacker.example/jobs/1",
+    "https://employer.example/jobs/1?next=%5c%5cinternal",
+])
+@pytest.mark.parametrize("action", ["write", "upload", "submit"])
+def test_encoded_backslash_never_authorizes_ats_mutation(url, action):
+    """Some clients normalize encoded backslashes as path or authority separators."""
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    grant = {**permission(action), "vacancy_url": url}
+    result = check(ev=ev, target=target, grant=grant, action=action)
+    assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert all(result[key] is False for key in (
+        "write_authorized", "upload_authorized", "submit_authorized"
+    ))
