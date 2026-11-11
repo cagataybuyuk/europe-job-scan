@@ -36,7 +36,7 @@ def evaluate_application_action_preflight(
         return denied
     # Encoded ASCII controls can be decoded by a downstream ATS client or proxy.
     # Reject them before an exact-target consent can reach the transport layer.
-    if re.search(r"%(?:0[0-9a-f]|1[0-9a-f]|7f)", url, re.IGNORECASE):
+    if re.search(r"%(?:0[0-9a-f]|1[0-9a-f]|5c|7f)", url, re.IGNORECASE):
         return denied
     try:
         parsed = urlsplit(url)
