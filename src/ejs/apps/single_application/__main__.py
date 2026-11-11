@@ -17,6 +17,7 @@ from ejs.contracts.submit import SubmitAuthority, submit_identity
 from ejs.persistence.submission_ledger import SqliteSubmissionLedger
 from ejs.services.application_outcome import write_confirmed_outcome
 from ejs.services.oneclick_browser import OneClickBrowser
+from ejs.services.retained_entry_controller import RetainedEntryController
 from ejs.services.oneclick_target import OneClickTarget, OneClickNetworkBoundary
 from ejs.services.single_application_inputs import load_reviewed_application_inputs
 from ejs.services.single_application_runtime import SingleApplicationRuntime, read_approved_cv, require
@@ -40,9 +41,17 @@ def main(argv=None) -> int:
     parser.add_argument('--source-sha', required=True)
     parser.add_argument('--cv', type=Path, required=True)
     parser.add_argument('--execute-reviewed-first-application', action='store_true')
+    parser.add_argument('--retain-reviewed-entry', action='store_true',
+                        help='Bounded TEST handoff controller; does not enable LinkedIn/OAuth traffic')
+    parser.add_argument('--handoff-timeout-seconds', type=int, default=300)
+
     args = parser.parse_args(argv)
     result = None
+    ledger = None
     try:
+        require(not args.retain_reviewed_entry or args.execute_reviewed_first_application,
+                'APPLICATION_HANDOFF_EXECUTION_OPTION_REQUIRED')
+        require(1 <= args.handoff_timeout_seconds <= 600, 'APPLICATION_HANDOFF_TIMEOUT_INVALID')
         repo = Path(__file__).resolve().parents[4]
         actual = subprocess.run(['git', '-C', str(repo), 'rev-parse', 'HEAD'], check=True,
                                 capture_output=True, text=True).stdout.strip()
@@ -71,13 +80,20 @@ def main(argv=None) -> int:
                                            resume_filename=manifest['cv']['approved_filename'])
         from playwright.sync_api import sync_playwright
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=False)
-            context = browser.new_context(service_workers='block', accept_downloads=False)
+            browser = context = None
             try:
+                browser = playwright.chromium.launch(headless=False)
+                context = browser.new_context(service_workers='block', accept_downloads=False)
                 driver = OneClickBrowser(context, boundary, manifest)
-                result = SingleApplicationRuntime(driver, ledger).run(manifest, facts, target, args.cv,
-                    authority=SubmitAuthority(browser_external_form_write=True,
-                        final_submit_runtime_flag=True, kill_switch_engaged=False))
+                runtime = SingleApplicationRuntime(driver, ledger)
+                authority = SubmitAuthority(browser_external_form_write=True,
+                    final_submit_runtime_flag=True, kill_switch_engaged=False)
+                result = runtime.run(manifest, facts, target, args.cv, authority=authority)
+                if result['status'] == 'HUMAN_HANDOFF_REQUIRED' and args.retain_reviewed_entry:
+                    controller = RetainedEntryController(_STATE_ROOT, repo, args.source_sha,
+                        timeout_seconds=args.handoff_timeout_seconds)
+                    result = controller.wait_for_review(runtime, driver, ledger, manifest, facts, target, args.cv,
+                                                        authority=authority)
                 if result['status'] == 'EMPLOYER_CONFIRMED':
                     try:
                         outcome = write_confirmed_outcome(_OUTCOME, ledger=ledger,
@@ -94,10 +110,24 @@ def main(argv=None) -> int:
                 # Cleanup must not replace a confirmed result with BLOCKED or
                 # emit a second contradictory terminal report after submission.
                 for resource in (context, browser):
+                    if resource is None:
+                        continue
                     try:
                         resource.close()
                     except Exception:
                         pass
+    except KeyboardInterrupt:
+        if result is None or result.get('status') == 'HUMAN_HANDOFF_REQUIRED':
+            occupied = ledger is not None
+            if ledger is not None:
+                try:
+                    occupied = ledger.has_intent()
+                except Exception:
+                    pass
+            result = {'status': 'DUPLICATE_OR_UNCERTAIN' if occupied else 'CANCELLED',
+                      'applied': False, 'submit_click_attempts': None if occupied else 0}
+        else:
+            result['cleanup_incomplete'] = True
     except Exception:
         # Never leak filenames, candidate data, HTTP bodies or library tracebacks.
         if result is None:
