@@ -839,3 +839,20 @@ def test_retained_cli_controller_actual_page_private_pins_and_one_confirmed_fixt
         assert not (control / 'active.lock').exists()
         assert not (control / 'session.json').exists()
         assert not (control / 'observation.json').exists()
+
+
+@pytest.mark.parametrize('bad_url', [
+    WIDGET_URL.replace('www.linkedin.com', 'www.linkedin.com:443'),
+    WIDGET_URL.replace('www.linkedin.com', 'user@www.linkedin.com'),
+    WIDGET_URL.replace('https://www.linkedin.com', 'https://WWW.LINKEDIN.COM'),
+    WIDGET_URL.replace('www.linkedin.com', 'www.linkedin.com.'),
+    WIDGET_URL.replace('https://www.linkedin.com', 'https://www.linkedin.com\\\\@evil.test'),
+    WIDGET_URL + '&xdChannel=00000000-0000-0000-0000-000000000000',
+    WIDGET_URL + '&redirect_uri=https%3A%2F%2Fevil.test',
+    WIDGET_URL.replace('#xdOrigin=', '#unknown=1&xdOrigin='),
+    WIDGET_URL.replace('xdChannel=', 'xdChannel=%00'),
+    WIDGET_URL + '%0A',
+])
+def test_entry_return_widget_url_rejects_authority_and_fragment_smuggling(bad_url):
+    from ejs.services.oneclick_browser import _widget_url
+    assert not _widget_url(bad_url)

@@ -494,3 +494,22 @@ def test_handoff_is_explicit_and_never_falls_back_or_consumes_intent(scenario):
     assert scenario.browser.count('open') == 1
     assert scenario.browser.count('write') == scenario.browser.count('upload') == scenario.browser.count('submit') == 0
     assert not scenario.ledger.has_intent()
+
+
+@pytest.mark.parametrize("drift", ["requisition", "entry_url", "posting_hash", "review_expired"])
+def test_reviewed_return_rejects_target_or_review_drift_before_employer_effect(scenario, drift):
+    """A reviewed-return token is not authority to switch target or reuse stale review."""
+    if drift == "requisition":
+        scenario.manifest["requisition_id"] = "REF-OTHER"
+    elif drift == "entry_url":
+        scenario.manifest["steps"][0]["url"] = "https://jobs.smartrecruiters.com/Other/744000000000999"
+    elif drift == "posting_hash":
+        scenario.manifest["vacancy"]["posting_sha256"] = "0" * 64
+    else:
+        scenario.manifest["reviewed_at"] = (NOW - timedelta(days=2)).isoformat()
+    result = resume(scenario)
+    assert result["status"] == "BLOCKED"
+    assert scenario.browser.count("open") == 0
+    assert scenario.browser.count("accept_return") == 0
+    assert scenario.browser.count("write") == scenario.browser.count("upload") == scenario.browser.count("submit") == 0
+    assert not scenario.ledger.has_intent()
