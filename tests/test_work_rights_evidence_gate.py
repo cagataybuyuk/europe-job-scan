@@ -1,3 +1,4 @@
+import json
 import pytest
 from ejs.services.work_rights_evidence_gate import evaluate_work_rights
 
@@ -105,12 +106,35 @@ def test_invisible_unicode_in_legal_evidence_fails_closed(target, changes):
     ("Portugal", {"country": "Portugal\u202e"}),
 ])
 def test_actual_unicode_codepoints_not_literal_escape_sequences(target, changes):
-    assert any(ord(ch) > 127 for ch in target + str(changes))
+    # repr(dict) escapes nonprintable Unicode; inspect the actual JSON text.
+    assert any(ord(ch) > 127 for ch in target + json.dumps(changes, ensure_ascii=False))
     result = evaluate_work_rights(evidence(**changes), target)
     assert result["status"] == "BLOCKED"
     assert "COUNTRY_MISMATCH" in result["reasons"] or "MISSING_SOURCE_REF" in result["reasons"]
     assert all(result[key] is False for key in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("country", ["United Kingdom", "Czech Republic", "United States"])
+def test_exact_multiword_country_names_are_review_ready_without_authority(country):
+    result = evaluate_work_rights(evidence(country=country), country)
+    assert result["status"] == "REVIEW_READY"
+    assert all(result[key] is False for key in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("country", [
+    " United Kingdom", "United Kingdom ", "United\tKingdom",
+    "United\u00a0Kingdom", "United\u2009Kingdom", "United\u200bKingdom",
+])
+def test_multiword_country_padding_or_ambiguous_separator_still_blocks(country):
+    result = evaluate_work_rights(evidence(country=country), country)
+    assert result["status"] == "BLOCKED"
+    assert "COUNTRY_MISMATCH" in result["reasons"]
+
+
+def test_country_spacing_is_not_normalized_into_a_different_identity():
+    assert evaluate_work_rights(evidence(country="United  Kingdom"), "United Kingdom")["status"] == "BLOCKED"
 
 
 @pytest.mark.parametrize("changes,target", [

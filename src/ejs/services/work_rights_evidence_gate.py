@@ -5,8 +5,12 @@ from collections.abc import Mapping
 import unicodedata
 
 def _ambiguous_text(value: str) -> bool:
-    """Reject invisible/format characters and Unicode separators in legal evidence."""
-    return any(unicodedata.category(ch).startswith(("C", "Z")) for ch in value)
+    """Allow ordinary internal spaces, rejecting controls and other separators.
+
+    Leading/trailing padding is checked separately. Multiword country names are
+    valid exact identities; nonbreaking/format characters must not look like one.
+    """
+    return any(ch != " " and unicodedata.category(ch).startswith(("C", "Z")) for ch in value)
 
 
 STATES = frozenset({"VERIFIED", "INELIGIBLE", "UNKNOWN"})

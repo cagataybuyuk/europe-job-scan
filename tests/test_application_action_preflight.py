@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 
 import pytest
 
@@ -21,11 +21,14 @@ def permission(action="write"):
         "expires_at": NOW + timedelta(minutes=10)}
 
 
-def check(ev=None, target=None, grant=None, action="write", now=NOW):
+_DEFAULT = object()
+
+
+def check(ev=_DEFAULT, target=_DEFAULT, grant=_DEFAULT, action="write", now=NOW):
     return evaluate_application_action_preflight(
-        evidence() if ev is None else ev,
-        TARGET if target is None else target,
-        permission(action) if grant is None else grant, action, now)
+        evidence() if ev is _DEFAULT else ev,
+        TARGET if target is _DEFAULT else target,
+        permission(action) if grant is _DEFAULT else grant, action, now)
 
 
 def test_matching_preflight_never_grants_ats_or_network_authority():
@@ -123,7 +126,7 @@ def test_control_and_backslash_url_ambiguity_denied_even_with_matching_consent(u
 
 @pytest.mark.parametrize("url", [
     "https://localhost/jobs/1",
-    
+
     "https://internal.local/jobs/1",
     "https://service.localhost/jobs/1",
     "https://127.0.0.1/jobs/1",
@@ -381,6 +384,49 @@ def test_search_domain_and_numeric_tld_hosts_fail_closed(url, action):
     grant = {**permission(action), "vacancy_url": url}
     result = check(ev=ev, target=target, grant=grant, action=action)
     assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert all(result[k] is False for k in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+class NoOffset(tzinfo):
+    def utcoffset(self, value):
+        return None
+
+
+class InvalidOffset(tzinfo):
+    def utcoffset(self, value):
+        raise ValueError("SYNTHETIC PRIVATE TIMEZONE ERROR")
+
+
+@pytest.mark.parametrize("tz", [NoOffset(), InvalidOffset()])
+@pytest.mark.parametrize("field", ["now", "evidence_expiry", "permission_expiry"])
+def test_invalid_timezone_metadata_never_raises_or_authorizes(tz, field):
+    record, grant, current = evidence(), permission(), NOW
+    malformed = datetime(2027, 1, 1, tzinfo=tz)
+    if field == "now":
+        current = malformed
+    elif field == "evidence_expiry":
+        record["expires_at"] = malformed
+    else:
+        grant["expires_at"] = malformed
+    result = check(ev=record, grant=grant, now=current)
+    assert result["status"] == "BLOCKED"
+    assert "PRIVATE" not in str(result)
+    assert result["network_authorized"] is False
+    assert all(result[k] is False for k in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+@pytest.mark.parametrize("argument", ["ev", "target", "grant"])
+def test_explicit_none_is_passed_to_source_function_and_blocked(argument):
+    assert check(**{argument: None})["status"] == "BLOCKED"
+
+
+def test_multiword_country_preflight_still_does_not_grant_network_authority():
+    target = {**TARGET, "country": "United Kingdom"}
+    result = check(target=target, ev={**evidence(), "country": target["country"]})
+    assert result["status"] == "PREFLIGHT_READY"
     assert result["network_authorized"] is False
     assert all(result[k] is False for k in
                ("write_authorized", "upload_authorized", "submit_authorized"))

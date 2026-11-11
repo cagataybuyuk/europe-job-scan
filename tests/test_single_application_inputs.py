@@ -1,0 +1,481 @@
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from ejs.services.single_application_inputs import (
+    load_reviewed_application, load_reviewed_application_inputs,
+)
+
+
+NOW = datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc)
+STAMP = NOW.isoformat()
+SOURCE = "a" * 40
+ERROR = "APPLICATION_INPUT_REVIEW_REQUIRED"
+URL = "https://jobs.smartrecruiters.com/oneclick-ui/company/Example/publication/fixture"
+
+
+def inputs():
+    fact = dict(canonical_field="candidate.first_name", value="Synthetic",
+                source_ref="candidate_verified:fixture-first", verified=True,
+                auto_fill_approved=True, verified_at=STAMP)
+    field = dict(key="first", label="First name", selector="#first", kind="text",
+                 required=True, canonical_field=fact["canonical_field"], value=fact["value"],
+                 provenance_ref=fact["source_ref"], resolution_mode="Verified Fact")
+    manifest = dict(schema_version="EJS-SINGLE-APPLICATION-1", source_sha=SOURCE,
+                    reviewed_at=STAMP, reviewer_ref="review:fixture:independent",
+                    candidate_profile_version="fixture-v1", steps=[dict(
+                        url=URL, fingerprint="b" * 64, fields=[field],
+                        upload=dict(key="resume", selector="#resume", label="Resume", kind="file", required=True),
+                        submit=dict(selector="#submit", label="Submit"))],
+                    read_urls=[], confirmation=dict(selector="#confirmation", text="Application submitted"), cv=dict(
+                        sha256="c" * 64, size_bytes=1234, mime_type="application/pdf",
+                        approved_filename="CV.pdf", user_approved=True,
+                        scope="one_cv_asset", source_ref="approved_document:fixture-cv"))
+    facts = dict(schema_version="EJS-VERIFIED-FACTS-1", candidate_profile_version="fixture-v1",
+                 facts=[fact])
+    return manifest, facts
+
+
+def add_field(manifest, facts, canonical, value, *, kind="select", required=True,
+              mode="Verified Fact", source="user_decision:fixture", policy=None):
+    index = len(facts["facts"])
+    facts["facts"].append(dict(canonical_field=canonical, value=value, source_ref=source,
+                               verified=True, auto_fill_approved=True, verified_at=STAMP))
+    field = dict(key=f"field-{index}", label=f"Synthetic field {index}", selector=f"#field-{index}",
+                 kind=kind, required=required, canonical_field=canonical, value=value,
+                 provenance_ref=source, resolution_mode=mode)
+    if policy is not None:
+        field["policy_ref"] = policy
+    manifest["steps"][0]["fields"].append(field)
+    return field
+
+
+def write_private(path, content):
+    path.write_bytes(content)
+    path.chmod(0o600)
+    return hashlib.sha256(content).hexdigest()
+
+
+def pinned(tmp_path, manifest=None, facts=None):
+    if manifest is None:
+        manifest, facts = inputs()
+    private = tmp_path / "private-inputs"
+    private.mkdir(mode=0o700, exist_ok=True)
+    private.chmod(0o700)
+    mp, fp = private / "manifest.json", private / "facts.json"
+    md = write_private(mp, json.dumps(manifest).encode())
+    fd = write_private(fp, json.dumps(facts).encode())
+    return mp, fp, dict(manifest_sha256=md, facts_sha256=fd, source_sha=SOURCE, now=NOW)
+
+
+def load(tmp_path, manifest=None, facts=None):
+    mp, fp, kw = pinned(tmp_path, manifest, facts)
+    return load_reviewed_application(mp, fp, **kw)
+
+
+def assert_blocked(fn):
+    with pytest.raises(PermissionError) as caught:
+        fn()
+    assert str(caught.value) == ERROR
+
+
+def test_pinned_manifest_is_returned_unchanged_and_facts_available_to_trusted_caller(tmp_path):
+    manifest, facts = inputs()
+    mp, fp, kw = pinned(tmp_path, manifest, facts)
+    assert load_reviewed_application(mp, fp, **kw) == manifest
+    assert load_reviewed_application_inputs(mp, fp, **kw) == (manifest, facts)
+    assert "submit_authorized" not in load_reviewed_application(mp, fp, **kw)
+
+
+@pytest.mark.parametrize("which", ["manifest", "facts"])
+def test_external_hash_rejects_postreview_tampering(tmp_path, which):
+    mp, fp, kw = pinned(tmp_path)
+    changed = mp if which == "manifest" else fp
+    changed.write_bytes(changed.read_bytes() + b" ")
+    assert_blocked(lambda: load_reviewed_application(mp, fp, **kw))
+
+
+@pytest.mark.parametrize("key,value", [
+    ("manifest_sha256", "g" * 64), ("facts_sha256", "A" * 64),
+    ("source_sha", "b" * 40), ("source_sha", "a" * 39),
+    ("now", NOW.replace(tzinfo=None)),
+])
+def test_independent_pins_and_aware_clock_required(tmp_path, key, value):
+    mp, fp, kw = pinned(tmp_path)
+    kw[key] = value
+    assert_blocked(lambda: load_reviewed_application(mp, fp, **kw))
+
+
+@pytest.mark.parametrize("subject", ["file", "parent", "symlink", "parent_symlink", "hardlink", "fifo"])
+def test_private_regular_owned_unlinked_files_required(tmp_path, subject):
+    mp, fp, kw = pinned(tmp_path)
+    if subject == "file":
+        mp.chmod(0o640)
+    elif subject == "parent":
+        mp.parent.chmod(0o750)
+    elif subject == "symlink":
+        target = mp.with_name("actual.json")
+        mp.rename(target)
+        mp.symlink_to(target)
+    elif subject == "parent_symlink":
+        linked = tmp_path / "linked-private"
+        linked.symlink_to(mp.parent, target_is_directory=True)
+        mp = linked / mp.name
+    elif subject == "hardlink":
+        os.link(mp, mp.with_name("second.json"))
+    else:
+        mp.unlink()
+        os.mkfifo(mp, mode=0o600)
+    assert_blocked(lambda: load_reviewed_application(mp, fp, **kw))
+
+
+def test_wrong_owner_and_nonpath_input_fail_closed(tmp_path, monkeypatch):
+    mp, fp, kw = pinned(tmp_path)
+    assert_blocked(lambda: load_reviewed_application(str(mp), fp, **kw))
+    actual_uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: actual_uid + 1)
+    assert_blocked(lambda: load_reviewed_application(mp, fp, **kw))
+
+
+@pytest.mark.parametrize("raw", [b"", b"x" * 1_000_001, b"[]", b"{", b'{"x":NaN}',
+                                   b'{"x":Infinity}', b'{"x":-Infinity}',
+                                   b'{"x":1e9999}',
+                                   b'{"x":1,"x":2}', b'{"x":{"y":1,"y":2}}'])
+def test_bounded_json_rejects_nonobjects_duplicates_and_nonfinite_constants(tmp_path, raw):
+    mp, fp, kw = pinned(tmp_path)
+    kw["manifest_sha256"] = write_private(mp, raw)
+    assert_blocked(lambda: load_reviewed_application(mp, fp, **kw))
+
+
+@pytest.mark.parametrize("mutation", [
+    "old_schema", "facts_schema", "profile", "reviewer_email", "reviewer_url", "reviewer_blank",
+    "stale_review", "future_review", "naive_review", "stale_fact", "future_fact", "unverified",
+    "unapproved", "unknown_fact", "duplicate_fact", "missing_fact", "value", "source", "unknown_field",
+    "whitespace_field", "duplicate_field", "duplicate_selector", "bad_required", "bad_kind", "bad_mode",
+    "no_steps", "six_steps", "no_fields", "too_many_fields", "fingerprint", "http", "offsite", "auth_url",
+    "fragment_url", "not_literal_verified", "blank_required",
+])
+def test_review_facts_and_step_bindings_fail_closed(tmp_path, mutation):
+    manifest, facts = inputs()
+    field, fact, step = manifest["steps"][0]["fields"][0], facts["facts"][0], manifest["steps"][0]
+    if mutation == "old_schema": manifest["schema_version"] = "EJS-LIVE-PREPARE-1"
+    if mutation == "facts_schema": facts["schema_version"] = "EJS-OTHER-1"
+    if mutation == "profile": facts["candidate_profile_version"] = "different-profile"
+    if mutation == "reviewer_email": manifest["reviewer_ref"] = "private@example.invalid"
+    if mutation == "reviewer_url": manifest["reviewer_ref"] = "https://example.invalid/review"
+    if mutation == "reviewer_blank": manifest["reviewer_ref"] = " "
+    if mutation == "stale_review": manifest["reviewed_at"] = (NOW - timedelta(days=1, seconds=1)).isoformat()
+    if mutation == "future_review": manifest["reviewed_at"] = (NOW + timedelta(seconds=1)).isoformat()
+    if mutation == "naive_review": manifest["reviewed_at"] = NOW.replace(tzinfo=None).isoformat()
+    if mutation == "stale_fact": fact["verified_at"] = (NOW - timedelta(days=30, seconds=1)).isoformat()
+    if mutation == "future_fact": fact["verified_at"] = (NOW + timedelta(seconds=1)).isoformat()
+    if mutation == "unverified": fact["verified"] = False
+    if mutation == "unapproved": fact["auto_fill_approved"] = False
+    if mutation == "unknown_fact": fact["canonical_field"] = "technical.password"
+    if mutation == "duplicate_fact": facts["facts"].append(deepcopy(fact))
+    if mutation == "missing_fact": facts["facts"] = []
+    if mutation == "value": field["value"] = "DIFFERENT_PRIVATE_VALUE"
+    if mutation == "source": field["provenance_ref"] = "unreviewed:source"
+    if mutation == "unknown_field": field["canonical_field"] = "work.authorization.hidden"
+    if mutation == "whitespace_field": field["canonical_field"] = " candidate.first_name "
+    if mutation == "duplicate_field": step["fields"].append(deepcopy(field))
+    if mutation == "duplicate_selector":
+        duplicate = deepcopy(field); duplicate["key"] = "second"; step["fields"].append(duplicate)
+    if mutation == "bad_required": field["required"] = 1
+    if mutation == "bad_kind": field["kind"] = "password"
+    if mutation == "bad_mode": field["resolution_mode"] = "Grounded Generated"
+    if mutation == "no_steps": manifest["steps"] = []
+    if mutation == "six_steps": manifest["steps"] = [deepcopy(step) for _ in range(6)]
+    if mutation == "no_fields": step["fields"] = []
+    if mutation == "too_many_fields": step["fields"] = [deepcopy(field) for _ in range(101)]
+    if mutation == "fingerprint": step["fingerprint"] = "f" * 24
+    if mutation == "http": step["url"] = URL.replace("https:", "http:")
+    if mutation == "offsite": step["url"] = URL.replace("jobs.smartrecruiters.com", "attacker.invalid")
+    if mutation == "auth_url": step["url"] = URL.replace("https://", "https://user@")
+    if mutation == "fragment_url": step["url"] = URL + "#other"
+    if mutation == "not_literal_verified": fact["verified"] = 1
+    if mutation == "blank_required": field["value"] = fact["value"] = " "
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+def test_freshness_inclusive_boundaries_and_timezone_offsets(tmp_path):
+    manifest, facts = inputs()
+    manifest["reviewed_at"] = (NOW - timedelta(days=1)).isoformat()
+    facts["facts"][0]["verified_at"] = (NOW - timedelta(days=30)).isoformat()
+    assert load(tmp_path, manifest, facts) == manifest
+
+
+@pytest.mark.parametrize("bad_source", ["approved_document:cv", "linkedin:prefill", "fact:untyped-source"])
+@pytest.mark.parametrize("canonical", ["work.authorization", "work.requires_sponsorship",
+                                         "compensation.current_salary", "employment.notice_period"])
+def test_legal_financial_and_current_employment_never_inferred_from_cv(tmp_path, canonical, bad_source):
+    manifest, facts = inputs()
+    add_field(manifest, facts, canonical, "Synthetic option", source=bad_source)
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+def test_values_compare_with_no_bool_number_or_string_coercion(tmp_path):
+    manifest, facts = inputs()
+    field = add_field(manifest, facts, "compensation.current_salary", 1, kind="number")
+    field["value"] = True
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+    field["value"] = "1"
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+    field["value"] = 1.0
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+@pytest.mark.parametrize("value", [True, "NaN", "Infinity", "1e99999"])
+def test_number_controls_reject_boolean_and_nonfinite_forms_even_in_matched_fact(tmp_path, value):
+    manifest, facts = inputs()
+    add_field(manifest, facts, "compensation.current_salary", value, kind="number")
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+@pytest.mark.parametrize("canonical", ["compensation.salary_expectation", "compensation.expected_annual_gross",
+                                        "compensation.expected_salary_range"])
+def test_salary_requires_explicit_policy_even_with_matching_verified_fact(tmp_path, canonical):
+    manifest, facts = inputs()
+    field = add_field(manifest, facts, canonical, "Synthetic salary", mode="Approved Policy",
+                      policy="USER-EXAMPLE-SALARY-20261106")
+    assert load(tmp_path, manifest, facts) == manifest
+    field["resolution_mode"] = "Verified Fact"
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+@pytest.mark.parametrize("canonical", ["consent.privacy", "consent.privacy_acknowledgement"])
+def test_privacy_acceptance_needs_specific_action_policy_and_exact_fact(tmp_path, canonical):
+    manifest, facts = inputs()
+    field = add_field(manifest, facts, canonical, True, kind="checkbox", mode="Approved Policy",
+                      policy="USER-EXAMPLE-PRIVACY-20261106")
+    assert load(tmp_path, manifest, facts) == manifest
+    field["policy_ref"] = "any-future-consent"
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+    field["policy_ref"] = "USER-EXAMPLE-PRIVACY-20261106"
+    field["resolution_mode"] = "Verified Fact"
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+@pytest.mark.parametrize("mode", ["Default No", "Blank Optional"])
+def test_optional_marketing_can_only_be_false_with_reviewed_default_or_blank(tmp_path, mode):
+    manifest, facts = inputs()
+    field = add_field(manifest, facts, "consent.marketing_opt_in", False, kind="checkbox",
+                      required=False, mode=mode)
+    assert load(tmp_path, manifest, facts) == manifest
+    field["value"] = facts["facts"][-1]["value"] = True
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+def test_mandatory_demographics_only_reviewed_neutral_not_inferred(tmp_path):
+    manifest, facts = inputs()
+    field = add_field(manifest, facts, "demographic.gender", "Prefer not to say",
+                      mode="Approved Neutral Choice", policy="SUBMIT1-A6")
+    assert load(tmp_path, manifest, facts) == manifest
+    field["value"] = facts["facts"][-1]["value"] = "Synthetic protected answer"
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+    field["value"] = facts["facts"][-1]["value"] = "Prefer not to say"
+    field["policy_ref"] = "unknown-policy"
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+def test_optional_demographics_remain_blank_from_explicit_policy_fact(tmp_path):
+    manifest, facts = inputs()
+    field = add_field(manifest, facts, "demographic.religion", "", required=False,
+                      mode="Blank Optional", policy="SUBMIT1-A6")
+    assert load(tmp_path, manifest, facts) == manifest
+    field["resolution_mode"] = "Approved Neutral Choice"
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+@pytest.mark.parametrize("canonical,mode,value", [
+    ("candidate.first_name", "Default No", False),
+    ("work.eligibility", "Approved Policy", "Synthetic option"),
+    ("candidate.first_name", "Approved Neutral Choice", "Prefer not to say"),
+    ("candidate.first_name", "Blank Optional", "Not blank"),
+])
+def test_policy_modes_cannot_relabel_unrelated_values(tmp_path, canonical, mode, value):
+    manifest, facts = inputs()
+    manifest["steps"][0]["fields"] = []
+    facts["facts"] = []
+    add_field(manifest, facts, canonical, value, kind="checkbox" if type(value) is bool else "select",
+              required=False, mode=mode, policy="SUBMIT1-A6")
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+@pytest.mark.parametrize("key,value", [("sha256", "x" * 64), ("size_bytes", True), ("size_bytes", 1.0),
+    ("size_bytes", 0), ("size_bytes", 10_000_001), ("mime_type", "text/plain"),
+    ("user_approved", 1), ("scope", "all-cv-assets"), ("approved_filename", "../CV.pdf"),
+    ("approved_filename", "CV.pdf.exe"), ("source_ref", "")])
+def test_cv_approval_is_exact_bounded_one_asset_metadata(tmp_path, key, value):
+    manifest, facts = inputs()
+    manifest["cv"][key] = value
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+def test_fixed_private_errors_emit_no_input_values_paths_or_sources(tmp_path, capsys):
+    manifest, facts = inputs()
+    manifest["steps"][0]["fields"][0]["value"] = "PRIVATE_SECRET_FIXTURE"
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+    out = capsys.readouterr()
+    assert out.out == out.err == ""
+
+
+def profile_assertion(manifest, facts, canonical="profile.experience.0.summary"):
+    value = "Synthetic Company\nBusiness Analyst\n2022–2023\nVerified synthetic responsibilities."
+    source = "approved_document:sha256:" + "d" * 64
+    facts["facts"].append(dict(canonical_field=canonical, value=value, source_ref=source,
+                               verified=True, auto_fill_approved=True, verified_at=STAMP))
+    assertion = dict(selector="#experience-card-0", label="Verified experience card",
+                     canonical_field=canonical, value=value, provenance_ref=source)
+    manifest["steps"][0]["profile_assertions"] = [assertion]
+    return assertion
+
+
+@pytest.mark.parametrize("canonical", ["profile.experience.0.title", "profile.experience.99.company",
+    "profile.experience.2.dates", "profile.experience.4.description", "profile.experience.5.summary",
+    "profile.education.0.school", "profile.education.1.degree", "profile.education.2.dates",
+    "profile.education.3.description", "profile.education.4.summary"])
+def test_profile_assertions_compare_exact_visible_card_text_to_pinned_cv_fact(tmp_path, canonical):
+    manifest, facts = inputs()
+    profile_assertion(manifest, facts, canonical)
+    assert load(tmp_path, manifest, facts) == manifest
+
+
+@pytest.mark.parametrize("mutation", ["changed_text", "source", "missing_fact", "unverified_fact",
+    "bad_type", "blank", "wrong_canonical", "duplicate", "selector_collision", "bad_label",
+    "missing_selector", "too_long_selector", "too_many", "not_list", "fact_not_text"])
+def test_linkedin_profile_text_never_promoted_without_exact_approved_source(tmp_path, mutation):
+    manifest, facts = inputs()
+    assertion = profile_assertion(manifest, facts)
+    if mutation == "changed_text": assertion["value"] += "\nUNSUPPORTED CURRENT ROLE CLAIM"
+    if mutation == "source": assertion["provenance_ref"] = "linkedin:prefill"
+    if mutation == "missing_fact": facts["facts"].pop()
+    if mutation == "unverified_fact": facts["facts"][-1]["verified"] = False
+    if mutation == "bad_type": assertion["value"] = 123
+    if mutation == "blank": assertion["value"] = facts["facts"][-1]["value"] = " "
+    if mutation == "wrong_canonical": assertion["canonical_field"] = "candidate.first_name"
+    if mutation == "duplicate": manifest["steps"][0]["profile_assertions"].append(deepcopy(assertion))
+    if mutation == "selector_collision": assertion["selector"] = "#first"
+    if mutation == "bad_label": assertion["label"] = ""
+    if mutation == "missing_selector": assertion.pop("selector")
+    if mutation == "too_long_selector": assertion["selector"] = "x" * 513
+    if mutation == "too_many": manifest["steps"][0]["profile_assertions"] = [deepcopy(assertion)] * 51
+    if mutation == "not_list": manifest["steps"][0]["profile_assertions"] = {"selector": "#card"}
+    if mutation == "fact_not_text": facts["facts"][-1]["value"] = True
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+@pytest.mark.parametrize("canonical", ["profile.experience.100.title", "profile.experience.-1.title",
+    "profile.experience.0.authorization", "profile.education.0.company", "profile.education.1.work.authorization",
+    "profile.education.1.degree ", "profile.education.1.degree.hidden"])
+def test_profile_fact_namespace_is_bounded_and_cannot_hide_legal_fields(tmp_path, canonical):
+    manifest, facts = inputs()
+    profile_assertion(manifest, facts, canonical)
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+def test_profile_fact_cannot_become_a_profile_edit_request(tmp_path):
+    manifest, facts = inputs()
+    assertion = profile_assertion(manifest, facts)
+    field = manifest["steps"][0]["fields"][0]
+    field.update(canonical_field=assertion["canonical_field"], value=assertion["value"],
+                 provenance_ref=assertion["provenance_ref"])
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+@pytest.mark.parametrize("mutation", ["absent", "two_uploads", "missing_kind", "wrong_kind",
+    "string_required", "missing_required", "empty_label", "duplicate_key", "selector_collision",
+    "oversize_selector", "not_object"])
+def test_only_one_reviewed_typed_upload_binding_is_accepted(tmp_path, mutation):
+    manifest, facts = inputs()
+    step = manifest["steps"][0]
+    upload = step["upload"]
+    if mutation == "absent": step.pop("upload")
+    if mutation == "two_uploads":
+        second = deepcopy(step)
+        step.pop("submit"); step["next"] = dict(selector="#next", label="Next")
+        second["fields"][0].update(key="confirm-first", selector="#confirm-first")
+        second["upload"].update(key="resume-again", selector="#resume-again")
+        manifest["steps"].append(second)
+    if mutation == "missing_kind": upload.pop("kind")
+    if mutation == "wrong_kind": upload["kind"] = "image"
+    if mutation == "string_required": upload["required"] = "true"
+    if mutation == "missing_required": upload.pop("required")
+    if mutation == "empty_label": upload["label"] = ""
+    if mutation == "duplicate_key": upload["key"] = "first"
+    if mutation == "selector_collision": upload["selector"] = "#first"
+    if mutation == "oversize_selector": upload["selector"] = "x" * 513
+    if mutation == "not_object": step["upload"] = []
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+def two_steps(manifest):
+    first = manifest["steps"][0]
+    second = deepcopy(first)
+    second.pop("upload")
+    second["url"] = URL + "/screening"
+    second["fingerprint"] = "e" * 64
+    second["fields"][0].update(key="confirm-first", selector="#confirm-first")
+    first.pop("submit")
+    first["next"] = dict(selector="#next", label="Next")
+    manifest["steps"].append(second)
+    return first, second
+
+
+def test_reviewed_multistep_next_and_last_submit_bindings_are_accepted(tmp_path):
+    manifest, facts = inputs()
+    first, last = two_steps(manifest)
+    first["next"]["label"] = "Continue"
+    last["submit"]["label"] = "Send application"
+    assert load(tmp_path, manifest, facts) == manifest
+
+
+@pytest.mark.parametrize("mutation", ["early_submit", "last_next", "missing_next", "missing_submit",
+    "unknown_next_label", "unknown_submit_label", "missing_next_selector", "submit_selector_collision",
+    "button_not_object", "button_oversize_selector"])
+def test_step_actions_cannot_smuggle_early_submit_or_unknown_button(tmp_path, mutation):
+    manifest, facts = inputs()
+    first, last = two_steps(manifest)
+    if mutation == "early_submit": first["submit"] = deepcopy(last["submit"])
+    if mutation == "last_next": last["next"] = deepcopy(first["next"])
+    if mutation == "missing_next": first.pop("next")
+    if mutation == "missing_submit": last.pop("submit")
+    if mutation == "unknown_next_label": first["next"]["label"] = "Apply"
+    if mutation == "unknown_submit_label": last["submit"]["label"] = "Allow"
+    if mutation == "missing_next_selector": first["next"].pop("selector")
+    if mutation == "submit_selector_collision": last["submit"]["selector"] = "#confirm-first"
+    if mutation == "button_not_object": last["submit"] = "Submit"
+    if mutation == "button_oversize_selector": last["submit"]["selector"] = "x" * 513
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+@pytest.mark.parametrize("value", [None, "https://cdn.example.invalid/app.js", ["http://cdn.example.invalid/app.js"],
+    ["https://user@cdn.example.invalid/app.js"], ["https://cdn.example.invalid/app.js#fragment"],
+    ["https://cdn.example.invalid/*"], ["https://cdn.example.invalid/app.js "] ,
+    ["https://cdn.example.invalid:443/app.js"], ["https://cdn.example.invalid/app.js"] * 2,
+    ["https://cdn.example.invalid/"], ["https://cdn.example.invalid/a\\b"],
+    ["https://cdn.example.invalid/app.js"] * 1001])
+def test_read_allowlist_is_bounded_exact_https_without_aliases(tmp_path, value):
+    manifest, facts = inputs()
+    manifest["read_urls"] = value
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+def test_reviewed_exact_cdn_read_urls_are_retained(tmp_path):
+    manifest, facts = inputs()
+    manifest["read_urls"] = ["https://cdn.example.invalid/app.a1b2.js", "https://cdn.example.invalid/chunk.css?v=1"]
+    assert load(tmp_path, manifest, facts) == manifest
+
+
+@pytest.mark.parametrize("value", [None, {}, {"selector": "", "text": "Application submitted"},
+    {"selector": "#success", "text": ""}, {"selector": "x" * 513, "text": "Success"},
+    {"selector": "#success", "text": "x" * 4097}, {"selector": "#success", "text": True}])
+def test_confirmation_marker_requires_reviewed_bounded_selector_and_text(tmp_path, value):
+    manifest, facts = inputs()
+    manifest["confirmation"] = value
+    assert_blocked(lambda: load(tmp_path, manifest, facts))

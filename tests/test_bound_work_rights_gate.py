@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 import pytest
 from ejs.services.bound_work_rights_gate import evaluate_bound_work_rights
 
@@ -82,3 +82,35 @@ def test_malformed_evidence_fails_closed(bad_evidence):
     assert result["status"] == "BLOCKED"
     assert all(result[k] is False for k in
                ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+class NoOffset(tzinfo):
+    def utcoffset(self, value):
+        return None
+
+
+class InvalidOffset(tzinfo):
+    def utcoffset(self, value):
+        raise ValueError("SYNTHETIC PRIVATE TIMEZONE ERROR")
+
+
+@pytest.mark.parametrize("tz", [NoOffset(), InvalidOffset()])
+@pytest.mark.parametrize("field", ["now", "expires_at"])
+def test_nonaware_or_invalid_timezone_metadata_is_blocked_not_raised(tz, field):
+    current, record = NOW, evidence()
+    malformed = datetime(2027, 1, 1, tzinfo=tz)
+    if field == "now":
+        current = malformed
+    else:
+        record["expires_at"] = malformed
+    result = evaluate_bound_work_rights(record, TARGET, current)
+    assert result["status"] == "BLOCKED"
+    assert "PRIVATE" not in str(result)
+    assert all(result[k] is False for k in
+               ("write_authorized", "upload_authorized", "submit_authorized"))
+
+
+def test_valid_non_utc_offset_preserves_exact_expiry_instant():
+    record = evidence()
+    record["expires_at"] = (NOW + timedelta(seconds=1)).astimezone(timezone(timedelta(hours=3)))
+    assert evaluate_bound_work_rights(record, TARGET, NOW)["status"] == "REVIEW_READY"

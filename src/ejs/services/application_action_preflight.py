@@ -12,7 +12,7 @@ import re
 from urllib.parse import urlsplit
 import unicodedata
 
-from .bound_work_rights_gate import evaluate_bound_work_rights
+from .bound_work_rights_gate import _aware_datetime, _future_expiry, evaluate_bound_work_rights
 
 _ACTIONS = frozenset({"write", "upload", "submit"})
 
@@ -79,7 +79,7 @@ def evaluate_application_action_preflight(
     else:
         if not address.is_global:
             return denied
-    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+    if not _aware_datetime(now):
         return denied
     eligibility = evaluate_bound_work_rights(evidence, target, now)
     if eligibility["status"] != "REVIEW_READY":
@@ -94,11 +94,7 @@ def evaluate_application_action_preflight(
     if permission.get("reviewed") is not True or permission.get("revoked") is not False:
         return denied
     expiry = permission.get("expires_at")
-    if not isinstance(expiry, datetime) or expiry.tzinfo is None or expiry.utcoffset() is None:
-        return denied
-    if not isinstance(now, datetime) or now.tzinfo is None:
-        return denied
-    if expiry <= now:
+    if not _future_expiry(expiry, now):
         return denied
     # Still not an executable capability: the ATS writer must enforce its own
     # kill switch, endpoint allowlist, asset hashes, readback and idempotency.
