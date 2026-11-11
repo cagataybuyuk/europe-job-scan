@@ -309,3 +309,22 @@ def test_unicode_hostname_cannot_grant_mutation_authority(url, action):
     assert all(result[key] is False for key in (
         "write_authorized", "upload_authorized", "submit_authorized"
     ))
+
+
+@pytest.mark.parametrize("url", [
+    "https://bad..example/jobs/1",
+    "https://-bad.example/jobs/1",
+    "https://bad-.example/jobs/1",
+    "https://bad_name.example/jobs/1",
+    "https://" + "a" * 64 + ".example/jobs/1",
+])
+@pytest.mark.parametrize("action", ["write", "upload", "submit"])
+def test_malformed_dns_labels_never_grant_employer_mutation(url, action):
+    target = {**TARGET, "vacancy_url": url}
+    ev = {**evidence(), "vacancy_url": url}
+    grant = {**permission(action), "vacancy_url": url}
+    result = check(ev=ev, target=target, grant=grant, action=action)
+    assert result["status"] == "BLOCKED"
+    assert result["network_authorized"] is False
+    assert not any(result[key] for key in (
+        "write_authorized", "upload_authorized", "submit_authorized"))
