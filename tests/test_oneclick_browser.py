@@ -747,3 +747,20 @@ def test_entry_return_only_same_loaded_public_widget_is_exempt_from_challenge(ch
 def test_entry_return_widget_url_recognition_never_expands_to_foreign_auth(bad_url):
     from ejs.services.oneclick_browser import _widget_url
     assert not _widget_url(bad_url)
+
+
+@pytest.mark.parametrize('bad_url', [
+    WIDGET_URL.replace('www.linkedin.com', 'www.linkedin.com:443'),
+    WIDGET_URL.replace('www.linkedin.com', 'user@www.linkedin.com'),
+    WIDGET_URL.replace('https://www.linkedin.com', 'https://WWW.LINKEDIN.COM'),
+    WIDGET_URL.replace('www.linkedin.com', 'www.linkedin.com.'),
+    WIDGET_URL.replace('https://www.linkedin.com', 'https://www.linkedin.com\\\\@evil.test'),
+    WIDGET_URL + '&xdChannel=00000000-0000-0000-0000-000000000000',
+    WIDGET_URL + '&redirect_uri=https%3A%2F%2Fevil.test',
+    WIDGET_URL.replace('#xdOrigin=', '#unknown=1&xdOrigin='),
+    WIDGET_URL.replace('xdChannel=', 'xdChannel=%00'),
+    WIDGET_URL + '%0A',
+])
+def test_entry_return_widget_url_rejects_authority_and_fragment_smuggling(bad_url):
+    from ejs.services.oneclick_browser import _widget_url
+    assert not _widget_url(bad_url)
