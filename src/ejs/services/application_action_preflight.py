@@ -55,7 +55,12 @@ def evaluate_application_action_preflight(
     if (host.endswith(".") or "%" in host or host == "localhost"
             or host.endswith((".localhost", ".local", ".internal", ".home.arpa", ".onion", ".invalid"))):
         return denied
-    # Reject malformed DNS labels before transport-specific host normalization.\n    if (len(host) > 253 or any(\n            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label, re.IGNORECASE)\n            for label in host.split("."))):\n        return denied\n    # Numeric/legacy IPv4 spellings may resolve to private addresses even when
+    # Reject malformed DNS labels before transport-specific host normalization.
+    if (len(host) > 253 or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label, re.IGNORECASE)
+            for label in host.split("."))):
+        return denied
+    # Numeric/legacy IPv4 spellings may resolve to private addresses even when
     # ip_address() rejects their syntax (e.g. 2130706433 or 0177.0.0.1).
     # Never allow ambiguous numeric hostnames through to a later ATS transport.
     labels = host.split(".")
