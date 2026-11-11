@@ -48,6 +48,10 @@ def evaluate_application_action_preflight(
     # Do not accept loopback, link-local, private or otherwise non-public
     # destinations as employer ATS endpoints, even with matching consent.
     host = parsed.hostname
+    # IDNA/Unicode hostnames can be remapped by downstream DNS or HTTP clients.
+    # Keep mutation preflight ASCII-only until the transport pins a reviewed host.
+    if not host.isascii():
+        return denied
     if (host.endswith(".") or "%" in host or host == "localhost"
             or host.endswith((".localhost", ".local", ".internal", ".home.arpa", ".onion", ".invalid"))):
         return denied
