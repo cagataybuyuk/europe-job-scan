@@ -53,7 +53,7 @@ def evaluate_application_action_preflight(
     if not host.isascii():
         return denied
     if (host.endswith(".") or "%" in host or host == "localhost"
-            or host.endswith((".localhost", ".local", ".internal", ".home.arpa", ".onion", ".invalid"))):
+            or host.endswith((".localhost", ".local", ".internal", ".home.arpa", ".onion", ".invalid", ".localdomain"))):
         return denied
     # Reject malformed DNS labels before transport-specific host normalization.
     if (len(host) > 253 or any(
