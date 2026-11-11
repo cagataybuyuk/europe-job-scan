@@ -60,7 +60,12 @@ def evaluate_application_action_preflight(
             not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label, re.IGNORECASE)
             for label in host.split("."))):
         return denied
-    # Single-label hosts and numeric pseudo-TLDs may resolve via local search\n    # domains or transport-specific name parsing; never treat them as ATS FQDNs.\n    labels = host.split(".")\n    if len(labels) < 2 or not re.fullmatch(r"[a-z]{2,63}", labels[-1], re.IGNORECASE):\n        return denied\n    # Numeric/legacy IPv4 spellings may resolve to private addresses even when
+    # Single-label hosts and numeric pseudo-TLDs may resolve via local search
+    # domains or transport-specific name parsing; never treat them as ATS FQDNs.
+    labels = host.split(".")
+    if len(labels) < 2 or not re.fullmatch(r"[a-z]{2,63}", labels[-1], re.IGNORECASE):
+        return denied
+    # Numeric/legacy IPv4 spellings may resolve to private addresses even when
     # ip_address() rejects their syntax (e.g. 2130706433 or 0177.0.0.1).
     # Never allow ambiguous numeric hostnames through to a later ATS transport.
     labels = host.split(".")
