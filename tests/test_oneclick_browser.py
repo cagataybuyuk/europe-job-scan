@@ -18,8 +18,8 @@ from playwright.sync_api import sync_playwright
 from ejs.contracts.submit import SubmitAuthority
 from ejs.persistence.submission_ledger import SqliteSubmissionLedger
 from ejs.services.oneclick_browser import OneClickBrowser
-from ejs.services.oneclick_target import OneClickNetworkBoundary, OneClickTarget
-from ejs.services.single_application_runtime import SingleApplicationRuntime
+from ejs.services.oneclick_target import OneClickNetworkBoundary, OneClickTarget, native_entry_policy_enabled
+from ejs.services.single_application_runtime import SingleApplicationRuntime, digest
 
 
 ON = SubmitAuthority(browser_external_form_write=True, final_submit_runtime_flag=True,
@@ -116,7 +116,8 @@ def html_for(fixture, *, autosave=False, retry=False, copied_success=False,
              success_ack=True, awli=False, shadow_radio=False, unknown_required_role=False,
              custom_combobox=False, roleless_options=False, ambiguous_option=False,
              unavailable_option=False, aria_value_combobox=False, radio_group=False,
-             ambiguous_radio=False, unavailable_radio=False, unknown_required_group=False):
+             ambiguous_radio=False, unavailable_radio=False, unknown_required_group=False,
+             native_widget=False, unexpected_profile=False):
     target = fixture.target
     screening = """
       <label for="salary">Expected salary</label><input id="salary" type="number" required>
@@ -202,11 +203,15 @@ def html_for(fixture, *, autosave=False, retry=False, copied_success=False,
           {'await fetch(' + json.dumps(target.application_url) + ",{method:'POST',body:JSON.stringify(answers)}).catch(()=>{});" if retry else ''}
           if (response.ok) showSuccess();
         """
+    profile_effect = ('document.querySelector("#form").insertAdjacentHTML("beforeend",'
+        "'<section>Unreviewed parsed experience<button aria-label=\"Edit experience Unsupported parsed role\"></button></section>');"
+        if unexpected_profile else '')
     return f"""<!doctype html><html><head><link rel="icon" href="data:,"></head><body>
       <main id="form"><label for="first">First name</label><input id="first" required>
       <label for="email">Email</label><input id="email" type="email" required>
       <label for="resume">Resume</label><input id="resume" type="file" required><span id="uploaded"></span>
-      {'<button type="button">Apply with LinkedIn</button>' if awli else ''}
+      {'<button type="button" onclick="window.awliClicked=true">Apply with LinkedIn</button>' if awli else ''}
+      {'<iframe src="' + WIDGET_URL + '"></iframe>' if native_widget else ''}
       <button id="next" type="button">Next</button></main>
       <script>
         const initial = document.querySelector('#form').innerHTML;
@@ -227,6 +232,7 @@ def html_for(fixture, *, autosave=False, retry=False, copied_success=False,
           const body = new FormData();body.append('file',event.target.files[0]);
           const response = await fetch({json.dumps(target.resume_upload_url('CV.pdf'))},{{method:'POST',body}});
           const data = await response.json();document.querySelector('#uploaded').textContent=data.fileName;
+          {profile_effect}
         }});
         {'document.querySelector("#email").addEventListener("input",()=>fetch("/autosave",{method:"POST",body:"SYNTHETIC"}).catch(()=>{}));' if autosave else ''}
       </script></body></html>"""
@@ -251,12 +257,15 @@ def actual_driver(chromium, fixture, monkeypatch, **options):
             assert fixture.ledger.snapshot()["status"] == "Submitted / Unconfirmed"
             route.fulfill(status=201, content_type="application/json",
                 body=json.dumps(dict(success=options.get("success_ack", True))))
+        elif options.get('native_widget') and request.method == 'GET' and request.url == WIDGET_URL.split('#')[0]:
+            route.fulfill(status=200, content_type='text/html', body='<button>Apply with LinkedIn</button>')
         else:
             pytest.fail("An unreviewed request escaped the real network boundary")
 
     context.route("**/*", fulfill)  # The later production route runs first.
     context.on("request", lambda request: observed.append((request.method, request.url)))
-    boundary = OneClickNetworkBoundary(target, read_urls=(), resume_filename="CV.pdf")
+    boundary = OneClickNetworkBoundary(target, read_urls=tuple(fixture.manifest.get('read_urls', [])), resume_filename="CV.pdf",
+                                      reviewed_native_entry=native_entry_policy_enabled(fixture.manifest))
     browser = OneClickBrowser(context, boundary, fixture.manifest)
     original_expect_response = browser.page.expect_response
     monkeypatch.setattr(browser.page, "expect_response",
@@ -275,7 +284,7 @@ def review_shapes(chromium, fixture, monkeypatch, **options):
         fixture.manifest["steps"][0]["fingerprint"] = browser.inspect()["fingerprint"]
         browser.advance(fixture.manifest["steps"][0]["next"], fixture.target.screening_url)
         fixture.manifest["steps"][1]["fingerprint"] = browser.inspect()["fingerprint"]
-        assert [method for method, _, _ in seen] == ["GET"]
+        assert all(method == 'GET' for method, _, _ in seen)
 
 
 def run(fixture, browser):
@@ -747,6 +756,184 @@ def test_entry_return_only_same_loaded_public_widget_is_exempt_from_challenge(ch
 def test_entry_return_widget_url_recognition_never_expands_to_foreign_auth(bad_url):
     from ejs.services.oneclick_browser import _widget_url
     assert not _widget_url(bad_url)
+
+
+def enable_native_fixture(fixture, *, widget=False):
+    fixture.manifest['entry_policy'] = dict(strategy='native_verified_facts', decision_ref='USER-NATIVE-MVP-20261112')
+    fixture.manifest['read_urls'] = [WIDGET_URL.split('#')[0]] if widget else []
+    # This legacy synthetic fixture alias is corrected locally, without editing
+    # the constructor lines concurrently owned by the controller branch.
+    for field in fixture.manifest['steps'][1]['fields']:
+        if field['canonical_field'] == 'location.residency': field['canonical_field'] = 'work.currently_lives_in_ireland'
+    for fact in fixture.facts['facts']:
+        if fact['canonical_field'] == 'location.residency': fact['canonical_field'] = 'work.currently_lives_in_ireland'
+
+
+@pytest.mark.parametrize('widget', [False, True])
+def test_native_verified_facts_complete_without_awli_click_even_when_offered(chromium, fixture, monkeypatch, widget):
+    enable_native_fixture(fixture, widget=widget)
+    options = dict(awli=not widget, native_widget=widget)
+    review_shapes(chromium, fixture, monkeypatch, **options)
+    with actual_driver(chromium, fixture, monkeypatch, **options) as (browser, boundary, seen, _):
+        result = run(fixture, browser)
+        assert result['status'] == 'EMPLOYER_CONFIRMED', result
+        assert boundary.application_requests_allowed == 1
+        assert sum(method == 'GET' and url == WIDGET_URL.split('#')[0] for method, url, _ in seen) == int(widget)
+        assert browser.page.evaluate('window.awliClicked||false') is False
+
+
+def test_native_preference_cannot_be_injected_after_awli_handoff(chromium, fixture, monkeypatch):
+    with actual_driver(chromium, fixture, monkeypatch, awli=True) as (browser, _, _, _):
+        browser.open(fixture.target.entry_url)
+        with pytest.raises(PermissionError): browser.preferred_entry()
+        enable_native_fixture(fixture)
+        with pytest.raises(PermissionError, match='^APPLICATION_ENTRY_POLICY_CHANGED$'): browser.preferred_entry()
+        assert not fixture.ledger.has_intent()
+
+
+@pytest.mark.parametrize('mutation', ['auth-frame', 'policy-after-choice'])
+def test_native_choice_stops_on_auth_surface_or_mutated_policy(chromium, fixture, monkeypatch, mutation):
+    enable_native_fixture(fixture)
+    with actual_driver(chromium, fixture, monkeypatch, awli=True) as (browser, boundary, _, _):
+        browser.open(fixture.target.entry_url)
+        if mutation == 'auth-frame':
+            browser.page.locator('body').evaluate("el=>el.insertAdjacentHTML('beforeend','<iframe srcdoc=\"Unknown authentication\"></iframe>')")
+            with pytest.raises(PermissionError): browser.preferred_entry()
+        else:
+            browser.preferred_entry()
+            fixture.manifest['entry_policy']['decision_ref'] = 'UNREVIEWED-CHANGE'
+            with pytest.raises(PermissionError, match='^APPLICATION_ENTRY_POLICY_CHANGED$'): browser.inspect()
+        assert boundary.upload_requests_allowed == boundary.application_requests_allowed == 0
+        assert not fixture.ledger.has_intent()
+
+
+def test_native_unknown_parsed_profile_after_cv_stops_before_any_application_post(chromium, fixture, monkeypatch):
+    enable_native_fixture(fixture)
+    review_shapes(chromium, fixture, monkeypatch, unexpected_profile=True)
+    with actual_driver(chromium, fixture, monkeypatch, unexpected_profile=True) as (browser, boundary, seen, _):
+        result = run(fixture, browser)
+        assert result['status'] == 'BLOCKED' and result['applied'] is False
+        assert boundary.upload_requests_allowed == 1 and boundary.application_requests_allowed == 0
+        assert not fixture.ledger.has_intent()
+        assert [method for method, _, _ in seen] == ['GET', 'POST']
+
+
+@contextmanager
+def profile_driver(chromium, fixture, monkeypatch, **faults):
+    from html import escape
+    phase = fixture.manifest['steps'][0]['reviewed_profile_corrections']
+    edit = phase['edits'][0]; plan = edit['editor']
+    markup = '<div id="profile"><section id="profile-target" class="profile-card"><span id="profile-target-text" style="white-space:pre-line">'
+    markup += escape('WRONG IDENTITY' if faults.get('identity') else phase['cards'][0]['observed_text'])
+    markup += '</span><button id="profile-edit" aria-label="' + escape(edit['edit']['label']) + '"></button></section>'
+    markup += '<section id="profile-other" class="profile-card"><span id="profile-other-text">Verified untouched record</span><button aria-label="Edit '
+    markup += phase['cards'][1]['record_type'] + ' Other record"></button></section></div><div id="profile-editor" hidden>'
+    for field in plan['fields']:
+        field_id = field['selector'][1:]
+        markup += '<label for="' + field_id + '">' + escape(field['label']) + '</label>'
+        required = ' required' if field['required'] else ''
+        kind = 'date' if faults.get('day') and field['label'] == 'From' else field['kind']
+        initial = '2026-09-01' if kind == 'date' else '2026-09' if kind == 'month' else 'Imported value'
+        if field['label'] == 'Description':
+            markup += '<textarea id="' + field_id + '"' + required + '>Imported description</textarea>'
+        else:
+            markup += '<input id="' + field_id + '" type="' + kind + '" value="' + initial + '"' + required + '>'
+    markup += '<button id="profile-save" type="button">Save</button><button id="profile-cancel" type="button">Cancel</button></div>'
+    script = """<script>
+      const profileFields=FIELDS;const profileFaults=FAULTS;const kind=KIND;
+      document.querySelector('#profile-edit').addEventListener('click',()=>{
+        document.querySelector('#profile-editor').hidden=false;
+        if(profileFaults.extra){const input=document.createElement('input');input.setAttribute('aria-label','Unexpected optional field');document.querySelector('#profile-editor').append(input);}
+      });
+      document.querySelector('#profile-cancel').addEventListener('click',()=>document.querySelector('#profile-editor').hidden=true);
+      document.querySelector('#profile-save').addEventListener('click',()=>{
+        const values={};for(const field of profileFields){const input=document.querySelector(field.selector);values[field.label]=field.kind==='checkbox'?input.checked:input.value;}
+        let summary;
+        if(kind==='experience')summary=values.Title+'\\n'+values.Company+'\\n'+values.From+' – '+values.To+'\\n'+values.Description;
+        else summary=values.Institution+'\\n'+values.Degree+'\\n'+(values.From&&values.To?values.From+' – '+values.To:values.Description);
+        document.querySelector('#profile-target-text').textContent=summary;
+        document.querySelector('#profile-editor').hidden=true;
+        if(profileFaults.other)document.querySelector('#profile-other-text').textContent='UNREVIEWED OTHER CHANGE';
+        if(profileFaults.network)fetch('/unreviewed-profile-save',{method:'POST',body:'SYNTHETIC'}).catch(()=>{});
+      });
+    </script>""".replace('FIELDS', json.dumps(plan['fields'])).replace('FAULTS', json.dumps(faults)).replace('KIND', json.dumps(phase['cards'][0]['record_type']))
+    rendered = html_for(fixture).replace('<head>', '<head><meta charset="utf-8">').replace('</main>', markup + '</main>').replace('</body>', script + '</body>')
+    with monkeypatch.context() as local:
+        local.setitem(globals(), 'html_for', lambda *_args, **_options: rendered)
+        with actual_driver(chromium, fixture, monkeypatch) as state:
+            yield state
+
+
+def review_profile_shapes(chromium, fixture, monkeypatch):
+    from ejs.services.oneclick_browser import _DESCRIBE
+    plan = fixture.manifest['steps'][0]['reviewed_profile_corrections']['edits'][0]['editor']
+    with profile_driver(chromium, fixture, monkeypatch) as (browser, _, _, _):
+        browser.open(fixture.target.entry_url)
+        browser.preferred_entry()
+        fixture.manifest['steps'][0]['fingerprint'] = browser.inspect()['fingerprint']
+        browser.page.locator('#profile-edit').click()  # Independent synthetic reviewer, never a live discovery click.
+        editor = browser.page.locator('#profile-editor')
+        shape = {'controls': sorted([loc.evaluate(_DESCRIBE) for loc, _ in browser._controls(editor)], key=lambda x: json.dumps(x, sort_keys=True)),
+            'actions': sorted([dict(label=b.inner_text().strip(), disabled=not b.is_enabled(), type=b.get_attribute('type') or '')
+                               for b in editor.locator('button').all()], key=lambda x: json.dumps(x, sort_keys=True))}
+        plan['fingerprint'] = digest(shape)
+        browser.page.locator('#profile-cancel').click()
+        browser.advance(fixture.manifest['steps'][0]['next'], fixture.target.screening_url)
+        fixture.manifest['steps'][1]['fingerprint'] = browser.inspect()['fingerprint']
+
+
+@pytest.mark.parametrize('record_type,omit_month', [('experience', False), ('education', True)])
+def test_profile_source_backed_native_edit_save_then_normal_flow_preserves_other_cards(chromium, fixture, monkeypatch, record_type, omit_month):
+    from tests.test_single_application_inputs import correction_plan
+    enable_native_fixture(fixture)
+    correction_plan(fixture.manifest, fixture.facts, record_type=record_type, omit_month=omit_month)
+    review_profile_shapes(chromium, fixture, monkeypatch)
+    with profile_driver(chromium, fixture, monkeypatch) as (browser, boundary, seen, _):
+        result = run(fixture, browser)
+        assert result['status'] == 'EMPLOYER_CONFIRMED', result
+        assert browser._profile_corrections_applied is True
+        assert boundary.application_requests_allowed == boundary.upload_requests_allowed == 1
+        assert [method for method, _, _ in seen] == ['GET', 'POST', 'POST']
+
+
+@pytest.mark.parametrize('fault', ['identity', 'extra', 'other', 'network', 'day'])
+def test_profile_edit_identity_complete_controls_other_cards_and_write_boundaries_fail_closed(chromium, fixture, monkeypatch, fault):
+    from tests.test_single_application_inputs import correction_plan
+    enable_native_fixture(fixture)
+    correction_plan(fixture.manifest, fixture.facts)
+    review_profile_shapes(chromium, fixture, monkeypatch)
+    with profile_driver(chromium, fixture, monkeypatch, **{fault: True}) as (browser, boundary, _, _):
+        result = run(fixture, browser)
+        assert result['status'] == 'BLOCKED', result
+        assert boundary.upload_requests_allowed == boundary.application_requests_allowed == 0
+        assert not fixture.ledger.has_intent()
+
+
+@pytest.mark.parametrize('ordinary_prefill', [False, True])
+def test_retained_return_defers_only_exact_reviewed_profile_card_not_other_prefill(chromium, fixture, monkeypatch, ordinary_prefill):
+    from tests.test_single_application_inputs import correction_plan
+    enable_native_fixture(fixture)
+    fixture.manifest.pop('entry_policy')  # Separate, unchanged retained-return library lane.
+    correction_plan(fixture.manifest, fixture.facts)
+    review_profile_shapes(chromium, fixture, monkeypatch)
+    with profile_driver(chromium, fixture, monkeypatch) as (browser, boundary, seen, _):
+        browser.open(fixture.target.entry_url)
+        browser.page.locator('body').evaluate("el=>el.insertAdjacentHTML('beforeend','<button>Apply with LinkedIn</button>')")
+        if ordinary_prefill:
+            browser.page.locator('body').evaluate("el=>el.insertAdjacentHTML('beforeend','<input aria-label=\"Unreviewed optional field\" value=\"UNVERIFIED\">')")
+        with pytest.raises(PermissionError): browser.preferred_entry()
+        observation, reviewed = reviewed_return(browser, fixture)
+        if ordinary_prefill:
+            with pytest.raises(PermissionError): browser.accept_reviewed_entry_return(observation['observation_id'], reviewed)
+            assert browser.page.locator('#profile-editor').is_hidden()
+        else:
+            browser.accept_reviewed_entry_return(observation['observation_id'], reviewed)
+            browser.preferred_entry()
+            browser.correct_reviewed_profile()
+            assert browser.page.locator('#profile-target').inner_text().strip() == reviewed['steps'][0]['profile_assertions'][0]['value']
+            assert browser.page.locator('#profile-other').inner_text().strip() == 'Verified untouched record'
+        assert [method for method, _, _ in seen] == ['GET']
+        assert boundary.upload_requests_allowed == boundary.application_requests_allowed == 0 and not fixture.ledger.has_intent()
 
 
 def test_retained_cli_controller_actual_page_private_pins_and_one_confirmed_fixture_application(

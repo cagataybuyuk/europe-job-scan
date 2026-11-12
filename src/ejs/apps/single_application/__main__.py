@@ -18,7 +18,9 @@ from ejs.persistence.submission_ledger import SqliteSubmissionLedger
 from ejs.services.application_outcome import write_confirmed_outcome
 from ejs.services.oneclick_browser import OneClickBrowser
 from ejs.services.retained_entry_controller import RetainedEntryController
-from ejs.services.oneclick_target import OneClickTarget, OneClickNetworkBoundary
+from ejs.services.oneclick_target import (
+    OneClickTarget, native_entry_policy_enabled, reviewed_oneclick_boundary,
+)
 from ejs.services.single_application_inputs import load_reviewed_application_inputs
 from ejs.services.single_application_runtime import SingleApplicationRuntime, read_approved_cv, require
 
@@ -76,8 +78,10 @@ def main(argv=None) -> int:
         if ledger.has_intent():
             print(json.dumps({'status': 'DUPLICATE_OR_UNCERTAIN', 'browser_action_performed': False, 'applied': False}))
             return 2
-        boundary = OneClickNetworkBoundary(target, read_urls=tuple(manifest['read_urls']),
-                                           resume_filename=manifest['cv']['approved_filename'])
+        # New MVP executions use the explicit reviewed native-first decision.
+        # Never inject it into externally pinned inputs or change it mid-session.
+        require(native_entry_policy_enabled(manifest), 'APPLICATION_NATIVE_ENTRY_POLICY_REQUIRED')
+        boundary = reviewed_oneclick_boundary(target, manifest)
         from playwright.sync_api import sync_playwright
         with sync_playwright() as playwright:
             browser = context = None

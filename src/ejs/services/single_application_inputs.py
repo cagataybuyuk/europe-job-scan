@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import stat
 from urllib.parse import urlsplit
+from ejs.services.oneclick_target import native_entry_policy_enabled
 
 
 _ERROR = "APPLICATION_INPUT_REVIEW_REQUIRED"
@@ -30,6 +31,18 @@ _PROFILE_FIELD = re.compile(
     r"profile\.(?:experience\.[0-9]{1,2}\.(?:title|company|dates|description|summary)"
     r"|education\.[0-9]{1,2}\.(?:school|degree|dates|description|summary))"
 )
+_PROFILE_EDIT_FIELD = re.compile(
+    r"profile\.(?:experience\.[0-9]{1,2}\.(?:title|company|office_location|description|start_month|end_month|currently_working)"
+    r"|education\.[0-9]{1,2}\.(?:school|major|degree|school_location|description|start_month|end_month))"
+)
+_PROFILE_EDITOR_FIELDS = {
+    "experience": {"Title": "title", "Company": "company", "Office location": "office_location",
+                   "Description": "description", "From": "start_month", "To": "end_month",
+                   "I currently work here": "currently_working"},
+    "education": {"Institution": "school", "Major": "major", "Degree": "degree",
+                  "School location": "school_location", "Description": "description",
+                  "From": "start_month", "To": "end_month"},
+}
 
 ALLOWED_CANONICAL_FIELDS = frozenset({
     "candidate.first_name", "candidate.last_name", "candidate.email",
@@ -144,7 +157,8 @@ def _scalar(value: object) -> bool:
 def _canonical(value: object) -> bool:
     # Deliberately no trim/casefold/alias promotion of an unknown canonical key.
     return isinstance(value, str) and (value in ALLOWED_CANONICAL_FIELDS
-                                      or bool(_PROFILE_FIELD.fullmatch(value)))
+                                      or bool(_PROFILE_FIELD.fullmatch(value))
+                                      or bool(_PROFILE_EDIT_FIELD.fullmatch(value)))
 
 
 def _bounded_text(value: object, limit: int) -> bool:
@@ -184,7 +198,11 @@ def _validate_facts(facts: dict, now: datetime) -> dict[str, dict]:
         _fresh(fact.get("verified_at"), now, 30 * 86_400)
         if _needs_explicit_source(key):
             _require(bool(_EXPLICIT_SOURCE.fullmatch(fact["source_ref"])))
-        if _PROFILE_FIELD.fullmatch(key):
+        if key.endswith(".currently_working") and _PROFILE_EDIT_FIELD.fullmatch(key):
+            _require(type(fact["value"]) is bool and bool(_EXPLICIT_SOURCE.fullmatch(fact["source_ref"])))
+        elif _PROFILE_EDIT_FIELD.fullmatch(key):
+            _require(type(fact["value"]) is str)
+        elif _PROFILE_FIELD.fullmatch(key):
             _require(_bounded_text(fact["value"], 10_000))
         by_field[key] = fact
     return by_field
@@ -271,6 +289,94 @@ def _validate_profile_assertions(assertions: object, facts: dict[str, dict], sel
         seen.add(canonical)
 
 
+def _validate_profile_corrections(step: dict, facts: dict[str, dict]) -> None:
+    if "reviewed_profile_corrections" not in step:
+        return
+    phase = step["reviewed_profile_corrections"]
+    _require(type(phase) is dict and set(phase) == {"container_selector", "card_selector", "cards", "edits"}
+             and _bounded_text(phase["container_selector"], 512) and _bounded_text(phase["card_selector"], 512))
+    cards, edits = phase["cards"], phase["edits"]
+    _require(type(cards) is list and 0 < len(cards) <= 20 and type(edits) is list and 0 < len(edits) <= 10)
+    assertions = {a["selector"]: a for a in step.get("profile_assertions", [])}
+    by_selector, identities = {}, set()
+    for card in cards:
+        _require(type(card) is dict and set(card) == {"selector", "record_type", "record_index", "observed_text"}
+                 and _bounded_text(card["selector"], 512) and card["selector"] not in by_selector
+                 and card["record_type"] in _PROFILE_EDITOR_FIELDS
+                 and type(card["record_index"]) is int and 0 <= card["record_index"] <= 99
+                 and _bounded_text(card["observed_text"], 20_000))
+        identity = (card["record_type"], card["record_index"])
+        _require(identity not in identities)
+        identities.add(identity)
+        assertion = assertions.get(card["selector"])
+        _require(assertion is not None and assertion["canonical_field"] ==
+                 f"profile.{card['record_type']}.{card['record_index']}.summary")
+        by_selector[card["selector"]] = card
+    seen = set()
+    for edit in edits:
+        _require(type(edit) is dict and set(edit) == {"card_selector", "edit", "editor"}
+                 and edit["card_selector"] in by_selector and edit["card_selector"] not in seen)
+        seen.add(edit["card_selector"])
+        card = by_selector[edit["card_selector"]]
+        action, editor = edit["edit"], edit["editor"]
+        action_name = "Edit " + card["record_type"]
+        _require(type(action) is dict and set(action) == {"selector", "label"}
+                 and _bounded_text(action["selector"], 512)
+                 and isinstance(action["label"], str)
+                 and bool(re.fullmatch(re.escape(action_name) + r"(?: [^\r\n]{1,1000})?", action["label"])))
+        _require(type(editor) is dict and set(editor) == {"selector", "fingerprint", "fields", "save"}
+                 and _bounded_text(editor["selector"], 512) and isinstance(editor["fingerprint"], str)
+                 and bool(_HEX_64.fullmatch(editor["fingerprint"]))
+                 and type(editor["fields"]) is list)
+        expected = _PROFILE_EDITOR_FIELDS[card["record_type"]]
+        _require(len(editor["fields"]) == len(expected))
+        labels, selectors, keys, values = set(), set(), set(), {}
+        for field in editor["fields"]:
+            _require(type(field) is dict and set(field) in ({
+                "key", "selector", "label", "kind", "required", "canonical_field", "value", "provenance_ref"}, {
+                "key", "selector", "label", "kind", "required", "canonical_field", "value", "provenance_ref", "omission_policy_ref"}))
+            label = field["label"]
+            _require(label in expected and label not in labels and _opaque(field["key"], 128)
+                     and field["key"] not in keys and _bounded_text(field["selector"], 512)
+                     and field["selector"] not in selectors and type(field["required"]) is bool)
+            canonical = f"profile.{card['record_type']}.{card['record_index']}.{expected[label]}"
+            fact = facts.get(canonical)
+            _require(field["canonical_field"] == canonical and fact is not None
+                     and type(field["value"]) is type(fact["value"]) and field["value"] == fact["value"]
+                     and field["provenance_ref"] == fact["source_ref"])
+            if label in {"From", "To"}:
+                _require(field["kind"] == "month" and isinstance(field["value"], str)
+                         and (bool(re.fullmatch(r"(?:19|20)[0-9]{2}-(?:0[1-9]|1[0-2])", field["value"]))
+                              or (field["value"] == "" and field["required"] is False
+                                  and fact.get("omission_reason") == "month_unknown"
+                                  and field.get("omission_policy_ref") == "PROFILE-OMIT-UNKNOWN-MONTH")))
+                _require(field["value"] == "" or "omission_policy_ref" not in field)
+            elif label == "I currently work here":
+                _require(field["kind"] == "checkbox" and type(field["value"]) is bool and "omission_policy_ref" not in field)
+            else:
+                _require(field["kind"] in {"text", "select"} and type(field["value"]) is str
+                         and (not field["required"] or bool(field["value"].strip())) and "omission_policy_ref" not in field)
+            labels.add(label); selectors.add(field["selector"]); keys.add(field["key"])
+            values[label] = field["value"]
+        _require(labels == set(expected) and (not values["From"] or not values["To"] or values["From"] <= values["To"]))
+        save = editor["save"]
+        _require(type(save) is dict and set(save) == {"selector", "label"}
+                 and _bounded_text(save["selector"], 512) and save["selector"] not in selectors
+                 and save["label"] == "Save")
+    for selector, card in by_selector.items():
+        _require(selector in seen or card["observed_text"] == assertions[selector]["value"])
+
+
+def validate_reviewed_profile_corrections(step: dict, facts: dict, *, now: datetime) -> None:
+    """Bind profile-only edits to verified facts; never broadens ordinary fields."""
+    try:
+        verified = _validate_facts(facts, now)
+        _validate_profile_assertions(step.get('profile_assertions', []), verified, set())
+        _validate_profile_corrections(step, verified)
+    except Exception:
+        raise PermissionError(_ERROR) from None
+
+
 def _validate_upload(upload: object, keys: set, selectors: set) -> None:
     _require(isinstance(upload, dict) and _opaque(upload.get("key"), 128)
              and upload["key"] not in keys and _bounded_text(upload.get("selector"), 512)
@@ -289,6 +395,7 @@ def _validate_button(button: object, labels: frozenset, selectors: set) -> None:
 
 
 def _validate_runtime_sections(data: dict) -> None:
+    native_entry_policy_enabled(data)
     urls = data.get("read_urls")
     _require(isinstance(urls, list) and len(urls) <= 1000
              and all(_exact_https_url(url) for url in urls) and len(set(urls)) == len(urls))
@@ -367,6 +474,8 @@ def load_reviewed_application_inputs(manifest_path: Path, facts_path: Path, *, m
             for field in fields:
                 _validate_field(field, by_field, keys, selectors)
             _validate_profile_assertions(step.get("profile_assertions", []), by_field, selectors)
+            _require("reviewed_profile_corrections" not in step or index == 0)
+            _validate_profile_corrections(step, by_field)
             if "upload" in step:
                 _validate_upload(step["upload"], keys, selectors)
                 upload_count += 1

@@ -30,6 +30,7 @@ def bootstrap(monkeypatch):
         'requisition_id': 'REF7089X',
         'posting_url': 'https://jobs.smartrecruiters.com/Version1/744000159638089--senior-business-analyst'},
         'cv': {'approved_filename': 'CV.pdf'}, 'read_urls': [],
+        'entry_policy': {'strategy': 'native_verified_facts', 'decision_ref': 'USER-NATIVE-MVP-20261112'},
         'opportunity_key': 'fixture:opportunity', 'execution_id': 'fixture:execution',
         'candidate_profile_version': 'fixture:v1'}
     state = SimpleNamespace(manifest=manifest, calls=calls, occupied=False, cleanup_fails=False,
@@ -102,6 +103,31 @@ def test_unreviewed_source_or_upload_destination_stops_before_browser(bootstrap,
 
 
 def test_occupied_canonical_ledger_never_opens_browser(bootstrap, capsys):
+    bootstrap.occupied = True
+    assert app.main(bootstrap.arguments + ['--execute-reviewed-first-application']) == 2
+    assert report(capsys)['status'] == 'DUPLICATE_OR_UNCERTAIN'
+    assert 'playwright' not in bootstrap.calls
+
+
+@pytest.mark.parametrize('policy', [None, {},
+    {'strategy': 'linkedin_first', 'decision_ref': 'USER-NATIVE-MVP-20261112'},
+    {'strategy': 'native_verified_facts', 'decision_ref': 'unreviewed'},
+    {'strategy': 'native_verified_facts', 'decision_ref': 'USER-NATIVE-MVP-20261112', 'grant': True},
+])
+def test_execution_requires_exact_native_entry_decision_before_browser(bootstrap, capsys, policy):
+    if policy is None:
+        bootstrap.manifest.pop('entry_policy')
+    else:
+        bootstrap.manifest['entry_policy'] = policy
+    assert app.main(bootstrap.arguments + ['--execute-reviewed-first-application']) == 2
+    assert report(capsys)['status'] == 'BLOCKED'
+    assert 'playwright' not in bootstrap.calls
+
+
+def test_legacy_validation_and_consumed_budget_never_require_new_entry_authority(bootstrap, capsys):
+    bootstrap.manifest.pop('entry_policy')
+    assert app.main(bootstrap.arguments) == 0
+    assert report(capsys)['status'] == 'INPUTS_VALIDATED'
     bootstrap.occupied = True
     assert app.main(bootstrap.arguments + ['--execute-reviewed-first-application']) == 2
     assert report(capsys)['status'] == 'DUPLICATE_OR_UNCERTAIN'

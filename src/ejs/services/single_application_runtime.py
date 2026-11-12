@@ -23,6 +23,7 @@ from ejs.domain.template_history import DriftState, MappingConfidence
 from ejs.persistence.submission_ledger import SqliteSubmissionLedger
 from ejs.services.cv_asset_gate import evaluate_cv_asset
 from ejs.services.oneclick_target import OneClickTarget
+from ejs.services.single_application_inputs import validate_reviewed_profile_corrections
 from ejs.services.submit_policy import create_submission_attempt, validate_pre_submit
 from ejs.services.vacancy_evidence_gate import VacancyEvidence, SponsorshipReviewPolicy, evaluate_vacancy_evidence
 
@@ -143,6 +144,7 @@ class ConfirmationObservation:
 class ApplicationBrowser(Protocol):
     def open(self, url: str) -> None: ...
     def preferred_entry(self) -> None: ...
+    def correct_reviewed_profile(self) -> None: ...
     def accept_reviewed_entry_return(self, observation_id: str, manifest: dict) -> None: ...
     def inspect(self) -> dict: ...
     def write(self, binding: dict) -> None: ...
@@ -223,6 +225,8 @@ class SingleApplicationRuntime:
             # bootstrap never accepts one from a manifest or CLI argument.
             verify_posting(target, manifest, facts, posting_payload if posting_payload is not None else fetch_posting(target), now)
             cv = read_approved_cv(cv_path, manifest['cv'])
+            if 'reviewed_profile_corrections' in manifest['steps'][0]:
+                validate_reviewed_profile_corrections(manifest['steps'][0], facts, now=now)
             entry_in_progress = True
             if entry_observation_id is None:
                 self.browser.open(target.entry_url)
@@ -230,6 +234,9 @@ class SingleApplicationRuntime:
                 self.browser.accept_reviewed_entry_return(entry_observation_id, manifest)
             self.browser.preferred_entry()
             entry_in_progress = False
+            if 'reviewed_profile_corrections' in manifest['steps'][0]:
+                self._surface(manifest['steps'][0])
+                self.browser.correct_reviewed_profile()
             observed = []
             uploads = []
             for index, step in enumerate(manifest['steps']):

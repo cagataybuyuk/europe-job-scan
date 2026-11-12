@@ -13,6 +13,9 @@ it only validates private input pins and the CV; it opens no browser and creates
 no submission ledger. Execution additionally requires
 `--execute-reviewed-first-application`, an independently reviewed source commit
 and two separately pinned private files. The source worktree must be clean.
+New MVP executions also require the exact native-first `entry_policy` selected
+in USER-NATIVE-MVP-20261112. The command checks the consumed canonical budget
+before creating a browser and never injects a strategy into pinned inputs.
 There is no API key, model endpoint, purchase, environment-wide submit flag or
 cloud deployment in this lane.
 
@@ -21,7 +24,9 @@ The manifest schema is `EJS-SINGLE-APPLICATION-1`; the fact schema is
 Manifest and fact hashes are supplied outside those files. Every field value and
 source reference must match a fresh, approved fact with the same exact type.
 Salary, privacy, neutral demographic handling and work-right answers have explicit
-policy/source rules. Profile assertions are read-only and source-matched.
+policy/source rules. Profile assertions remain read-only and source-matched;
+separate [reviewed native corrections](MVP_NATIVE_PROFILE_CORRECTION.md) may edit
+only exact existing draft records through the supported editor/Save contract.
 
 The trusted review also pins the target/publication, current public posting bytes,
 role fit and mandatory requirements, complete form structure, visible labels,
@@ -213,6 +218,7 @@ actual Chromium integration test pumps the retained owned page, exchanges privat
 observe/resume commands, loads real pinned input files, and confirms exactly one
 synthetic application POST through the real runtime and temporary SQLite ledger.
 Every HTTPS request is fulfilled locally. This proves a TEST same-page return,
-not an OAuth bridge, grant or additional employer application. Experience/education cards remain assertions only; correction requires
-separately reviewed existing native editor/control/save bindings and endpoint
-review, with verified facts and no guessed selectors or values.
+not an OAuth bridge, grant or additional employer application. The separate
+[native profile correction contract](MVP_NATIVE_PROFILE_CORRECTION.md) retains
+source, editor and read-phase network guards. Actual employer editor acceptance
+remains unproven; unsupported controls or unreviewed Save writes stop.

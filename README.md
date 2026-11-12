@@ -14,6 +14,8 @@ gates. No multi-job production rollout is enabled by this result.
 See [`docs/MVP_INTEGRATED_SINGLE_APPLICATION.md`](docs/MVP_INTEGRATED_SINGLE_APPLICATION.md)
 for the current local lane, evidence and remaining limits. Older milestone
 documents retain their original test/authority scope.
+The [native-first entry and profile correction contract](docs/MVP_NATIVE_PROFILE_CORRECTION.md)
+records USER-NATIVE-MVP-20261112 and the separately reviewed draft editor limits.
 
 ## Production target
 

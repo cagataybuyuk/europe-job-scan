@@ -67,6 +67,11 @@ class RecordingBrowser:
         if self.entry_barrier is not None:
             self.entry_barrier.wait(timeout=10)
 
+    def correct_reviewed_profile(self):
+        self.calls.append(("profile_correction",))
+        if getattr(self, "profile_error", None):
+            raise self.profile_error
+
     def accept_reviewed_entry_return(self, observation_id, manifest):
         self.calls.append(("accept_return", observation_id))
         if observation_id != "fixture-reviewed-return":
@@ -443,6 +448,42 @@ def test_private_values_cv_name_and_exception_text_are_not_exposed(scenario, cap
         assert private not in public and private.encode() not in scenario.ledger.path.read_bytes()
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
+
+
+def test_reviewed_profile_phase_precedes_regular_fields_and_resume_upload(scenario):
+    from tests.test_single_application_inputs import correction_plan
+    correction_plan(scenario.manifest, scenario.facts)
+    assert scenario.run()['status'] == 'EMPLOYER_CONFIRMED'
+    actions = [call[0] for call in scenario.browser.calls]
+    assert actions.count('profile_correction') == 1
+    assert actions.index('profile_correction') < actions.index('write') < actions.index('upload')
+
+
+def test_unverified_profile_edit_value_stops_before_any_browser_action(scenario):
+    from tests.test_single_application_inputs import correction_plan
+    phase = correction_plan(scenario.manifest, scenario.facts)
+    phase['edits'][0]['editor']['fields'][0]['value'] = 'Unverified imported value'
+    assert scenario.run()['status'] == 'BLOCKED'
+    assert scenario.browser.calls == [] and not scenario.ledger.has_intent()
+
+
+def test_profile_failure_never_continues_to_fields_cv_or_intent(scenario):
+    from tests.test_single_application_inputs import correction_plan
+    correction_plan(scenario.manifest, scenario.facts)
+    scenario.browser.profile_error = PermissionError('APPLICATION_PROFILE_EDITOR_CHANGED')
+    assert scenario.run()['status'] == 'BLOCKED'
+    assert scenario.browser.count('profile_correction') == 1
+    assert scenario.browser.count('write') == scenario.browser.count('upload') == scenario.browser.count('submit') == 0
+    assert not scenario.ledger.has_intent()
+
+
+def test_occupied_first_application_budget_blocks_profile_correction_too(scenario):
+    assert scenario.run()['status'] == 'EMPLOYER_CONFIRMED'
+    before = list(scenario.browser.calls)
+    from tests.test_single_application_inputs import correction_plan
+    correction_plan(scenario.manifest, scenario.facts)
+    assert scenario.run()['status'] == 'DUPLICATE_OR_UNCERTAIN'
+    assert scenario.browser.calls == before and scenario.browser.count('profile_correction') == 0
 
 
 def resume(scenario, observation_id="fixture-reviewed-return", authority=ON):
