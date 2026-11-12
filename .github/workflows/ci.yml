@@ -120,6 +120,8 @@ jobs:
           tests/test_application_outcome.py
           tests/test_single_application_bootstrap.py
           tests/test_retained_entry_controller.py
+          tests/test_reviewed_application_scope.py
+          tests/test_central_application_outcome.py
           tests/test_work_rights_evidence_gate.py
           tests/test_bound_work_rights_gate.py
           tests/test_application_action_preflight.py
