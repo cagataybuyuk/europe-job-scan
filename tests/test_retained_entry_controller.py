@@ -436,6 +436,12 @@ def test_observation_is_strict_value_free_fresh_utc_metadata(lane, monkeypatch, 
     ({'strategy': 'native_verified_facts_first', 'decision_ref': 'USER-NATIVE-MVP-20261112'}, None),
     ({'strategy': 'native_verified_facts_first', 'verified_return_only': True},
      {'strategy': 'native_verified_facts_first', 'verified_return_only': 1}),
+    ({'strategy': 'native_verified_facts_first', 'work_authorization': 'UNKNOWN'},
+     {'strategy': 'native_verified_facts_first', 'work_authorization': 'YES'}),
+    ({'strategy': 'native_verified_facts_first', 'sponsorship': 'UNKNOWN'},
+     {'strategy': 'native_verified_facts_first', 'sponsorship': 'NOT_REQUIRED'}),
+    ({'strategy': 'native_verified_facts_first', 'legal_answer_approved': False},
+     {'strategy': 'native_verified_facts_first', 'legal_answer_approved': True}),
 ])
 def test_return_review_cannot_change_optional_entry_strategy(lane, initial, reviewed):
     if initial is not None:
