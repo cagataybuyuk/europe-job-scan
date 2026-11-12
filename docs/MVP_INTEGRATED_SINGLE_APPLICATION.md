@@ -139,3 +139,80 @@ CI runs pure suites in `core-regression` and the Chromium suite in
 `upload-e2e-regression`. Browser dependencies must be installed through the
 existing project bootstrap. No test uses the canonical first-live ledger or sends
 requests to an employer.
+
+## Bounded retained CLI controller (TEST integration)
+
+`--retain-reviewed-entry` requires `--execute-reviewed-first-application`. It
+retains the SAME driver, browser context, runtime and canonical ledger only when
+entry returns `HUMAN_HANDOFF_REQUIRED`. `--handoff-timeout-seconds` is a literal
+integer from 1 to 600 (default 300). The absolute deadline begins before source
+and private-state preflight. Git checks have explicit timeouts no longer than ten
+seconds or the remaining handoff interval; observe/resume are rechecked after
+validation and cannot begin after the deadline. Default input validation remains
+browser-free.
+Without the retained option, the command keeps its previous close-and-report
+behavior.
+
+This option does not implement a LinkedIn/OAuth bridge. The network boundary,
+latched faults, permission/CAPTCHA handoffs and no-native-fallback rule are
+unchanged. A denied LinkedIn request is not reset merely because the browser
+remains open. The already Confirmed first-live ledger remains consumed; this
+option cannot open another application, create a replacement ledger or retry it.
+
+The trusted bootstrap fixes the private control directory below the existing
+canonical state root: `entry-return-controller`. There is no control-directory,
+ledger, browser-attachment or arbitrary command-path CLI argument. The controller
+requires an owner-only directory, holds an exclusive `active.lock`, and creates
+owner-only `session.json`. The latter contains a random session binding, the
+bounded timeout and explicit `oauth_bridge_implemented=false` metadata.
+
+An independently trusted local operator writes an owner-only `request.json` in
+that same directory. Each command must have the matching `session_id`, a literal
+integer `sequence` starting at 1 and increasing by one, and exactly these keys:
+
+- `observe_return`: `session_id`, `sequence`, `action` only. May run once. It calls
+  the existing owned-driver observer and creates private `observation.json`
+  containing only a 48-hex nonce, 64-hex structural fingerprint and a fresh UTC
+  timestamp. Malformed, stale, future, non-UTC or value-bearing observations are
+  rejected before export. The private value/content proof is never exported.
+- `resume_pinned_review`: the same three keys plus `manifest_sha256` and
+  `facts_sha256`. May run once after observation. The fixed private files are
+  `reviewed-manifest.json` and `reviewed-facts.json`; commands cannot choose paths.
+  Their digests must come from the independent reviewer. The existing input
+  compiler checks private ownership/mode, exact bytes, fresh facts/review and the
+  nonce-bound return review. The existing 120-second observation lifetime is not
+  extended by this controller.
+- `stop`: the same three keys only; closes the bounded handoff without resuming.
+
+Duplicate keys, replayed/foreign sequences or sessions, unrecognized fields,
+non-private files, symlinks, malformed pins and stale commands stop the controller.
+The controller rechecks clean actual source SHA and the occupied canonical budget
+before control actions, before observation, and before resume. Reload cannot
+change target, execution, opportunity, candidate profile version, CV asset, read
+URLs or the optional entry strategy policy. Missing and explicit null entry
+policy remain compatible; actual strategy changes during handoff are rejected. Resume uses the original runtime and driver, without another open/goto,
+LinkedIn click, boundary reset or native entry.
+
+There is no general shell, callback, selector, URL, credential or cookie command.
+Idle waiting pumps only the existing owned page's Playwright events in ticks no
+longer than 100 milliseconds. It performs no UI click/navigation or form-value
+observation, and stops for a missing, closed, detached or foreign page/context.
+This does not clear a network fault or make an OAuth roundtrip permissible.
+The command emits no handoff nonce, profile values, source paths or codes on
+stdout. Timeout, stop, cancellation and invalid review return a sanitized final
+status after browser cleanup. Uncertain resumed effects never become Applied or
+permit another dispatch. If local handoff cleanup fails or is interrupted after
+resume, `handoff_cleanup_incomplete=true` annotates the existing confirmed or
+unconfirmed result; cleanup cannot replace it with the earlier handoff report.
+Controller-created lock/metadata files are removed by
+inode identity; externally supplied review inputs are not deleted. An existing
+unrecognized lock/command is not silently overwritten or cleared.
+
+Controller unit tests use fake browsers and private temporary state. A separate
+actual Chromium integration test pumps the retained owned page, exchanges private
+observe/resume commands, loads real pinned input files, and confirms exactly one
+synthetic application POST through the real runtime and temporary SQLite ledger.
+Every HTTPS request is fulfilled locally. This proves a TEST same-page return,
+not an OAuth bridge, grant or additional employer application. Experience/education cards remain assertions only; correction requires
+separately reviewed existing native editor/control/save bindings and endpoint
+review, with verified facts and no guessed selectors or values.
