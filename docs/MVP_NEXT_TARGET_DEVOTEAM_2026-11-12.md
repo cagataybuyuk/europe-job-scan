@@ -36,3 +36,11 @@ The first Version 1 scope stays Confirmed/consumed. This record grants no new
 final submission, new ledger, OAuth permission or general rollout. Real upload,
 CV-parser output, complete screening/submit behavior and backend company identity
 remain to be reviewed before exact-target execution can be enabled.
+
+Further read-only resource inventory observed the same rendered form loading
+`/oneclick-ui/api/company/5b8f87c1e4b07eb5549de6e8/publication/3d4a32a2-dc6b-4fd6-a0c2-f8e74336404e/config`.
+That backend company ID also matches its public Devoteam Portugal logo path.
+Direct unauthenticated GET returned 403; its response payload was not read and no
+alternate authentication, challenge bypass or cookie import was attempted.
+Actual upload/application endpoint purpose and current payload compatibility
+still require review before execution, independent of these identity signals.

@@ -34,3 +34,15 @@ cover one exact three-cell write, restart/idempotence, later-state preservation,
 concurrent drift, schema/identity/validation mismatch, unsupported transports,
 uncertain commits and sanitized errors. A real locked transport, command wiring,
 TEST Sheet integration and independently reviewed live enablement remain open.
+
+The standalone owner-callable `EjsCentralOutcomeTestV1.gs` prototype is restricted
+to a synthetic row and the existing TEST environment. It is not exposed through
+`doPost` or the gateway and adds no deployment, OAuth grant or production mapping.
+It rechecks all identities/schema/validation under ScriptLock, writes K/X/J and
+flushes/readbacks. Any partial write stays uncertain with no automatic repair.
+Its metadata explicitly reports global atomicity and live transport as false.
+
+The Node/V8 integration runs the actual source with the real Python service and
+a temporary Confirmed SQLite ledger. Only that sole-owner fake Sheet bridge can
+advertise the Python atomic transport capability. This is synthetic end-to-end
+service evidence, not a deployed or production Sheet integration.

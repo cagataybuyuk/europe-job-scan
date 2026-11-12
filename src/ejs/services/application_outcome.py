@@ -18,6 +18,7 @@ import secrets
 import stat
 
 from ejs.persistence.submission_ledger import SqliteSubmissionLedger
+from ejs.persistence.reviewed_scope_ledger import ReviewedScopeLedger, require_owned_scope_view
 
 
 _MAX_BYTES = 8192
@@ -132,7 +133,7 @@ def _publish(path: Path, payload: bytes) -> bool:
         os.close(parent_fd)
 
 
-def write_confirmed_outcome(path: Path, *, ledger: SqliteSubmissionLedger,
+def write_confirmed_outcome(path: Path, *, ledger: SqliteSubmissionLedger | ReviewedScopeLedger,
                             submit_key: str, execution_id: str, requisition_id: str,
                             posting_url: str, evidence_ref: str) -> dict:
     """Record Applied locally only after an exact durable Confirmed match.
@@ -143,7 +144,9 @@ def write_confirmed_outcome(path: Path, *, ledger: SqliteSubmissionLedger,
     never chmodded, truncated, repaired or replaced, including on storage failure.
     """
     try:
-        _require(type(ledger) is SqliteSubmissionLedger)
+        _require(type(ledger) in (SqliteSubmissionLedger, ReviewedScopeLedger))
+        if type(ledger) is ReviewedScopeLedger:
+            require_owned_scope_view(ledger)
         submit_digest = _digest(submit_key)
         execution_digest = _digest(execution_id)
         requisition_digest = _digest(requisition_id)
