@@ -14,7 +14,7 @@ import secrets
 from time import monotonic
 from urllib.parse import parse_qsl, urlsplit
 
-from ejs.services.oneclick_target import OneClickNetworkBoundary
+from ejs.services.oneclick_target import OneClickNetworkBoundary, native_entry_policy_enabled
 from ejs.services.single_application_runtime import ConfirmationObservation, UploadObservation, digest, require
 
 
@@ -135,6 +135,11 @@ class OneClickBrowser:
         self._handoff_widget_src = None
         self._entry_effect_attempts = self._popup_generation = self._document_generation = 0
         self._entry_network_fault = False
+        native_entry_policy_enabled(manifest)
+        self._entry_policy_pin = digest(manifest.get('entry_policy'))
+        self._native_entry_selected = False
+        self._native_widgets = []
+        self._profile_correction_started = self._profile_corrections_applied = False
         context.route('**/*', self._route)
         # Playwright >=1.48 is required for this lane (the legacy project minimum
         # remains unchanged). Do not silently continue if WebSocket fencing is absent.
@@ -179,6 +184,25 @@ class OneClickBrowser:
                           '[role="combobox"], [role="checkbox"], [role="textbox"]').first.wait_for(state='attached', timeout=30_000)
 
     def preferred_entry(self):
+        require(digest(self.manifest.get('entry_policy')) == self._entry_policy_pin, 'APPLICATION_ENTRY_POLICY_CHANGED')
+        if native_entry_policy_enabled(self.manifest):
+            require(not self._entry_handoff_pending and not self._native_entry_selected
+                    and not self._entry_return_ready and not self._entry_return_consumed
+                    and self._entry_effect_attempts == 0, 'APPLICATION_NATIVE_ENTRY_REJECTED')
+            self._profile_owned_surface()
+            widgets = self.page.locator('iframe').all()
+            require(len(widgets) <= 1, 'APPLICATION_NATIVE_ENTRY_REJECTED')
+            for widget in widgets:
+                src = widget.get_attribute('src')
+                require(widget.is_visible() and widget.get_attribute('srcdoc') is None and _widget_url(src)
+                        and src.split('#')[0] in self.boundary.native_widget_read_urls, 'APPLICATION_NATIVE_ENTRY_REJECTED')
+                frame = widget.element_handle().content_frame()
+                require(frame is not None, 'APPLICATION_NATIVE_ENTRY_REJECTED')
+                frame.wait_for_url(src, wait_until='domcontentloaded', timeout=3000)
+                self._profile_owned_surface()
+                self._native_widgets.append((widget.element_handle(), src))
+            self._native_entry_selected = True
+            return
         if self._entry_return_ready:
             self._entry_return_ready = False
             self._entry_return_consumed = True
@@ -217,6 +241,22 @@ class OneClickBrowser:
                 return False
             frame = iframe.element_handle().content_frame()
             if frame is None or frame.url != self._handoff_widget_src:
+                return False
+        return True
+
+    def _native_frames_clear(self):
+        frames = self.page.locator('iframe').all()
+        if not frames:
+            return True
+        if len(frames) != len(self._native_widgets):
+            return False
+        for iframe, (owned, src) in zip(frames, self._native_widgets):
+            if (not iframe.is_visible() or iframe.get_attribute('srcdoc') is not None
+                    or iframe.get_attribute('src') != src or not _widget_url(src)
+                    or not iframe.evaluate('(el, owned) => el===owned', owned)):
+                return False
+            frame = iframe.element_handle().content_frame()
+            if frame is None or frame.url != src:
                 return False
         return True
 
@@ -325,14 +365,14 @@ class OneClickBrowser:
         except Exception:
             raise PermissionError('APPLICATION_ENTRY_RETURN_REJECTED') from None
 
-    def _locator(self, binding):
-        locator = self.page.locator(binding['selector'])
+    def _locator(self, binding, root=None):
+        locator = (root or self.page).locator(binding['selector'])
         require(locator.count() == 1 and (binding.get('kind') == 'file' or locator.is_visible()), 'APPLICATION_CONTROL_CHANGED')
         return locator
 
-    def _controls(self):
+    def _controls(self, root=None):
         found = []
-        for locator in self.page.locator('input,select,textarea,[role="radio"],[role="radiogroup"],[role="checkbox"],'
+        for locator in (root or self.page).locator('input,select,textarea,[role="radio"],[role="radiogroup"],[role="checkbox"],'
                                          '[role="combobox"],[role="textbox"],[aria-required="true"],[required]').all():
             info = locator.evaluate(_DESCRIBE)
             # Only these reviewed SPL hosts may represent the same logical
@@ -369,7 +409,173 @@ class OneClickBrowser:
             found.append((locator, info))
         return found
 
+    def _profile_owned_surface(self):
+        require(self.page is self._owned_page and self.context is self._owned_context
+                and self.page.context is self.context and self.boundary is self._owned_boundary
+                and self.boundary.target is self._owned_target and not self.page.is_closed()
+                and self.page.url == self._owned_target.entry_url and self.context.pages == [self.page]
+                and self._step == 0 and self._upload is None and not self._submit_called and not self._popup
+                and self.boundary.phase == 'read' and self.boundary.blocked_write_count == 0
+                and self.boundary.application_attempts == self.boundary.upload_requests_allowed == 0
+                and not self._entry_network_fault and not self._external_surface,
+                'APPLICATION_PROFILE_SURFACE_BLOCKED')
+        require(digest(self.manifest.get('entry_policy')) == self._entry_policy_pin, 'APPLICATION_ENTRY_POLICY_CHANGED')
+
+    def _profile_guard(self):
+        self._profile_owned_surface()
+        clear = (self._native_frames_clear() if self._native_entry_selected else
+                 self._returned_frames_clear() if self._returned_entry_reviewed else
+                 not self.page.locator('iframe').count())
+        require(clear and not any(x.is_visible() for x in self.page.locator(
+            'input[type="password"],input[autocomplete="one-time-code"]').all()), 'APPLICATION_PROFILE_SURFACE_BLOCKED')
+        body = self.page.locator('body').inner_text().casefold()
+        require(not any(x in body for x in ('verify you are human', 'complete the captcha', 'verification code', 'access denied')),
+                'APPLICATION_PROFILE_SURFACE_BLOCKED')
+
+    def _profile_inventory(self, phase, expected_texts, editing=None):
+        root = self.page.locator(phase['container_selector'])
+        require(root.count() == 1 and root.is_visible(), 'APPLICATION_PROFILE_IDENTITY_CHANGED')
+        observed = root.locator(phase['card_selector']).all()
+        require(len(observed) == len(phase['cards']), 'APPLICATION_PROFILE_IDENTITY_CHANGED')
+        cards = {}
+        for card in phase['cards']:
+            locator = root.locator(card['selector'])
+            require(locator.count() == 1 and locator.is_visible()
+                    and sum(locator.evaluate('(el, other)=>el===other', x.element_handle()) for x in observed) == 1,
+                    'APPLICATION_PROFILE_IDENTITY_CHANGED')
+            if card['selector'] != editing:
+                require(locator.inner_text().strip() == expected_texts[card['selector']], 'APPLICATION_PROFILE_IDENTITY_CHANGED')
+            cards[card['selector']] = locator
+        require(len({x['selector'] for x in phase['cards']}) == len(observed), 'APPLICATION_PROFILE_IDENTITY_CHANGED')
+        return cards
+
+    def _pending_profile_cards(self, step):
+        phase = step.get('reviewed_profile_corrections')
+        if not phase:
+            return {}
+        require(not self._profile_correction_started or self._profile_corrections_applied, 'APPLICATION_PROFILE_CORRECTION_FAILED')
+        assertions = {a['selector']: a['value'] for a in step['profile_assertions']}
+        if self._profile_corrections_applied:
+            self._profile_inventory(phase, assertions)
+            return {}
+        self._profile_guard()
+        observed = {c['selector']: c['observed_text'] for c in phase['cards']}
+        self._profile_inventory(phase, observed)
+        edited = {edit['card_selector'] for edit in phase['edits']}
+        # Only a fully identified, explicitly reviewed pending card can defer
+        # its final summary. All other profile and ordinary field checks remain.
+        return {selector: observed[selector] for selector in edited}
+
+    def _uncovered_profile_actions(self, step):
+        if not native_entry_policy_enabled(self.manifest) and 'reviewed_profile_corrections' not in step:
+            return False
+        phase = step.get('reviewed_profile_corrections')
+        for action in self._visible(self.page.get_by_role('button', name=re.compile(r'^Edit (?:experience|education)(?: |$)'))):
+            if not phase:
+                return True
+            owners = []
+            for card in phase['cards']:
+                locator = self.page.locator(card['selector'])
+                if locator.count() == 1 and locator.evaluate("""(el, action)=>{
+                  for(let node=action;node;node=node.parentElement||node.getRootNode().host)if(node===el)return true;
+                  return false;
+                }""", action.element_handle()):
+                    owners.append(card)
+            if len(owners) != 1:
+                return True
+        return False
+
+    @staticmethod
+    def _profile_button(root, binding):
+        action = root.locator(binding['selector'])
+        require(action.count() == 1 and action.is_visible() and action.is_enabled()
+                and action.evaluate("el=>el.tagName==='BUTTON'")
+                and (action.get_attribute('aria-label') or action.inner_text().strip()) == binding['label'],
+                'APPLICATION_PROFILE_ACTION_CHANGED')
+        return action
+
+    def _profile_editor_surface(self, plan):
+        self._profile_guard()
+        editor = self.page.locator(plan['selector'])
+        require(editor.count() == 1 and editor.is_visible(), 'APPLICATION_PROFILE_EDITOR_CHANGED')
+        controls = self._controls(editor)
+        require(len(controls) == len(plan['fields']), 'APPLICATION_PROFILE_EDITOR_CHANGED')
+        covered = set()
+        for binding in plan['fields']:
+            locator = self._locator(binding, editor)
+            info = locator.evaluate(_DESCRIBE)
+            require(info['tag'] in ('input', 'select', 'textarea') and info['kind'] == binding['kind']
+                    and info['label'] == binding['label'] and info['required'] is binding['required'] and not info['disabled']
+                    and not locator.get_attribute('role'), 'APPLICATION_PROFILE_EDITOR_CHANGED')
+            matches = [i for i, (observed, _) in enumerate(controls)
+                       if observed.evaluate('(el, wanted)=>el===wanted', locator.element_handle())]
+            require(len(matches) == 1 and matches[0] not in covered, 'APPLICATION_PROFILE_EDITOR_CHANGED')
+            covered.add(matches[0])
+        actions = []
+        for button in editor.locator('button,input[type="button"],input[type="submit"],input[type="reset"],a[href],[role="button"]').all():
+            if button.is_visible():
+                label = button.get_attribute('aria-label') or button.inner_text().strip()
+                require(button.evaluate("el=>el.tagName==='BUTTON'") and label in ('Save', 'Cancel'), 'APPLICATION_PROFILE_EDITOR_CHANGED')
+                actions.append({'label': label, 'disabled': not button.is_enabled(), 'type': button.get_attribute('type') or ''})
+        require(sum(a['label'] == 'Save' for a in actions) == 1, 'APPLICATION_PROFILE_EDITOR_CHANGED')
+        shape = {'controls': sorted([i for _, i in controls], key=lambda x: json.dumps(x, sort_keys=True)),
+                 'actions': sorted(actions, key=lambda x: json.dumps(x, sort_keys=True))}
+        require(digest(shape) == plan['fingerprint'], 'APPLICATION_PROFILE_EDITOR_CHANGED')
+        self._profile_button(editor, plan['save'])
+        return editor
+
+    def correct_reviewed_profile(self):
+        """TEST adapter: client-only native editors, source-pinned complete plans.
+
+        No upload/submit or endpoint phase is opened. Actual live Save behavior
+        and editor compatibility remain unproven until separately observed.
+        """
+        step = self.manifest['steps'][0]
+        phase = step.get('reviewed_profile_corrections')
+        require(phase is not None and not self._profile_correction_started and not self._profile_corrections_applied,
+                'APPLICATION_PROFILE_CORRECTION_FAILED')
+        self._profile_guard()
+        before = self.inspect()
+        require(before['fingerprint'] == step['fingerprint'] and before['challenge'] is False
+                and before['unexpected_write'] is False and before['unreviewed_prefill'] is False,
+                'APPLICATION_PROFILE_SURFACE_BLOCKED')
+        expected = {card['selector']: card['observed_text'] for card in phase['cards']}
+        finals = {a['selector']: a['value'] for a in step['profile_assertions']}
+        self._profile_correction_started = True
+        for edit in phase['edits']:
+            self._profile_guard()
+            cards = self._profile_inventory(phase, expected)
+            action = self._profile_button(cards[edit['card_selector']], edit['edit'])
+            self._entry_effect_attempts += 1
+            action.click()
+            editor = self._profile_editor_surface(edit['editor'])
+            for binding in edit['editor']['fields']:
+                self._profile_inventory(phase, expected, editing=edit['card_selector'])
+                editor = self._profile_editor_surface(edit['editor'])
+                self.write(binding, root=editor)
+                require(type(self.readback(binding, root=editor)) is type(binding['value'])
+                        and self.readback(binding, root=editor) == binding['value'], 'APPLICATION_PROFILE_READBACK_MISMATCH')
+            editor = self._profile_editor_surface(edit['editor'])
+            require(all(type(self.readback(b, root=editor)) is type(b['value'])
+                        and self.readback(b, root=editor) == b['value'] for b in edit['editor']['fields']),
+                    'APPLICATION_PROFILE_READBACK_MISMATCH')
+            self._profile_inventory(phase, expected, editing=edit['card_selector'])
+            save = self._profile_button(editor, edit['editor']['save'])
+            self._entry_effect_attempts += 1
+            save.click()
+            editor.wait_for(state='hidden')
+            self._profile_guard()
+            expected[edit['card_selector']] = finals[edit['card_selector']]
+            self._profile_inventory(phase, expected)
+        require(all(expected[card['selector']] == finals[card['selector']] for card in phase['cards']),
+                'APPLICATION_PROFILE_READBACK_MISMATCH')
+        self._profile_corrections_applied = True
+        final = self.inspect()  # No pending mismatch allowance survives success.
+        require(final['challenge'] is False and final['unexpected_write'] is False
+                and final['unreviewed_prefill'] is False, 'APPLICATION_PROFILE_SURFACE_BLOCKED')
+
     def inspect(self):
+        require(digest(self.manifest.get('entry_policy')) == self._entry_policy_pin, 'APPLICATION_ENTRY_POLICY_CHANGED')
         step = self.manifest['steps'][self._step]
         controls = self._controls()
         required_keys, covered = set(), set()
@@ -394,8 +600,10 @@ class OneClickBrowser:
         # including optional fields/options; it contains no entered values/IDs.
         shape = sorted([info for _, info in controls], key=lambda x: json.dumps(x, sort_keys=True))
         body = self.page.locator('body').inner_text().casefold()
-        challenge = self._popup or (not self._returned_frames_clear() if self._returned_entry_reviewed
-                                   else bool(self.page.locator('iframe').count())) or any(
+        frames_clear = (self._native_frames_clear() if self._native_entry_selected else
+                        self._returned_frames_clear() if self._returned_entry_reviewed else
+                        not self.page.locator('iframe').count())
+        challenge = self._popup or not frames_clear or any(
             text in body for text in ('verify you are human', 'complete the captcha', 'verification code', 'access denied'))
         form_valid = self.page.locator('input,select,textarea').evaluate_all(
             "els => els.filter(x=>x.type!=='hidden'&&!x.disabled).every(x=>x.checkValidity())")
@@ -406,19 +614,21 @@ class OneClickBrowser:
         # A reviewed profile card must have a fact-backed visible assertion.
         # Imported LinkedIn cards are never promoted to truth by matching a URL.
         assertions = step.get('profile_assertions', [])
+        pending = self._pending_profile_cards(step)
+        unreviewed_prefill = unreviewed_prefill or self._uncovered_profile_actions(step)
         for assertion in assertions:
             require(self.page.locator(assertion['selector']).count() == 1
-                    and self.page.locator(assertion['selector']).inner_text().strip() == assertion['value'],
+                    and self.page.locator(assertion['selector']).inner_text().strip() == pending.get(assertion['selector'], assertion['value']),
                     'APPLICATION_IMPORTED_PROFILE_MISMATCH')
         return {'url': self.page.url, 'fingerprint': digest(shape), 'required_keys': required_keys,
                 'challenge': challenge, 'unreviewed_prefill': unreviewed_prefill,
                 'unexpected_write': self.boundary.blocked_write_count != 0 or self._external_surface,
                 'form_valid': form_valid, 'submit_visible': submit_visible}
 
-    def write(self, binding):
-        locator = self._locator(binding)
+    def write(self, binding, *, root=None):
+        locator = self._locator(binding, root)
         kind, value = binding['kind'], binding['value']
-        if self.readback(binding) == value:
+        if self.readback(binding, root=root) == value:
             return
         self._entry_effect_attempts += 1
         if kind == 'select':
@@ -477,8 +687,8 @@ class OneClickBrowser:
             locator.fill(str(value))
             locator.blur()
 
-    def readback(self, binding):
-        locator = self._locator(binding)
+    def readback(self, binding, *, root=None):
+        locator = self._locator(binding, root)
         value = locator.evaluate(_VALUE)
         if binding['kind'] == 'radio':
             if locator.get_attribute('role') == 'radiogroup':

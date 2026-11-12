@@ -440,6 +440,98 @@ def test_profile_fact_cannot_become_a_profile_edit_request(tmp_path):
     assert_blocked(lambda: load(tmp_path, manifest, facts))
 
 
+def correction_plan(manifest, facts, *, record_type="experience", omit_month=False):
+    prefix = f"profile.{record_type}.0."
+    values = ({"Title": ("title", "Verified Analyst"), "Company": ("company", "Synthetic Employer"),
+        "Office location": ("office_location", "Istanbul"), "Description": ("description", "Verified responsibilities."),
+        "From": ("start_month", "2025-01"), "To": ("end_month", "2026-04"),
+        "I currently work here": ("currently_working", False)} if record_type == "experience" else
+        {"Institution": ("school", "Verified Institute"), "Major": ("major", "Materials"), "Degree": ("degree", "Bachelor"),
+        "School location": ("school_location", "Istanbul"), "Description": ("description", "2018–2023."),
+        "From": ("start_month", "2018-09"), "To": ("end_month", "2023-06")})
+    fields = []
+    for index, (label, (suffix, value)) in enumerate(values.items()):
+        kind = "month" if label in ("From", "To") else "checkbox" if type(value) is bool else "text"
+        required = label not in ("Office location", "School location", "Description", "I currently work here")
+        if omit_month and kind == "month": value, required = "", False
+        source = "user_decision:current-status" if type(value) is bool else "approved_document:fixture-cv"
+        fact = dict(canonical_field=prefix + suffix, value=value, source_ref=source,
+            verified=True, auto_fill_approved=True, verified_at=STAMP)
+        field = dict(key=f"profile-field-{index}", selector=f"#profile-field-{index}", label=label, kind=kind,
+            required=required, canonical_field=prefix + suffix, value=value, provenance_ref=source)
+        if omit_month and kind == "month":
+            fact["omission_reason"] = "month_unknown"
+            field["omission_policy_ref"] = "PROFILE-OMIT-UNKNOWN-MONTH"
+        facts["facts"].append(fact); fields.append(field)
+    summary = ("Verified Analyst\nSynthetic Employer\n2025-01 – 2026-04\nVerified responsibilities." if record_type == "experience" else
+               "Verified Institute\nBachelor\n" + ("2018–2023." if omit_month else "2018-09 – 2023-06"))
+    other_kind = "education" if record_type == "experience" else "experience"
+    assertions = []
+    for selector, canonical, value in (("#profile-target", prefix + "summary", summary),
+            ("#profile-other", f"profile.{other_kind}.0.summary", "Verified untouched record")):
+        fact = dict(canonical_field=canonical, value=value, source_ref="approved_document:fixture-cv",
+                    verified=True, auto_fill_approved=True, verified_at=STAMP)
+        facts["facts"].append(fact)
+        assertions.append(dict(selector=selector, canonical_field=canonical, value=value, provenance_ref=fact["source_ref"]))
+    phase = dict(container_selector="#profile", card_selector=".profile-card", cards=[
+        dict(selector="#profile-target", record_type=record_type, record_index=0, observed_text="Imported unverified record"),
+        dict(selector="#profile-other", record_type=other_kind, record_index=0, observed_text="Verified untouched record")],
+        edits=[dict(card_selector="#profile-target", edit=dict(selector="button", label="Edit " + record_type + " Imported record"),
+            editor=dict(selector="#profile-editor", fingerprint="e" * 64, fields=fields,
+                        save=dict(selector="#profile-save", label="Save")))])
+    manifest["steps"][0]["profile_assertions"] = assertions
+    manifest["steps"][0]["reviewed_profile_corrections"] = phase
+    return phase
+
+
+@pytest.mark.parametrize("record_type,omit_month", [("experience", False), ("education", False), ("education", True)])
+def test_profile_corrections_are_distinct_source_bound_complete_native_plans(tmp_path, record_type, omit_month):
+    manifest, facts = inputs()
+    correction_plan(manifest, facts, record_type=record_type, omit_month=omit_month)
+    assert load(tmp_path, manifest, facts) == manifest
+
+
+@pytest.mark.parametrize("mutation", ["value", "source", "missing", "extra_control", "foreign_record", "delete", "submit_save",
+    "day_guess", "month_missing_policy", "month_required", "month_no_evidence", "inferred_current", "uncovered_card"])
+def test_profile_correction_cannot_selfapprove_unknown_source_dates_records_or_actions(tmp_path, mutation):
+    manifest, facts = inputs()
+    phase = correction_plan(manifest, facts, omit_month=mutation.startswith("month_"))
+    editor = phase["edits"][0]["editor"]
+    first = editor["fields"][0]
+    if mutation == "value": first["value"] = "LinkedIn guessed value"
+    if mutation == "source": first["provenance_ref"] = "linkedin:prefill"
+    if mutation == "missing": editor["fields"].pop()
+    if mutation == "extra_control": editor["fields"].append(deepcopy(first))
+    if mutation == "foreign_record": first["canonical_field"] = "profile.experience.1.title"
+    if mutation == "delete": phase["edits"][0]["edit"]["label"] = "Delete experience"
+    if mutation == "submit_save": editor["save"]["label"] = "Submit"
+    month = next(field for field in editor["fields"] if field["label"] == "From")
+    if mutation == "day_guess": month["kind"] = "text"
+    if mutation == "month_missing_policy": month.pop("omission_policy_ref")
+    if mutation == "month_required": month["required"] = True
+    if mutation == "month_no_evidence":
+        next(f for f in facts["facts"] if f["canonical_field"] == month["canonical_field"]).pop("omission_reason")
+    if mutation == "inferred_current":
+        current = next(field for field in editor["fields"] if field["kind"] == "checkbox")
+        current["provenance_ref"] = "approved_document:old-cv"
+        next(f for f in facts["facts"] if f["canonical_field"] == current["canonical_field"])["source_ref"] = current["provenance_ref"]
+    if mutation == "uncovered_card": phase["cards"][1]["observed_text"] = "Unverified other LinkedIn record"
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+@pytest.mark.parametrize("policy", [{"strategy": "native_verified_facts", "decision_ref": "USER-NATIVE-MVP-20261112"}])
+def test_explicit_native_entry_policy_is_independently_pinned(tmp_path, policy):
+    manifest, facts = inputs(); manifest["entry_policy"] = policy
+    assert load(tmp_path, manifest, facts) == manifest
+
+
+@pytest.mark.parametrize("policy", [None, True, {}, {"strategy": "native_verified_facts", "decision_ref": "old"},
+    {"strategy": "native_verified_facts", "decision_ref": "USER-NATIVE-MVP-20261112", "oauth_allowed": True}])
+def test_native_entry_cannot_be_inferred_or_expand_oauth_authority(tmp_path, policy):
+    manifest, facts = inputs(); manifest["entry_policy"] = policy
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
 @pytest.mark.parametrize("mutation", ["absent", "two_uploads", "missing_kind", "wrong_kind",
     "string_required", "missing_required", "empty_label", "duplicate_key", "selector_collision",
     "oversize_selector", "not_object"])

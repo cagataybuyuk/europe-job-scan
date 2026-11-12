@@ -23,6 +23,33 @@ _DATABASE_ID = re.compile(r"[a-f0-9]{24}\Z")
 _POSTING_ID = re.compile(r"[0-9]{8,20}\Z")
 _REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}\Z")
 _PDF_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.pdf\Z", re.IGNORECASE)
+PUBLIC_LINKEDIN_WIDGET_URLS = frozenset({
+    "https://www.linkedin.com/talentwidgets/apply-with-linkedin",
+    "https://linkedin.com/talentwidgets/apply-with-linkedin",
+})
+
+
+def native_entry_policy_enabled(manifest: dict) -> bool:
+    """Explicit user preference, never an OAuth grant or application authority."""
+    if "entry_policy" not in manifest:
+        return False
+    if manifest["entry_policy"] != {
+        "strategy": "native_verified_facts", "decision_ref": "USER-NATIVE-MVP-20261112",
+    } or type(manifest["entry_policy"]) is not dict:
+        raise PermissionError("APPLICATION_ENTRY_POLICY_REVIEW_REQUIRED")
+    return True
+
+
+def reviewed_oneclick_boundary(target, manifest):
+    """Use only after the independent source/manifest/fact pin checks.
+
+    Explicit native preference adds only GET document navigation to each of the
+    two canonical public widget URLs already listed in reviewed read_urls.
+    No query, auth/OAuth path, other host, write or application budget is added.
+    """
+    return OneClickNetworkBoundary(target, read_urls=tuple(manifest["read_urls"]),
+        resume_filename=manifest["cv"]["approved_filename"],
+        reviewed_native_entry=native_entry_policy_enabled(manifest))
 
 
 def _valid(pattern: re.Pattern, value: object) -> bool:
@@ -126,14 +153,18 @@ class OneClickNetworkBoundary:
     """
 
     def __init__(self, target: OneClickTarget, *, read_urls: tuple[str, ...],
-                 resume_filename: str):
+                 resume_filename: str, reviewed_native_entry: bool = False):
         if not isinstance(target, OneClickTarget):
             raise ValueError("ONECLICK_TARGET_INVALID")
         if (not isinstance(read_urls, tuple) or len(read_urls) > 1000
                 or not all(_https_url(x) for x in read_urls)
                 or len(set(read_urls)) != len(read_urls)):
             raise ValueError("ONECLICK_READ_ALLOWLIST_INVALID")
+        if type(reviewed_native_entry) is not bool:
+            raise ValueError("ONECLICK_ENTRY_POLICY_INVALID")
         self._target = target
+        self._native_widget_read_urls = (frozenset(read_urls) & PUBLIC_LINKEDIN_WIDGET_URLS
+                                         if reviewed_native_entry else frozenset())
         self._upload_url = target.resume_upload_url(resume_filename)
         self._navigation_urls = frozenset((target.posting_url, target.entry_url,
                                            target.screening_url))
@@ -152,6 +183,10 @@ class OneClickNetworkBoundary:
         self._application_attempts = 0
         self._application_requests_allowed = 0
         self._upload_requests_allowed = 0
+
+    @property
+    def native_widget_read_urls(self) -> frozenset[str]:
+        return self._native_widget_read_urls
 
     @property
     def target(self) -> OneClickTarget:
@@ -215,6 +250,8 @@ class OneClickNetworkBoundary:
                 if type(is_navigation) is not bool:
                     return False
                 if is_navigation:
+                    if method == "GET" and resource_type == "document" and url in self.native_widget_read_urls:
+                        return True
                     return resource_type == "document" and url in self._navigation_urls
                 return url in self._read_urls
 

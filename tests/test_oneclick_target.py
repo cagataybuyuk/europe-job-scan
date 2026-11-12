@@ -223,3 +223,16 @@ def test_bad_input_never_echoed_or_used_as_authority(boundary):
     assert not boundary.allows("POST", "PRIVATE", is_navigation="false")
     assert "PRIVATE" not in repr(boundary.__dict__)
     assert boundary.blocked_write_count == 3
+
+
+@pytest.mark.parametrize("enabled,reviewed", [(False, False), (False, True), (True, False), (True, True)])
+def test_native_widget_navigation_needs_both_explicit_preference_and_exact_public_read(target, enabled, reviewed):
+    url = "https://www.linkedin.com/talentwidgets/apply-with-linkedin"
+    fence = OneClickNetworkBoundary(target, read_urls=(url,) if reviewed else (), resume_filename="CV.pdf",
+                                   reviewed_native_entry=enabled)
+    assert fence.allows("GET", url, "document", True) is (enabled and reviewed)
+    assert not fence.allows("HEAD", url, "document", True)
+    for wrong in (url + "?scope=profile", url.replace("/talentwidgets/", "/oauth/"), url.replace(".com/", ".com:443/")):
+        assert not fence.allows("GET", wrong, "document", True)
+    assert not fence.allows("POST", url)
+    assert fence.application_requests_allowed == 0
