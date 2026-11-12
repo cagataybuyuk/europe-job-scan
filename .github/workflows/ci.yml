@@ -122,6 +122,10 @@ jobs:
           tests/test_retained_entry_controller.py
           tests/test_reviewed_application_scope.py
           tests/test_central_application_outcome.py
+          tests/test_reviewed_execution_scope.py
+          tests/test_reviewed_scope_ledger.py
+          tests/test_reviewed_scope_outcomes.py
+          tests/test_reviewed_application_bootstrap.py
           tests/test_work_rights_evidence_gate.py
           tests/test_bound_work_rights_gate.py
           tests/test_application_action_preflight.py
@@ -211,7 +215,7 @@ jobs:
       - name: Run GD-004 deployment descriptor tests
         run: python -m pytest -q tests/unit/test_gd004_deployment_descriptor.py
       - name: Run actual Apps Script source in V8
-        run: node --test tests/node/gd004_gateway.test.cjs
+        run: node --test tests/node/gd004_gateway.test.cjs tests/node/central_outcome_sync.test.cjs
       - name: Run Python to Apps Script queue and asset integration
         run: python -m pytest -q tests/unit/test_gd004_queue.py tests/unit/test_gd004_queue_browser.py
       - name: Run GD-004 GitHub-hosted Chromium smoke

@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from ejs.contracts.mw5 import opportunity_key
 from ejs.contracts.submit import submit_identity
 from ejs.persistence.submission_ledger import SqliteSubmissionLedger
+from ejs.persistence.reviewed_scope_ledger import ReviewedScopeLedger, require_owned_scope_view
 from ejs.services.mw5_workspace import CellPatch
 
 
@@ -183,9 +184,11 @@ def _validate_binding(binding: CentralApplicationBinding, pin: str, source_sha: 
     _require(timedelta(0) <= now - reviewed <= timedelta(minutes=5))
 
 
-def _confirmed_dates(ledger: SqliteSubmissionLedger, binding: CentralApplicationBinding,
+def _confirmed_dates(ledger: SqliteSubmissionLedger | ReviewedScopeLedger, binding: CentralApplicationBinding,
                      now: datetime) -> tuple[str, str]:
-    _require(type(ledger) is SqliteSubmissionLedger)
+    _require(type(ledger) in (SqliteSubmissionLedger, ReviewedScopeLedger))
+    if type(ledger) is ReviewedScopeLedger:
+        require_owned_scope_view(ledger)
     snapshot = ledger.snapshot()
     _require(type(snapshot) is dict and snapshot.get("status") == "Confirmed")
     for key, expected in (("submit_key_digest", _hash(binding.submit_key)),
@@ -227,7 +230,7 @@ def _result(status: str, wrote: bool | None = False, *, readback: bool = False) 
             "central_readback_verified": readback, "submit_attempt_performed": False}
 
 
-def sync_confirmed_application(*, ledger: SqliteSubmissionLedger,
+def sync_confirmed_application(*, ledger: SqliteSubmissionLedger | ReviewedScopeLedger,
                                binding: CentralApplicationBinding, binding_sha256: str,
                                reviewed_source_sha: str, transport: LockedCentralApplicationTransport,
                                now: datetime, write_enabled: bool = False) -> dict:
