@@ -17,7 +17,10 @@ states, including Rejected, are preserved; an already matching Applied row is a
 no-op. Other source cells, formulas, formatting and validation remain untouched.
 
 The write transport must perform a real serialized compare-and-set against the
-complete row/schema/validation fingerprint. A direct Sheets read followed by a
+complete row/schema/validation and identity-match-set fingerprint. It must
+recheck identity uniqueness under that same lock; an inserted duplicate prevents
+the write. Canonical header order is required even when a changed schema has a
+new valid independent pin. A direct Sheets read followed by a
 write is not atomic and is not an implementation of that contract. Apps Script
 LockService serializes only cooperating script callers, not manual edits or
 other connectors. No production race-safety claim is made.

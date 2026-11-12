@@ -82,19 +82,19 @@ class SyntheticLockedTransport:
         self.rows[0] = replace(self.rows[0], cells=tuple(cells))
 
     def fingerprint(self):
-        row = self.rows[0]
         data = (self.binding.spreadsheet_id, self.binding.sheet_id, self.binding.sheet_name,
-                self.headers, self.allowed, row.row_number, row.cells)
+                self.headers, self.allowed, tuple((r.row_number, r.cells) for r in self.rows))
         return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":"),
             ensure_ascii=False, allow_nan=False).encode()).hexdigest()
 
     def compare_and_set(self, request):
         self.requests.append(request)
+        assert request.identity_key == (self.binding.company, self.binding.role, self.binding.country)
         if self.before_cas:
             self.before_cas()
         if self.receipt_override:
             return self.receipt_override(request)
-        if request.expected_fingerprint != self.fingerprint():
+        if len(self.rows) != 1 or request.expected_fingerprint != self.fingerprint():
             return CentralApplicationReceipt(request.operation_key, False, False)
         for patch in request.patches:
             assert patch.row == self.binding.row_number
@@ -137,6 +137,34 @@ def test_idempotent_restart_with_new_binding_review_does_not_write_again(ledger,
     fresh = replace(binding, reviewed_at=(NOW + timedelta(minutes=2)).isoformat())
     assert sync(reopened, fresh, transport, now=NOW + timedelta(minutes=2))["status"] == "ALREADY_RECORDED"
     assert transport.writes == 1 and len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("headers", [
+    tuple(reversed(HEADERS)),
+    HEADERS[:9] + ("Status renamed",) + HEADERS[10:],
+    HEADERS[:9] + (HEADERS[10], HEADERS[9]) + HEADERS[11:],
+    (HEADERS[0], HEADERS[2], HEADERS[1]) + HEADERS[3:],
+])
+def test_freshly_repinned_incompatible_column_schema_blocks_before_read_or_write(ledger, binding, headers):
+    confirm(ledger)
+    changed = replace(binding, headers=headers)
+    transport = SyntheticLockedTransport(changed)
+    result = sync(ledger, changed, transport)
+    assert result["status"] == "CENTRAL_SYNC_BLOCKED"
+    assert transport.reads == transport.writes == 0
+    assert transport.requests == []
+
+
+def test_duplicate_matching_row_inserted_during_cas_stops_before_write(ledger, binding):
+    confirm(ledger)
+    transport = SyntheticLockedTransport(binding)
+    initial = transport.rows[0]
+    transport.before_cas = lambda: transport.rows.append(replace(initial, row_number=9))
+    result = sync(ledger, binding, transport)
+    assert result["status"] == "CONCURRENT_CHANGE"
+    assert result["applications_write_performed"] is False
+    assert transport.writes == 0 and len(transport.requests) == 1
+    assert all(row.cells[9] == "To Apply" for row in transport.rows)
 
 
 @pytest.mark.parametrize("status", ["Rejected", "Recruiter Contacted", "Screening", "Assessment", "Interview 1",

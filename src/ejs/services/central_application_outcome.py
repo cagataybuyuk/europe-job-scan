@@ -31,6 +31,14 @@ _LATER_STATES = frozenset({"Recruiter Contacted", "Screening", "Assessment", "In
     "Interview 2", "Final Interview", "Offer", "Accepted", "Rejected", "Withdrawn", "Closed", "Hired"})
 _ERROR = "CENTRAL_APPLICATION_SYNC_REJECTED"
 _TRACKER_TIMEZONE = "Europe/Istanbul"
+_APPLICATION_HEADERS = (
+    "Date Added", "Company", "Role", "Country", "City", "Source URL",
+    "Role Fit Score", "Sponsorship", "Role Priority", "Status", "Applied Date",
+    "CV Persona", "Recruiter", "Recruiter Contacted", "Salary Expectation",
+    "Next Action", "Next Action Date", "Notes", "Application Source",
+    "Recruiter LinkedIn", "Outreach Date", "Follow-up Due", "Follow-up Status",
+    "Last Update",
+)
 
 
 def _require(condition: bool) -> None:
@@ -106,6 +114,7 @@ class CentralApplicationWrite:
     sheet_id: int
     sheet_name: str
     row_number: int
+    identity_key: tuple[str, str, str]
     operation_key: str
     expected_fingerprint: str
     patches: tuple[CellPatch, ...]
@@ -123,8 +132,10 @@ class LockedCentralApplicationTransport(Protocol):
 
     Reads must return ALL exact company/role/country identity matches, not only
     the requested row. CAS must under the same writer lock re-read the binding,
-    headers, validation and complete A:X fingerprint, reject mismatch, and commit
-    only the three supplied cells. The lock must cover every competing writer;
+    headers, validation, ALL matching identity rows and their complete A:X
+    fingerprint, reject missing/duplicate matches, and commit only the three
+    supplied cells. A duplicate inserted after the initial read must prevent the
+    write, not merely fail its readback. The lock must cover every competing writer;
     Apps Script LockService alone does not serialize direct connector/manual
     edits. A reviewed implementation must account for that limitation.
     """
@@ -153,9 +164,9 @@ def _validate_binding(binding: CentralApplicationBinding, pin: str, source_sha: 
     _require(type(binding.row_number) is int and 2 <= binding.row_number <= 1_000_000)
     _require(binding.sheet_name == "Applications" and binding.time_zone == _TRACKER_TIMEZONE
              and binding.confirmation_kind == "ATS_ACKNOWLEDGEMENT")
-    _require(type(binding.headers) is tuple and len(binding.headers) == 24
-             and all(type(x) is str and 0 < len(x) <= 200 for x in binding.headers)
-             and len(set(binding.headers)) == 24)
+    # Column letters below have fixed business meaning. An independently pinned
+    # reordered/renamed schema is still incompatible with those write positions.
+    _require(type(binding.headers) is tuple and binding.headers == _APPLICATION_HEADERS)
     _require(all(type(x) is str and 0 < len(x) <= 500 and not any(ord(c) < 32 for c in x)
                  for x in (binding.company, binding.role, binding.country)))
     _require(binding.opportunity_key == opportunity_key(binding.company, binding.role, binding.country))
@@ -205,9 +216,10 @@ def _row(read: CentralApplicationRead, binding: CentralApplicationBinding) -> Ce
     return row
 
 
-def _fingerprint(read: CentralApplicationRead, row: CentralApplicationRow) -> str:
+def _fingerprint(read: CentralApplicationRead) -> str:
     return hashlib.sha256(_canonical((read.spreadsheet_id, read.sheet_id, read.sheet_name,
-        read.headers, read.status_allowed_values, row.row_number, row.cells))).hexdigest()
+        read.headers, read.status_allowed_values,
+        tuple((match.row_number, match.cells) for match in read.identity_matches)))).hexdigest()
 
 
 def _result(status: str, wrote: bool | None = False, *, readback: bool = False) -> dict:
@@ -246,8 +258,9 @@ def sync_confirmed_application(*, ledger: SqliteSubmissionLedger,
         _require(getattr(transport, "atomic_row_compare_and_set", None) is True)
         request = CentralApplicationWrite(binding.spreadsheet_id, binding.sheet_id,
             binding.sheet_name, binding.row_number,
+            (binding.company, binding.role, binding.country),
             hashlib.sha256(_canonical(("EJS-CENTRAL-APPLICATION-1", central_binding_sha256(binding),
-                binding.evidence_ref, applied_date))).hexdigest(), _fingerprint(first_read, first),
+                binding.evidence_ref, applied_date))).hexdigest(), _fingerprint(first_read),
             (CellPatch("J", binding.row_number, "Applied"), CellPatch("K", binding.row_number, applied_date),
              CellPatch("X", binding.row_number, update_date)))
         # Re-read the canonical confirmation immediately before the sole write.
