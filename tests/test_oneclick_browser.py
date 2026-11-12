@@ -80,7 +80,7 @@ def fixture(tmp_path, monkeypatch):
               mode="Approved Policy", policy="USER-IE-SALARY-20261106", label="Expected salary"),
         field("notice", "employment.notice_period", "Immediate", "select", label="Notice"),
         field("eligibility", "work.eligibility", "I require sponsorship", "select", label="Eligibility"),
-        field("residency", "location.residency", "No", "radio", label="Living in Ireland No"),
+        field("residency", "work.currently_lives_in_ireland", "No", "radio", label="Living in Ireland No"),
         field("privacy", "consent.privacy_acknowledgement", True, "checkbox",
               mode="Approved Policy", policy="USER-FIXTURE-PRIVACY-20261106", label="Privacy"),
     ]
@@ -92,7 +92,7 @@ def fixture(tmp_path, monkeypatch):
     manifest = dict(schema_version="EJS-SINGLE-APPLICATION-1", source_sha="a" * 40,
         execution_id="fixture:execution:browser", opportunity_key="fixture:opportunity:browser",
         requisition_id=target.requisition_id, candidate_profile_version=facts["candidate_profile_version"],
-        reviewer_ref="independent:fixture", reviewed_at=now,
+        reviewer_ref="independent:fixture", reviewed_at=now, read_urls=[],
         steps=[dict(url=target.entry_url, fingerprint="1" * 64, fields=first,
             upload=dict(key="cv", selector="#resume", label="Resume", kind="file", required=True),
             next=dict(key="next", selector="#next", label="Next")),
@@ -934,6 +934,98 @@ def test_retained_return_defers_only_exact_reviewed_profile_card_not_other_prefi
             assert browser.page.locator('#profile-other').inner_text().strip() == 'Verified untouched record'
         assert [method for method, _, _ in seen] == ['GET']
         assert boundary.upload_requests_allowed == boundary.application_requests_allowed == 0 and not fixture.ledger.has_intent()
+
+
+def test_retained_cli_controller_actual_page_private_pins_and_one_confirmed_fixture_application(
+        chromium, fixture, monkeypatch, tmp_path, capsys):
+    """TEST same-page return only: no OAuth bridge, grant or employer traffic.
+
+    Source-clean Git probing is isolated here; the controller's pure suite covers
+    its rejection paths. The browser, input compiler, runtime and SQLite ledger
+    are real. Every browser HTTPS request is fulfilled by actual_driver locally.
+    """
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    import ejs.services.retained_entry_controller as controller_module
+    from ejs.services.retained_entry_controller import RetainedEntryController
+
+    fixture.manifest['target'] = asdict(fixture.target)
+    review_shapes(chromium, fixture, monkeypatch, awli=True)
+    private_state = tmp_path.resolve() / 'controller-state'
+    private_state.mkdir(mode=0o700)
+    control = private_state / 'entry-return-controller'
+    def source_probe(command, **kwargs):
+        assert command[:2] == ['git', '-C']
+        assert 0 < kwargs['timeout'] <= 10
+        return SimpleNamespace(stdout='' if 'status' in command else fixture.manifest['source_sha'])
+    monkeypatch.setattr(controller_module.subprocess, 'run', source_probe)
+    def public_posting(target):
+        assert target is fixture.target
+        return fixture.posting
+    monkeypatch.setattr('ejs.services.single_application_runtime.fetch_posting', public_posting)
+
+    with actual_driver(chromium, fixture, monkeypatch, awli=True) as (browser, boundary, seen, _):
+        runtime = SingleApplicationRuntime(browser, fixture.ledger)
+        handoff = runtime.run(fixture.manifest, fixture.facts, fixture.target, fixture.cv,
+                             authority=ON, posting_payload=fixture.posting)
+        assert handoff['status'] == 'HUMAN_HANDOFF_REQUIRED'
+        assert fixture.ledger.has_intent() is False
+        page, context = browser.page, browser.context
+        page.evaluate("""window.syntheticAwliClicks=0;
+          document.querySelector('button').addEventListener('click',()=>window.syntheticAwliClicks++);""")
+        monkeypatch.setattr(browser, 'open', lambda *_: pytest.fail('Retained controller cannot open another page'))
+        original_tick = page.wait_for_timeout
+        ticks = []
+        def trusted_private_operator(milliseconds):
+            # Keep the real Playwright event pump; only the independent local
+            # reviewer/control-file writer is simulated by this test.
+            original_tick(milliseconds)
+            ticks.append(milliseconds)
+            session = json.loads((control / 'session.json').read_text())
+            if len(ticks) == 1:
+                command = dict(session_id=session['session_id'], sequence=1, action='observe_return')
+            elif len(ticks) == 2:
+                observation = json.loads((control / 'observation.json').read_text())
+                reviewed = deepcopy(fixture.manifest)
+                reviewed['steps'][0]['fingerprint'] = observation['surface_fingerprint']
+                reviewed['entry_return_review'] = dict(
+                    observation_id=observation['observation_id'],
+                    surface_fingerprint=observation['surface_fingerprint'],
+                    reviewed_at=datetime.now(timezone.utc).isoformat(),
+                    reviewer_ref=reviewed['reviewer_ref'], return_url=fixture.target.entry_url)
+                pins = {}
+                for filename, data, pin in (
+                        ('reviewed-manifest.json', reviewed, 'manifest_sha256'),
+                        ('reviewed-facts.json', fixture.facts, 'facts_sha256')):
+                    raw = json.dumps(data).encode()
+                    path = control / filename
+                    path.write_bytes(raw); path.chmod(0o600)
+                    pins[pin] = hashlib.sha256(raw).hexdigest()
+                command = dict(session_id=session['session_id'], sequence=2,
+                               action='resume_pinned_review', **pins)
+            else:
+                pytest.fail('Expected one observe and one resumed private review')
+            path = control / 'request.json'
+            path.write_text(json.dumps(command)); path.chmod(0o600)
+        monkeypatch.setattr(page, 'wait_for_timeout', trusted_private_operator)
+        controller = RetainedEntryController(private_state, private_state / 'synthetic-source',
+                                             fixture.manifest['source_sha'], timeout_seconds=10)
+        result = controller.wait_for_review(runtime, browser, fixture.ledger, fixture.manifest,
+            fixture.facts, fixture.target, fixture.cv, authority=ON)
+        assert result['status'] == 'EMPLOYER_CONFIRMED', result
+        assert result['applied'] is True and result['submit_click_attempts'] == 1
+        assert browser.page is page and browser.context is context
+        assert page.evaluate('window.syntheticAwliClicks') == 0
+        assert ticks == [100, 100]
+        assert fixture.ledger.snapshot()['status'] == 'Confirmed'
+        assert boundary.application_attempts == boundary.application_requests_allowed == 1
+        assert boundary.upload_requests_allowed == 1
+        assert [method for method, _, _ in seen] == ['GET', 'POST', 'POST']
+        assert sum(url == fixture.target.application_url for _, url, _ in seen) == 1
+        assert capsys.readouterr().out == ''
+        assert not (control / 'active.lock').exists()
+        assert not (control / 'session.json').exists()
+        assert not (control / 'observation.json').exists()
 
 
 @pytest.mark.parametrize('bad_url', [
