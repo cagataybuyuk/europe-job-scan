@@ -258,3 +258,28 @@ def test_blocked_doctor_stdout_does_not_expose_private_paths_or_values(fixture, 
     stdout = capsys.readouterr().out
     assert "SYNTHETIC" not in stdout and str(fixture.private) not in stdout
     assert json.loads(stdout)["status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize("component", ["config_parent", "output_parent"])
+def test_symlinked_parent_directory_rejects_before_any_job_write(fixture, component):
+    """A private leaf is insufficient when a parent redirects the job."""
+    if component == "config_parent":
+        alias = fixture.private.parent / "redirected-inputs"
+        alias.symlink_to(fixture.private, target_is_directory=True)
+        fixture.config_path = alias / "config.json"
+    else:
+        alias = fixture.output.parent / "redirected-job"
+        alias.symlink_to(fixture.output, target_is_directory=True)
+        fixture.config["job_directory"] = str(alias)
+        repin(fixture)
+    blocked(lambda: app.generate_validation_job(fixture.config_path, fixture.pin))
+    assert not tuple(fixture.output.iterdir())
+
+
+def test_validation_arguments_remain_fixed_and_never_enable_execution(fixture):
+    args = app.validation_arguments(fixture.config)
+    assert args.count("-m") == 1
+    assert args[args.index("-m") + 1] == "ejs.apps.reviewed_application"
+    assert not any(token in args for token in ("--execute-reviewed-application", "--grant",
+        "--submit", "--target-url", "-c", "-W", "--interval"))
+    assert args.count("--manifest") == args.count("--facts") == args.count("--cv") == 1
