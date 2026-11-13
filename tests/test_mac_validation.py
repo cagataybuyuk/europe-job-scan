@@ -283,3 +283,26 @@ def test_validation_arguments_remain_fixed_and_never_enable_execution(fixture):
     assert not any(token in args for token in ("--execute-reviewed-application", "--grant",
         "--submit", "--target-url", "-c", "-W", "--interval"))
     assert args.count("--manifest") == args.count("--facts") == args.count("--cv") == 1
+
+
+@pytest.mark.parametrize("bad", ["symlink_log", "world_writable_log", "hardlinked_log"])
+def test_untrusted_existing_log_blocks_without_replacing_plist(fixture, bad):
+    """Preexisting log paths must not be followed or silently reused."""
+    logs = fixture.output / "logs"
+    logs.mkdir(mode=0o700)
+    log = logs / "validation.jsonl"
+    if bad == "symlink_log":
+        outside = fixture.private / "outside.jsonl"
+        outside.write_bytes(b"SENTINEL")
+        log.symlink_to(outside)
+    else:
+        log.write_bytes(b"SENTINEL")
+        log.chmod(0o666 if bad == "world_writable_log" else 0o600)
+        if bad == "hardlinked_log":
+            os.link(log, fixture.private / "other-log.jsonl")
+    blocked(lambda: app.generate_validation_job(fixture.config_path, fixture.pin))
+    assert not (fixture.output / "com.ejs.test.validation.plist").exists()
+    if bad == "symlink_log":
+        assert outside.read_bytes() == b"SENTINEL"
+    else:
+        assert log.read_bytes() == b"SENTINEL"
