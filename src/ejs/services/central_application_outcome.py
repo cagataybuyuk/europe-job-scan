@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import re
+import unicodedata
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -204,7 +205,10 @@ def _row(read: CentralApplicationRead, binding: CentralApplicationBinding) -> Ce
              and (read.spreadsheet_id, read.sheet_id, read.sheet_name, read.headers)
              == (binding.spreadsheet_id, binding.sheet_id, binding.sheet_name, binding.headers))
     _require(type(read.status_allowed_values) is tuple
-             and all(type(x) is str and x and x == x.strip() for x in read.status_allowed_values)
+             and all(type(x) is str and x and x == x.strip()
+                     and unicodedata.normalize("NFKC", x) == x
+                     and not any(unicodedata.category(ch) in {"Cf", "Cc"} for ch in x)
+                     for x in read.status_allowed_values)
              and len(set(read.status_allowed_values)) == len(read.status_allowed_values)
              and "Applied" in read.status_allowed_values)
     _require(type(read.identity_matches) is tuple and len(read.identity_matches) == 1)
