@@ -9,6 +9,9 @@ description = "Europe Job Scan Google-native Apps Script control plane and Cloud
 requires-python = ">=3.11"
 dependencies = ["playwright>=1.46"]
 
+[project.scripts]
+ejs-mac-validation = "ejs.apps.mac_validation:main"
+
 [project.optional-dependencies]
 test = ["pytest>=8,<9"]
 
