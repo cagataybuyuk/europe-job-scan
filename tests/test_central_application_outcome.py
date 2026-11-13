@@ -346,6 +346,8 @@ def test_invalid_clock_and_boolean_write_authority_fail_closed(ledger, binding):
     ("To Apply", "Applied", "Rejected\ufeff"),
     ("To Apply", "Applied", "Ａｐｐｌｉｅｄ"),
     ("To Apply", "Applied", "Rejected\u00a0"),
+    ("To Apply", "Applied", "Rejected\u2028"),
+    ("To Apply", "Applied", "Rejected\u2029"),
 ])
 def test_ambiguous_status_validation_never_publishes_applied(ledger, binding, allowed):
     confirm(ledger)
