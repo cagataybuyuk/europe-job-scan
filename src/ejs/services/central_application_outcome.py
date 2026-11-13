@@ -207,7 +207,7 @@ def _row(read: CentralApplicationRead, binding: CentralApplicationBinding) -> Ce
     _require(type(read.status_allowed_values) is tuple
              and all(type(x) is str and x and x == x.strip()
                      and unicodedata.normalize("NFKC", x) == x
-                     and not any(unicodedata.category(ch) in {"Cf", "Cc"} for ch in x)
+                     and not any(unicodedata.category(ch) in {"Cf", "Cc", "Zl", "Zp"} for ch in x)
                      for x in read.status_allowed_values)
              and len(set(read.status_allowed_values)) == len(read.status_allowed_values)
              and "Applied" in read.status_allowed_values)
