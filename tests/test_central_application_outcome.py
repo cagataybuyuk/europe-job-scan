@@ -332,3 +332,33 @@ def test_invalid_clock_and_boolean_write_authority_fail_closed(ledger, binding):
     assert sync(ledger, binding, transport, now=NOW - timedelta(seconds=2))["status"] == "CENTRAL_SYNC_BLOCKED"
     assert sync(ledger, binding, transport, write_enabled=1)["status"] == "CENTRAL_SYNC_BLOCKED"
     assert transport.reads == 0
+
+
+@pytest.mark.parametrize("allowed", [
+    ("To Apply", "Applied", "Applied", "Rejected"),
+    ("To Apply", "Applied", ""),
+    ("To Apply", "Applied", "Rejected", "Rejected"),
+    ("To Apply", "Applied ", "Rejected"),
+    ("To Apply", " Applied", "Rejected"),
+    ("To Apply", "Applied", "Rejected\t"),
+    ("To Apply", "Applied", " Rejected", "Rejected"),
+    ("To Apply", "Applied", "Rejected\u200b"),
+    ("To Apply", "Applied", "Rejected\ufeff"),
+    ("To Apply", "Applied", "Ａｐｐｌｉｅｄ"),
+    ("To Apply", "Applied", "Rejected\u00a0"),
+    ("To Apply", "Applied", "Rejected\u2028"),
+    ("To Apply", "Applied", "Rejected\u2029"),
+    ("To Apply", "Applied", "Rej\u0000ected"),
+    ("To Apply", "Applied", "Rej\u202eected"),
+    ("To Apply", "Applied", "Rej\u000dected"),
+    ("To Apply", "Applied", "Rej\u000aected"),
+])
+def test_ambiguous_status_validation_never_publishes_applied(ledger, binding, allowed):
+    confirm(ledger)
+    transport = SyntheticLockedTransport(binding)
+    transport.allowed = allowed
+    result = sync(ledger, binding, transport)
+    assert result["status"] == "CENTRAL_SYNC_BLOCKED"
+    assert result["applications_write_performed"] is False
+    assert transport.writes == 0 and transport.requests == []
+    assert transport.rows[0].cells[9] == "To Apply"
