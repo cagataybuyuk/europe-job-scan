@@ -532,6 +532,123 @@ def test_native_entry_cannot_be_inferred_or_expand_oauth_authority(tmp_path, pol
     assert_blocked(lambda: load(tmp_path, manifest, facts))
 
 
+def spl_correction_plan(manifest, facts, *, record_type="experience", omit_month=False):
+    phase = correction_plan(manifest, facts, record_type=record_type, omit_month=omit_month)
+    for field in phase['edits'][0]['editor']['fields']:
+        if field['kind'] == 'month':
+            host_id = 'spl-' + field['key']
+            field['selector'] = f'spl-date-field#{host_id} input[aria-label="{field["label"]}"]'
+            field['month_picker'] = dict(type='spl-month-year-v1', field_selector=f'spl-date-field#{host_id}',
+                picker_selector='spl-date-picker', calendar_selector='#calendar-' + field['key'],
+                calendar_fingerprint='b' * 64, display_format='iso-month-start-transport-v1',
+                clear=dict(selector='[role="button"][aria-label="Clear date"]', label='Clear date'))
+        elif field['label'] in {'Title', 'Company', 'Office location'}:
+            field['selector'] = 'input#' + field['key']
+            field['text_autocomplete'] = dict(type='spl-profile-text-v1', host_selector='#spl-' + field['key'])
+    return phase
+
+
+@pytest.mark.parametrize('record_type,omit_month', [('experience', False), ('education', True)])
+def test_profile_spl_month_precision_and_source_text_are_explicit_reviewed_bindings(tmp_path, record_type, omit_month):
+    manifest, facts = inputs()
+    spl_correction_plan(manifest, facts, record_type=record_type, omit_month=omit_month)
+    assert load(tmp_path, manifest, facts) == manifest
+
+
+@pytest.mark.parametrize('mutation', ['type', 'format', 'hash', 'unknown_key', 'clear_delete', 'missing_selector',
+    'day_fact', 'text_on_month', 'month_on_title', 'text_widget_type', 'missing_text_host'])
+def test_profile_spl_binding_never_becomes_a_generic_day_picker_or_suggestion_writer(tmp_path, mutation):
+    manifest, facts = inputs(); phase = spl_correction_plan(manifest, facts)
+    fields = phase['edits'][0]['editor']['fields']
+    month = next(field for field in fields if field['label'] == 'From')
+    title = fields[0]
+    if mutation == 'type': month['month_picker']['type'] = 'generic-date'
+    if mutation == 'format': month['month_picker']['display_format'] = 'guess-MM/DD/YYYY'
+    if mutation == 'hash': month['month_picker']['calendar_fingerprint'] = 'invalid'
+    if mutation == 'unknown_key': month['month_picker']['allow_submit'] = True
+    if mutation == 'clear_delete': month['month_picker']['clear']['label'] = 'Delete'
+    if mutation == 'missing_selector': month['month_picker'].pop('picker_selector')
+    if mutation == 'day_fact':
+        month['value'] = '2025-01-01'
+        next(f for f in facts['facts'] if f['canonical_field'] == month['canonical_field'])['value'] = month['value']
+    if mutation == 'text_on_month': month['text_autocomplete'] = deepcopy(title['text_autocomplete'])
+    if mutation == 'month_on_title': title['month_picker'] = deepcopy(month['month_picker'])
+    if mutation == 'text_widget_type': title['text_autocomplete']['type'] = 'pick-a-company-suggestion'
+    if mutation == 'missing_text_host': title['text_autocomplete'].pop('host_selector')
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+def city_binding(manifest, facts):
+    field = add_field(manifest, facts, 'candidate.city', 'Synthetic City', kind='text', required=False,
+                      source='candidate_verified:fixture-city')
+    field.update(label='City', selector='input#city', city_autocomplete=dict(type='spl-city-text-v1', host_selector='#city-host'))
+    return field
+
+
+def test_city_autocomplete_is_explicit_verified_candidate_city_only(tmp_path):
+    manifest, facts = inputs(); city_binding(manifest, facts)
+    assert load(tmp_path, manifest, facts) == manifest
+
+
+def phone_country_binding(manifest, facts):
+    field = add_field(manifest, facts, 'candidate.phone_country_code', '+90', required=False)
+    source = 'candidate_verified:fixture-phone-country'
+    facts['facts'].append(dict(canonical_field='candidate.phone_country', value='Turkey', source_ref=source,
+                              verified=True, auto_fill_approved=True, verified_at=STAMP))
+    field.update(label='Country code', selector='button#phone-country', phone_country_select=dict(
+        type='spl-phone-country-v1', host_selector='spl-select#phone-country', country_iso2='TR',
+        country_label='Turkey', option_label='Turkey +90', country_provenance_ref=source))
+    return field
+
+
+def test_phone_country_select_keeps_verified_dial_code_separate_from_reviewed_display(tmp_path):
+    manifest, facts = inputs(); phone_country_binding(manifest, facts)
+    assert load(tmp_path, manifest, facts) == manifest
+
+
+@pytest.mark.parametrize('mutation', ['canonical', 'label', 'kind', 'mode', 'display_as_fact', 'iso', 'country', 'provenance', 'missing_country', 'type', 'extra', 'host', 'second_step'])
+def test_phone_country_select_requires_exact_source_bound_contract(tmp_path, mutation):
+    manifest, facts = inputs(); field = phone_country_binding(manifest, facts); spec = field['phone_country_select']
+    if mutation == 'canonical': field['canonical_field'] = 'candidate.phone'
+    if mutation == 'label': field['label'] = 'Country'
+    if mutation == 'kind': field['kind'] = 'text'
+    if mutation == 'mode': field['resolution_mode'] = 'Blank Optional'
+    if mutation == 'display_as_fact': field['value'] = facts['facts'][1]['value'] = 'Turkey +90'
+    if mutation == 'iso': spec['country_iso2'] = 'tr'
+    if mutation == 'country': facts['facts'][-1]['value'] = 'Portugal'
+    if mutation == 'provenance': spec['country_provenance_ref'] = 'unreviewed:source'
+    if mutation == 'missing_country': facts['facts'].pop()
+    if mutation == 'type': spec['type'] = 'nearest-host-value'
+    if mutation == 'extra': spec['guess_country'] = True
+    if mutation == 'host': spec['host_selector'] = ''
+    if mutation == 'second_step':
+        manifest['steps'].append(deepcopy(manifest['steps'][0])); manifest['steps'][1]['url'] += '/screening'
+        manifest['steps'][0]['fields'].remove(field)
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
+@pytest.mark.parametrize('mutation', ['canonical', 'label', 'kind', 'mode', 'value', 'source', 'linkedin_fact', 'type', 'extra', 'host', 'second_step'])
+def test_city_binding_cannot_reinterpret_other_fields_or_promote_unverified_suggestions(tmp_path, mutation):
+    manifest, facts = inputs(); field = city_binding(manifest, facts)
+    if mutation == 'canonical': field['canonical_field'] = 'candidate.first_name'
+    if mutation == 'label': field['label'] = 'Office location'
+    if mutation == 'kind': field['kind'] = 'select'
+    if mutation == 'mode': field['resolution_mode'] = 'Blank Optional'
+    if mutation == 'value': field['value'] = 'Guessed suggestion'
+    if mutation == 'source': field['provenance_ref'] = 'linkedin:prefill'
+    if mutation == 'linkedin_fact': field['provenance_ref'] = facts['facts'][-1]['source_ref'] = 'linkedin:prefill'
+    if mutation == 'type': field['city_autocomplete']['type'] = 'any-combobox'
+    if mutation == 'extra': field['city_autocomplete']['select_suggestions'] = True
+    if mutation == 'host': field['city_autocomplete']['host_selector'] = ''
+    if mutation == 'second_step':
+        manifest['steps'][0]['fields'].remove(field)
+        second = deepcopy(manifest['steps'][0]); second['url'] += '/screening'; second['fields'] = [field]
+        second.pop('upload'); manifest['steps'][0].pop('submit')
+        manifest['steps'][0]['next'] = dict(selector='#next', label='Next')
+        manifest['steps'].append(second)
+    assert_blocked(lambda: load(tmp_path, manifest, facts))
+
+
 @pytest.mark.parametrize("mutation", ["absent", "two_uploads", "missing_kind", "wrong_kind",
     "string_required", "missing_required", "empty_label", "duplicate_key", "selector_collision",
     "oversize_selector", "not_object"])

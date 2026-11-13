@@ -829,7 +829,7 @@ def profile_driver(chromium, fixture, monkeypatch, **faults):
     markup += '<section id="profile-other" class="profile-card"><span id="profile-other-text">Verified untouched record</span><button aria-label="Edit '
     markup += phase['cards'][1]['record_type'] + ' Other record"></button></section></div><div id="profile-editor" hidden>'
     for field in plan['fields']:
-        field_id = field['selector'][1:]
+        field_id = field['key']
         markup += '<label for="' + field_id + '">' + escape(field['label']) + '</label>'
         required = ' required' if field['required'] else ''
         kind = 'date' if faults.get('day') and field['label'] == 'From' else field['kind']
@@ -841,13 +841,54 @@ def profile_driver(chromium, fixture, monkeypatch, **faults):
     markup += '<button id="profile-save" type="button">Save</button><button id="profile-cancel" type="button">Cancel</button></div>'
     script = """<script>
       const profileFields=FIELDS;const profileFaults=FAULTS;const kind=KIND;
+      const profileControl = field => {
+        const scan=root=>{for(const input of root.querySelectorAll('input,textarea,select'))if(input.dataset.profileKey===field.key)return input;
+          for(const host of root.querySelectorAll('*'))if(host.shadowRoot){const found=scan(host.shadowRoot);if(found)return found;}};
+        return scan(document);
+      };
+      for(const field of profileFields){
+        const input=document.getElementById(field.key);input.dataset.profileKey=field.key;
+        const mount=(tag,id,parent)=>{const host=document.createElement(tag);if(id)host.id=id;host.style.display='block';parent.append(host);return host;};
+        if(field.text_autocomplete){
+          const tags={'Title':'oc-job-title-autocomplete','Company':'oc-company-autocomplete','Office location':'oc-location-autocomplete'};
+          const host=document.createElement(tags[field.label]);host.id='spl-'+field.key;input.replaceWith(host);
+          const root=host.attachShadow({mode:'open'});const auto=mount('spl-autocomplete',input.id,root).attachShadow({mode:'open'});
+          const dropdown=mount('spl-dropdown','',auto).attachShadow({mode:'open'});const wrapper=mount('spl-input',input.id,dropdown);
+          if(field.required)wrapper.setAttribute('required','');input.removeAttribute('required');input.setAttribute('aria-label',field.label);input.setAttribute('role','combobox');
+          wrapper.attachShadow({mode:'open'}).append(input);
+        }
+        if(field.month_picker){
+          const host=document.createElement('spl-date-field');host.id='spl-'+field.key;host.setAttribute('type',profileFaults.precision?'full':'month-year');
+          if(field.required||profileFaults.required_month)host.setAttribute('required','');input.replaceWith(host);
+          const picker=mount('spl-date-picker','',host.attachShadow({mode:'open'}));picker.setAttribute('type','month-year');picker.setAttribute('aria-labelledby',host.id+'-label');
+          if(field.required||profileFaults.required_month)picker.setAttribute('required','');const root=picker.attachShadow({mode:'open'});
+          input.type='text';input.value='2026-09-01';input.id='';input.removeAttribute('required');input.setAttribute('aria-label',field.label);input.placeholder='Pick a date';input.className='flatpickr-input';
+          input.setAttribute('aria-controls','calendar-'+field.key);root.append(input);
+          const clear=document.createElement('span');clear.setAttribute('role','button');clear.setAttribute('aria-label','Clear date');clear.textContent='Clear';root.append(clear);
+          const calendar=document.createElement('div');calendar.id='calendar-'+field.key;calendar.setAttribute('role','dialog');calendar.setAttribute('aria-label',profileFaults.wrong_calendar?'Wrong picker':field.label);calendar.hidden=true;root.append(calendar);
+          let year=2026;
+          const render=()=>{
+            calendar.replaceChildren();const spin=document.createElement('input');spin.type='number';spin.setAttribute('aria-label','Year');spin.value=String(year);calendar.append(spin);
+            for(const [label,delta] of [['Previous year',-1],['Next year',1]]){const button=document.createElement('button');button.type='button';button.setAttribute('aria-label',label);button.textContent=label;
+              button.addEventListener('click',()=>{year+=delta*(profileFaults.year_leap?2:1);render();});calendar.append(button);}
+            const months=['January','February','March','April','May','June','July','August','September','October','November','December'];
+            for(let n=0;n<(profileFaults.day_calendar?31:12);n++){const cell=document.createElement('span');const name=months[n%12];cell.setAttribute('role','gridcell');
+              cell.setAttribute('aria-label',name+' '+(profileFaults.day_calendar?n+1:1)+', '+year);cell.textContent=name.slice(0,3);
+              cell.addEventListener('click',()=>{input.value=profileFaults.format?name+' '+year:String(year)+'-'+String(n+1).padStart(2,'0')+'-01';calendar.hidden=true;clear.hidden=false;});calendar.append(cell);}
+            if(profileFaults.calendar_extra){const extra=document.createElement('input');extra.setAttribute('aria-label','Unreviewed calendar input');extra.tabIndex=-1;calendar.append(extra);}
+            if(profileFaults.calendar_role_extra){const extra=document.createElement('div');extra.setAttribute('role','combobox');extra.setAttribute('aria-label','Unreviewed calendar combobox');extra.textContent='Unknown choice';extra.tabIndex=-1;calendar.append(extra);}
+          };render();
+          input.addEventListener('click',()=>{calendar.hidden=false;if(profileFaults.extra_on_open){const extra=document.createElement('input');extra.setAttribute('aria-label','Unreviewed editor input');document.querySelector('#profile-editor').append(extra);}});
+          clear.addEventListener('click',()=>{input.value='';clear.hidden=true;calendar.hidden=true;});
+        }
+      }
       document.querySelector('#profile-edit').addEventListener('click',()=>{
         document.querySelector('#profile-editor').hidden=false;
         if(profileFaults.extra){const input=document.createElement('input');input.setAttribute('aria-label','Unexpected optional field');document.querySelector('#profile-editor').append(input);}
       });
       document.querySelector('#profile-cancel').addEventListener('click',()=>document.querySelector('#profile-editor').hidden=true);
       document.querySelector('#profile-save').addEventListener('click',()=>{
-        const values={};for(const field of profileFields){const input=document.querySelector(field.selector);values[field.label]=field.kind==='checkbox'?input.checked:input.value;}
+        const values={};for(const field of profileFields){const input=profileControl(field);values[field.label]=field.kind==='checkbox'?input.checked:field.month_picker&&/^\\d{4}-\\d{2}-01$/.test(input.value)?input.value.slice(0,7):input.value;}
         let summary;
         if(kind==='experience')summary=values.Title+'\\n'+values.Company+'\\n'+values.From+' – '+values.To+'\\n'+values.Description;
         else summary=values.Institution+'\\n'+values.Degree+'\\n'+(values.From&&values.To?values.From+' – '+values.To:values.Description);
@@ -873,9 +914,17 @@ def review_profile_shapes(chromium, fixture, monkeypatch):
         fixture.manifest['steps'][0]['fingerprint'] = browser.inspect()['fingerprint']
         browser.page.locator('#profile-edit').click()  # Independent synthetic reviewer, never a live discovery click.
         editor = browser.page.locator('#profile-editor')
-        shape = {'controls': sorted([loc.evaluate(_DESCRIBE) for loc, _ in browser._controls(editor)], key=lambda x: json.dumps(x, sort_keys=True)),
-            'actions': sorted([dict(label=b.inner_text().strip(), disabled=not b.is_enabled(), type=b.get_attribute('type') or '')
-                               for b in editor.locator('button').all()], key=lambda x: json.dumps(x, sort_keys=True))}
+        for binding in plan['fields']:
+            if 'month_picker' in binding:
+                browser._locator(binding, editor).click()
+                observed = browser._profile_month_calendar_snapshot(binding, editor)
+                binding['month_picker']['calendar_fingerprint'] = observed['fingerprint']
+                observed['calendar'].evaluate('el=>el.hidden=true')  # Synthetic reviewer closes the local fixture only.
+        controls, clear = browser._profile_editor_controls(plan, editor)
+        shape = {'controls': sorted([info for _, info in controls], key=lambda x: json.dumps(x, sort_keys=True)),
+            'actions': sorted([dict(label=b.get_attribute('aria-label') or b.inner_text().strip(), disabled=not b.is_enabled(), type=b.get_attribute('type') or '')
+                               for b in editor.locator('button,[role="button"]').all() if b.is_visible()
+                               and not any(b.evaluate('(el, clear)=>el===clear', c.element_handle()) for c in clear)], key=lambda x: json.dumps(x, sort_keys=True))}
         plan['fingerprint'] = digest(shape)
         browser.page.locator('#profile-cancel').click()
         browser.advance(fixture.manifest['steps'][0]['next'], fixture.target.screening_url)
@@ -934,6 +983,222 @@ def test_retained_return_defers_only_exact_reviewed_profile_card_not_other_prefi
             assert browser.page.locator('#profile-other').inner_text().strip() == 'Verified untouched record'
         assert [method for method, _, _ in seen] == ['GET']
         assert boundary.upload_requests_allowed == boundary.application_requests_allowed == 0 and not fixture.ledger.has_intent()
+
+
+@pytest.mark.parametrize('record_type,omit_month', [('experience', False), ('education', True)])
+def test_reviewed_spl_profile_widgets_use_month_precision_and_verified_text_only(chromium, fixture, monkeypatch, record_type, omit_month):
+    from tests.test_single_application_inputs import spl_correction_plan
+    enable_native_fixture(fixture)
+    spl_correction_plan(fixture.manifest, fixture.facts, record_type=record_type, omit_month=omit_month)
+    review_profile_shapes(chromium, fixture, monkeypatch)
+    with profile_driver(chromium, fixture, monkeypatch) as (browser, boundary, seen, _):
+        result = run(fixture, browser)
+        assert result['status'] == 'EMPLOYER_CONFIRMED', result
+        assert browser._profile_corrections_applied is True
+        assert boundary.application_requests_allowed == boundary.upload_requests_allowed == 1
+        assert [method for method, _, _ in seen] == ['GET', 'POST', 'POST']
+
+
+def test_spl_month_day_one_transport_is_never_a_candidate_day_fact(chromium, fixture, monkeypatch):
+    from tests.test_single_application_inputs import spl_correction_plan
+    enable_native_fixture(fixture); phase = spl_correction_plan(fixture.manifest, fixture.facts)
+    review_profile_shapes(chromium, fixture, monkeypatch)
+    plan = phase['edits'][0]['editor']; binding = next(field for field in plan['fields'] if field['label'] == 'From')
+    with profile_driver(chromium, fixture, monkeypatch) as (browser, boundary, seen, _):
+        browser.open(fixture.target.entry_url); browser.preferred_entry(); browser.page.locator('#profile-edit').click()
+        editor = browser._profile_editor_surface(plan)
+        assert browser._profile_readback(binding, editor) is None
+        browser._profile_write(binding, editor, plan)
+        assert browser._locator(binding, editor).input_value() == '2025-01-01'
+        assert browser._profile_readback(binding, editor) == '2025-01'
+        assert next(f for f in fixture.facts['facts'] if f['canonical_field'] == binding['canonical_field'])['value'] == '2025-01'
+        assert [method for method, _, _ in seen] == ['GET']
+        assert boundary.application_requests_allowed == boundary.upload_requests_allowed == 0
+
+
+@pytest.mark.parametrize('fault', ['precision', 'day_calendar', 'wrong_calendar', 'format', 'year_leap', 'calendar_extra', 'calendar_role_extra', 'extra_on_open', 'network'])
+def test_spl_profile_month_picker_rejects_precision_calendar_format_drift_and_network_save(chromium, fixture, monkeypatch, fault):
+    from tests.test_single_application_inputs import spl_correction_plan
+    enable_native_fixture(fixture); spl_correction_plan(fixture.manifest, fixture.facts)
+    review_profile_shapes(chromium, fixture, monkeypatch)
+    with profile_driver(chromium, fixture, monkeypatch, **{fault: True}) as (browser, boundary, _, _):
+        result = run(fixture, browser)
+        assert result['status'] == 'BLOCKED', result
+        assert boundary.application_requests_allowed == boundary.upload_requests_allowed == 0
+        assert not fixture.ledger.has_intent()
+
+
+@pytest.mark.parametrize('fault', ['required_month', 'missing_clear'])
+def test_unknown_spl_month_is_never_guessed_or_preserved_without_reviewed_clear(chromium, fixture, monkeypatch, fault):
+    from tests.test_single_application_inputs import spl_correction_plan
+    enable_native_fixture(fixture); phase = spl_correction_plan(fixture.manifest, fixture.facts, record_type='education', omit_month=True)
+    review_profile_shapes(chromium, fixture, monkeypatch)
+    if fault == 'missing_clear':
+        for binding in phase['edits'][0]['editor']['fields']:
+            if 'month_picker' in binding: binding['month_picker'].pop('clear')
+    with profile_driver(chromium, fixture, monkeypatch, **{fault: True}) as (browser, boundary, _, _):
+        result = run(fixture, browser)
+        assert result['status'] == 'BLOCKED', result
+        assert boundary.application_requests_allowed == boundary.upload_requests_allowed == 0
+        assert not fixture.ledger.has_intent()
+
+
+@contextmanager
+def city_driver(chromium, fixture, monkeypatch, **faults):
+    script = """<script>
+      const cityFaults=FAULTS;const form=document.querySelector('#form');
+      const host=document.createElement(cityFaults.wrong_host?'oc-company-autocomplete':'oc-location-autocomplete');host.id='city-host';form.append(host);
+      const mount=(tag,parent)=>{const node=document.createElement(tag);node.id=tag==='spl-dropdown'?'':'city';node.style.display='block';parent.append(node);return node.attachShadow({mode:'open'});};
+      const auto=mount('spl-autocomplete',host.attachShadow({mode:'open'}));const drop=mount('spl-dropdown',auto);const root=mount('spl-input',drop);
+      const input=document.createElement('input');input.id='city';input.type='text';input.setAttribute('role','combobox');input.setAttribute('aria-label','City');root.append(input);
+      const options=document.createElement('div');options.id='city-options';options.setAttribute('role','listbox');options.setAttribute('data-clicks','0');
+      options.innerHTML='<span role="option">Synthetic City</span>';form.append(options);
+      options.addEventListener('click',()=>options.setAttribute('data-clicks','1'));
+      const decoy=document.createElement('input');decoy.id='city-decoy';decoy.type='text';decoy.setAttribute('role','combobox');decoy.setAttribute('aria-label','City');form.append(decoy);
+      input.addEventListener('input',()=>{
+        if(cityFaults.extra){const unknown=document.createElement('input');unknown.setAttribute('aria-label','New optional control');form.append(unknown);}
+        if(cityFaults.search)fetch('/unreviewed-city-search').catch(()=>{});
+        if(cityFaults.selection)input.setCustomValidity('Select an independently verified city option');
+        if(cityFaults.readback)input.value='Wrong city';
+      });
+    </script>""".replace('FAULTS', json.dumps(faults))
+    rendered = html_for(fixture).replace('</body>', script + '</body>')
+    with monkeypatch.context() as local:
+        local.setitem(globals(), 'html_for', lambda *_args, **_kwargs: rendered)
+        with actual_driver(chromium, fixture, monkeypatch) as state:
+            yield state
+
+
+def review_city_shapes(chromium, fixture, monkeypatch):
+    with city_driver(chromium, fixture, monkeypatch) as (browser, _, _, _):
+        browser.open(fixture.target.entry_url); browser.preferred_entry()
+        fixture.manifest['steps'][0]['fingerprint'] = browser.inspect()['fingerprint']
+        browser.advance(fixture.manifest['steps'][0]['next'], fixture.target.screening_url)
+        fixture.manifest['steps'][1]['fingerprint'] = browser.inspect()['fingerprint']
+
+
+def test_explicit_city_widget_fills_verified_native_value_without_selecting_suggestion(chromium, fixture, monkeypatch):
+    from tests.test_single_application_inputs import city_binding
+    enable_native_fixture(fixture); binding = city_binding(fixture.manifest, fixture.facts)
+    review_city_shapes(chromium, fixture, monkeypatch)
+    with city_driver(chromium, fixture, monkeypatch) as (browser, boundary, seen, _):
+        browser.open(fixture.target.entry_url); browser.preferred_entry()
+        browser.write(binding)
+        assert browser.readback(binding) == 'Synthetic City'
+        assert browser.page.locator('#city-options').get_attribute('data-clicks') == '0'
+        assert [method for method, _, _ in seen] == ['GET']
+        assert boundary.application_requests_allowed == boundary.upload_requests_allowed == 0
+
+
+def test_explicit_city_widget_is_part_of_actual_native_two_step_runtime(chromium, fixture, monkeypatch):
+    from tests.test_single_application_inputs import city_binding
+    enable_native_fixture(fixture); city_binding(fixture.manifest, fixture.facts)
+    review_city_shapes(chromium, fixture, monkeypatch)
+    with city_driver(chromium, fixture, monkeypatch) as (browser, boundary, seen, _):
+        result = run(fixture, browser)
+        assert result['status'] == 'EMPLOYER_CONFIRMED', result
+        assert boundary.application_requests_allowed == 1
+        assert [method for method, _, _ in seen] == ['GET', 'POST', 'POST']
+
+
+@pytest.mark.parametrize('fault', ['wrong_host', 'extra', 'search', 'selection', 'readback', 'retarget'])
+def test_city_widget_never_guesses_suggestions_ignores_changes_or_targets_other_inputs(chromium, fixture, monkeypatch, fault):
+    from tests.test_single_application_inputs import city_binding
+    enable_native_fixture(fixture); binding = city_binding(fixture.manifest, fixture.facts)
+    review_city_shapes(chromium, fixture, monkeypatch)
+    if fault == 'retarget': binding['selector'] = 'input#city-decoy'
+    with city_driver(chromium, fixture, monkeypatch, **{fault: True}) as (browser, boundary, _, _):
+        result = run(fixture, browser)
+        assert result['status'] == 'BLOCKED', result
+        assert boundary.application_requests_allowed == boundary.upload_requests_allowed == 0
+        assert not fixture.ledger.has_intent()
+
+
+@contextmanager
+def phone_country_driver(chromium, fixture, monkeypatch, **faults):
+    script = """<script>
+      const phoneFaults=FAULTS,form=document.querySelector('#form');
+      const host=document.createElement(phoneFaults.wrong_host?'spl-autocomplete':'spl-select');
+      host.id='phone-country';host.className='c-spl-phone-field-select';host.setAttribute('value','PT');host.setAttribute('splarialabel','Country code');
+      Object.defineProperty(host,'value',{get(){return host.getAttribute('value')}});form.append(host);
+      const prefix=document.createElement('div');prefix.slot='triggerPrefix';prefix.className='c-spl-phone-field-selected';
+      const flag=document.createElement('spl-country-flag');flag.style.cssText='display:inline-block;width:16px;height:16px';
+      flag.setAttribute('countryisocode',phoneFaults.wrong_flag?'TR':'PT');flag.setAttribute('alt','Portugal');
+      const dial=document.createElement('spl-typography-body');dial.textContent=phoneFaults.shared_code?'+90':'+351';prefix.append(flag,dial);host.append(prefix);
+      if(phoneFaults.duplicate_prefix)host.append(prefix.cloneNode(true));
+      const shadow=host.attachShadow({mode:'open'});shadow.innerHTML='<spl-dropdown><button id="phone-country" type="button" role="combobox" aria-label="Country code" aria-required="false" aria-controls="phone-country-menu"><slot name="triggerPrefix"></slot> </button><div id="phone-country-menu" role="listbox" hidden><slot></slot></div></spl-dropdown>';
+      const button=shadow.querySelector('button'),menu=shadow.querySelector('[role=listbox]');
+      for(const [iso,label,code] of [['PT','Portugal','+351'],['TR','Turkey','+90']]){
+        const currentCode=iso==='PT'&&phoneFaults.shared_code?'+90':code;
+        const option=document.createElement('spl-select-option');option.setAttribute('value',iso);option.setAttribute('label',phoneFaults.target_label&&iso==='TR'?'Unreviewed country':label);
+        option.className='c-spl-phone-field-select-option';option.style.display='block';option.textContent=label+' '+currentCode;
+        const item=document.createElement('spl-dropdown-item');if(iso==='PT'||phoneFaults.ambiguous_selected)item.setAttribute('selected','');
+        item.append(document.createElement('slot'));option.attachShadow({mode:'open'}).append(item);host.append(option);
+        option.addEventListener('click',()=>{
+          for(const other of host.querySelectorAll('spl-select-option'))other.shadowRoot.querySelector('spl-dropdown-item').removeAttribute('selected');
+          item.setAttribute('selected','');host.setAttribute('value',iso);flag.setAttribute('countryisocode',iso);flag.setAttribute('alt',label);dial.textContent=phoneFaults.readback?'+999':code;menu.hidden=true;
+          if(phoneFaults.network)fetch('/unreviewed-phone-save',{method:'POST',body:'synthetic'}).catch(()=>{});
+        });
+      }
+      if(phoneFaults.selected_mismatch)host.setAttribute('value','TR');
+      button.addEventListener('click',()=>{menu.hidden=false;if(phoneFaults.extra){const unknown=document.createElement('input');unknown.setAttribute('aria-label','New optional phone field');form.append(unknown);}});
+      const decoy=document.createElement('button');decoy.id='phone-decoy';decoy.type='button';decoy.setAttribute('role','combobox');decoy.setAttribute('aria-label','Country code');form.append(decoy);
+    </script>""".replace('FAULTS', json.dumps(faults))
+    rendered = html_for(fixture).replace('</body>', script + '</body>')
+    with monkeypatch.context() as local:
+        local.setitem(globals(), 'html_for', lambda *_args, **_kwargs: rendered)
+        with actual_driver(chromium, fixture, monkeypatch) as state:
+            yield state
+
+
+def review_phone_country_shapes(chromium, fixture, monkeypatch):
+    with phone_country_driver(chromium, fixture, monkeypatch) as (browser, _, _, _):
+        browser.open(fixture.target.entry_url); browser.preferred_entry()
+        fixture.manifest['steps'][0]['fingerprint'] = browser.inspect()['fingerprint']
+        browser.advance(fixture.manifest['steps'][0]['next'], fixture.target.screening_url)
+        fixture.manifest['steps'][1]['fingerprint'] = browser.inspect()['fingerprint']
+
+
+@pytest.mark.parametrize('shared_code', [False, True])
+def test_phone_country_uses_owned_selected_country_and_visible_assigned_prefix(chromium, fixture, monkeypatch, shared_code):
+    from tests.test_single_application_inputs import phone_country_binding
+    enable_native_fixture(fixture); binding = phone_country_binding(fixture.manifest, fixture.facts)
+    review_phone_country_shapes(chromium, fixture, monkeypatch)
+    with phone_country_driver(chromium, fixture, monkeypatch, shared_code=shared_code) as (browser, boundary, seen, _):
+        browser.open(fixture.target.entry_url); browser.preferred_entry()
+        assert browser.page.locator(binding['selector']).evaluate('el=>el.value') == ''
+        assert browser.readback(binding) == (None if shared_code else '+351')
+        browser.write(binding)
+        assert browser.readback(binding) == '+90'
+        assert browser.page.locator('spl-select#phone-country').get_attribute('value') == 'TR'
+        generic = {key: value for key, value in binding.items() if key != 'phone_country_select'}
+        assert browser.readback(generic) == ''  # No generic nearest-host fallback.
+        assert [method for method, _, _ in seen] == ['GET']
+        assert boundary.application_requests_allowed == boundary.upload_requests_allowed == 0
+
+
+def test_phone_country_is_verified_in_actual_native_two_step_runtime(chromium, fixture, monkeypatch):
+    from tests.test_single_application_inputs import phone_country_binding
+    enable_native_fixture(fixture); phone_country_binding(fixture.manifest, fixture.facts)
+    review_phone_country_shapes(chromium, fixture, monkeypatch)
+    with phone_country_driver(chromium, fixture, monkeypatch) as (browser, boundary, seen, _):
+        result = run(fixture, browser)
+        assert result['status'] == 'EMPLOYER_CONFIRMED', result
+        assert boundary.application_requests_allowed == boundary.upload_requests_allowed == 1
+        assert [method for method, _, _ in seen] == ['GET', 'POST', 'POST']
+
+
+@pytest.mark.parametrize('fault', ['wrong_host', 'wrong_flag', 'duplicate_prefix', 'ambiguous_selected', 'selected_mismatch', 'target_label', 'readback', 'extra', 'network', 'retarget'])
+def test_phone_country_rejects_unowned_inconsistent_ambiguous_or_changed_surfaces(chromium, fixture, monkeypatch, fault):
+    from tests.test_single_application_inputs import phone_country_binding
+    enable_native_fixture(fixture); binding = phone_country_binding(fixture.manifest, fixture.facts)
+    review_phone_country_shapes(chromium, fixture, monkeypatch)
+    if fault == 'retarget': binding['selector'] = '#phone-decoy'
+    with phone_country_driver(chromium, fixture, monkeypatch, **{fault: True}) as (browser, boundary, _, _):
+        result = run(fixture, browser)
+        assert result['status'] == 'BLOCKED', result
+        assert boundary.application_requests_allowed == boundary.upload_requests_allowed == 0
+        assert not fixture.ledger.has_intent()
 
 
 def test_retained_cli_controller_actual_page_private_pins_and_one_confirmed_fixture_application(

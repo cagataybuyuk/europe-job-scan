@@ -267,6 +267,29 @@ def _validate_field(field: object, facts: dict[str, dict], keys: set, selectors:
     if canonical in _MARKETING_FIELDS:
         _require(field["kind"] == "checkbox" and field["required"] is False and value is False
                  and mode in {"Default No", "Blank Optional"})
+    if 'city_autocomplete' in field:
+        widget = field['city_autocomplete']
+        _require(canonical == 'candidate.city' and field['label'] == 'City' and field['kind'] == 'text'
+                 and mode == 'Verified Fact' and type(value) is str and bool(value.strip())
+                 and (bool(_EXPLICIT_SOURCE.fullmatch(fact['source_ref'])) or fact['source_ref'].startswith('approved_document:'))
+                 and type(widget) is dict and set(widget) == {'type', 'host_selector'}
+                 and widget['type'] == 'spl-city-text-v1' and _bounded_text(widget['host_selector'], 512))
+    if 'phone_country_select' in field:
+        widget = field['phone_country_select']
+        country = facts.get('candidate.phone_country')
+        _require(canonical == 'candidate.phone_country_code' and field['label'] == 'Country code'
+                 and field['kind'] == 'select' and mode == 'Verified Fact'
+                 and type(value) is str and bool(re.fullmatch(r'\+[1-9][0-9]{0,3}', value))
+                 and (bool(_EXPLICIT_SOURCE.fullmatch(fact['source_ref'])) or fact['source_ref'].startswith('approved_document:'))
+                 and 'city_autocomplete' not in field and type(widget) is dict
+                 and set(widget) == {'type', 'host_selector', 'country_iso2', 'country_label', 'option_label', 'country_provenance_ref'}
+                 and widget['type'] == 'spl-phone-country-v1' and _bounded_text(widget['host_selector'], 512)
+                 and type(widget['country_iso2']) is str and bool(re.fullmatch(r'[A-Z]{2}', widget['country_iso2']))
+                 and _bounded_text(widget['country_label'], 128)
+                 and widget['option_label'] == widget['country_label'] + ' ' + value
+                 and country is not None and country['value'] == widget['country_label']
+                 and country['source_ref'] == widget['country_provenance_ref']
+                 and (bool(_EXPLICIT_SOURCE.fullmatch(country['source_ref'])) or country['source_ref'].startswith('approved_document:')))
     keys.add(key)
     selectors.add(selector)
 
@@ -332,9 +355,10 @@ def _validate_profile_corrections(step: dict, facts: dict[str, dict]) -> None:
         _require(len(editor["fields"]) == len(expected))
         labels, selectors, keys, values = set(), set(), set(), {}
         for field in editor["fields"]:
-            _require(type(field) is dict and set(field) in ({
-                "key", "selector", "label", "kind", "required", "canonical_field", "value", "provenance_ref"}, {
-                "key", "selector", "label", "kind", "required", "canonical_field", "value", "provenance_ref", "omission_policy_ref"}))
+            base = {"key", "selector", "label", "kind", "required", "canonical_field", "value", "provenance_ref"}
+            _require(type(field) is dict and base <= set(field)
+                     and set(field) <= base | {"omission_policy_ref", "month_picker", "text_autocomplete"}
+                     and not ("month_picker" in field and "text_autocomplete" in field))
             label = field["label"]
             _require(label in expected and label not in labels and _opaque(field["key"], 128)
                      and field["key"] not in keys and _bounded_text(field["selector"], 512)
@@ -351,11 +375,32 @@ def _validate_profile_corrections(step: dict, facts: dict[str, dict]) -> None:
                                   and fact.get("omission_reason") == "month_unknown"
                                   and field.get("omission_policy_ref") == "PROFILE-OMIT-UNKNOWN-MONTH")))
                 _require(field["value"] == "" or "omission_policy_ref" not in field)
+                _require("text_autocomplete" not in field)
+                if "month_picker" in field:
+                    widget = field["month_picker"]
+                    mandatory = {"type", "field_selector", "picker_selector", "calendar_selector", "calendar_fingerprint", "display_format"}
+                    _require(type(widget) is dict and mandatory <= set(widget) <= mandatory | {"clear"}
+                             and widget["type"] == "spl-month-year-v1"
+                             and widget["display_format"] == "iso-month-start-transport-v1"
+                             and all(_bounded_text(widget[key], 512) for key in ("field_selector", "picker_selector", "calendar_selector"))
+                             and isinstance(widget["calendar_fingerprint"], str) and bool(_HEX_64.fullmatch(widget["calendar_fingerprint"])))
+                    if "clear" in widget:
+                        clear = widget["clear"]
+                        _require(type(clear) is dict and set(clear) == {"selector", "label"}
+                                 and _bounded_text(clear["selector"], 512) and clear["label"] in {"Clear", "Clear date"})
             elif label == "I currently work here":
-                _require(field["kind"] == "checkbox" and type(field["value"]) is bool and "omission_policy_ref" not in field)
+                _require(field["kind"] == "checkbox" and type(field["value"]) is bool
+                         and not ({"omission_policy_ref", "month_picker", "text_autocomplete"} & set(field)))
             else:
                 _require(field["kind"] in {"text", "select"} and type(field["value"]) is str
-                         and (not field["required"] or bool(field["value"].strip())) and "omission_policy_ref" not in field)
+                         and (not field["required"] or bool(field["value"].strip()))
+                         and not ({"omission_policy_ref", "month_picker"} & set(field)))
+                if "text_autocomplete" in field:
+                    widget = field["text_autocomplete"]
+                    _require(card["record_type"] == "experience" and label in {"Title", "Company", "Office location"}
+                             and field["kind"] == "text" and type(widget) is dict
+                             and set(widget) == {"type", "host_selector"} and widget["type"] == "spl-profile-text-v1"
+                             and _bounded_text(widget["host_selector"], 512))
             labels.add(label); selectors.add(field["selector"]); keys.add(field["key"])
             values[label] = field["value"]
         _require(labels == set(expected) and (not values["From"] or not values["To"] or values["From"] <= values["To"]))
@@ -473,6 +518,8 @@ def load_reviewed_application_inputs(manifest_path: Path, facts_path: Path, *, m
             selectors = set()
             for field in fields:
                 _validate_field(field, by_field, keys, selectors)
+                _require('city_autocomplete' not in field or index == 0)
+                _require('phone_country_select' not in field or index == 0)
             _validate_profile_assertions(step.get("profile_assertions", []), by_field, selectors)
             _require("reviewed_profile_corrections" not in step or index == 0)
             _validate_profile_corrections(step, by_field)
