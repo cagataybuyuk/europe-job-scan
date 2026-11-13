@@ -343,3 +343,30 @@ def test_unreviewed_launchd_triggers_fail_closed_without_job_mutation(fixture, k
     blocked(lambda: app.generate_validation_job(fixture.config_path, fixture.pin))
     assert not tuple(fixture.output.iterdir())
     assert not any("launchctl" in str(call) for call in fixture.calls)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("ats_redirect", "https://unreviewed.example/collect"),
+    ("allowed_methods", ["GET", "POST"]),
+    ("submit_url", "https://unreviewed.example/submit"),
+    ("http_method", "POST"),
+    ("allow_external_redirects", True),
+    ("browser_action", "click"),
+    ("cv_upload", True),
+    ("kill_switch", False),
+])
+def test_unreviewed_ats_transport_or_write_authority_never_generates_job(fixture, key, value):
+    """A validation-only job cannot acquire transport, redirect or employer-write scope."""
+    fixture.config[key] = value
+    repin(fixture)
+    blocked(lambda: app.generate_validation_job(fixture.config_path, fixture.pin))
+    assert not tuple(fixture.output.iterdir())
+    assert fixture.calls == []
+
+
+def test_validation_cli_never_accepts_ats_url_or_http_method(fixture):
+    """Generated argv is a pinned local input validator, not an ATS transport."""
+    args = app.validation_arguments(fixture.config)
+    assert not any("http://" in item or "https://" in item for item in args)
+    assert not any(item.upper() in ("POST", "PUT", "PATCH", "DELETE") for item in args)
+    assert not any(item in args for item in ("--url", "--redirect", "--upload", "--submit", "--method"))
