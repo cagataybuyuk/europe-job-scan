@@ -7,7 +7,7 @@ name = "europe-job-scan-service"
 version = "0.12.0a1"
 description = "Europe Job Scan Google-native Apps Script control plane and Cloud Run browser execution bootstrap"
 requires-python = ">=3.11"
-dependencies = ["playwright>=1.46"]
+dependencies = ["playwright>=1.51"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<9"]

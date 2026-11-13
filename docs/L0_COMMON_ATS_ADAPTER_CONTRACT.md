@@ -60,6 +60,20 @@ Known targets with a current inspection-capable adapter may be dispatched to tha
 
 LinkedIn is deliberately special: a LinkedIn job URL is not assumed to be Easy Apply. The existing source resolver must explicitly classify it as `linkedin_easy_apply`; external Apply URLs must be resolved to their underlying ATS before adapter dispatch.
 
+## Planned application entry strategy — AWLI
+
+Apply with LinkedIn (AWLI) is a planned application-entry/prefill strategy on the underlying ATS, distinct from LinkedIn Easy Apply and LinkedIn external-apply source resolution. Evaluate it as the primary/fast-path when the exact target offers it, the LinkedIn session is ready, and the route has reviewed live evidence. Keep the native ATS authenticated/guest flow as fallback. Availability is employer/target-specific; detection alone grants no capability or runtime authority.
+
+LinkedIn is never the source-of-truth. Inspect the returned ATS form and verify every AWLI-prefilled field against the canonical candidate profile and approved policy answers. Apply only reviewed normalization/corrections with current safe-fill authority and readback; unresolved mismatches, missing provenance, locked incorrect fields or unknown required answers route to `human_review`. Never import AWLI values into the canonical profile automatically.
+
+Missing/expired LinkedIn sessions, MFA, CAPTCHA/security challenges, unexpected authorization scopes or return-target drift fail closed. No automated credential entry, challenge bypass or retry loop is introduced. Use native fallback only after a fresh inspection proves a clean, reviewed target and no ambiguous application side effects; otherwise stop for `human_review`. Preserve opportunity/application identity and dedupe across route changes.
+
+AWLI accelerates entry/prefill only. Screening, work-right/sponsorship/salary/consent policy, approved CV selection/upload verification, remaining steps, SUBMIT-1, adapter-scoped submit canary, confirmation reconciliation and history remain the underlying ATS adapter's responsibility. AWLI success or a Submit click is never Applied/Confirmed evidence.
+
+This is a documentation-level contract extension, not an implemented dispatch enum or capability promotion. Keep the existing ATS family and L0 `mutation_authorized = false` / `submit_authorized = false` invariants. Future entry evidence should record the selected route, session/auth outcome, sanitized prefill verification result, fallback reason and ATS return-surface fingerprint using existing execution/evidence lineage; do not store raw values, cookies, tokens or authorization codes.
+
+Reference: [ADP AWLI feasibility spike](ADP_AWLI_FEASIBILITY_SPIKE.md).
+
 ## Human-review contract
 
 Common reasons include:
