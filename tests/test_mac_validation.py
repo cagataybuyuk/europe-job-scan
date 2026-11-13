@@ -306,3 +306,26 @@ def test_untrusted_existing_log_blocks_without_replacing_plist(fixture, bad):
         assert outside.read_bytes() == b"SENTINEL"
     else:
         assert log.read_bytes() == b"SENTINEL"
+
+
+@pytest.mark.parametrize("bad", ["interpreter_parent_symlink", "interpreter_parent_writable",
+                                  "venv_config_symlink", "unexpected_python_name"])
+def test_interpreter_path_and_metadata_fail_closed_before_job_write(fixture, bad):
+    """No symlinked/writable interpreter parent, redirected metadata or unexpected executable."""
+    if bad == "interpreter_parent_symlink":
+        real_bin = fixture.venv / "real-bin"
+        (fixture.venv / "bin").rename(real_bin)
+        (fixture.venv / "bin").symlink_to(real_bin, target_is_directory=True)
+    elif bad == "interpreter_parent_writable":
+        (fixture.venv / "bin").chmod(0o777)
+    elif bad == "venv_config_symlink":
+        cfg = fixture.venv / "pyvenv.cfg"
+        actual = fixture.venv / "metadata-real"
+        cfg.rename(actual)
+        cfg.symlink_to(actual)
+    else:
+        fixture.config["python_path"] = str(fixture.venv / "bin/python-unreviewed")
+        repin(fixture)
+    blocked(lambda: app.generate_validation_job(fixture.config_path, fixture.pin))
+    assert not tuple(fixture.output.iterdir())
+    assert not any("launchctl" in str(call) for call in fixture.calls)
