@@ -329,3 +329,17 @@ def test_interpreter_path_and_metadata_fail_closed_before_job_write(fixture, bad
     blocked(lambda: app.generate_validation_job(fixture.config_path, fixture.pin))
     assert not tuple(fixture.output.iterdir())
     assert not any("launchctl" in str(call) for call in fixture.calls)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("StartInterval", 60), ("StartCalendarInterval", {"Minute": 0}),
+    ("KeepAlive", True), ("WatchPaths", ["/tmp"]),
+    ("QueueDirectories", ["/tmp"]), ("MachServices", {"com.ejs.test": True}),
+])
+def test_unreviewed_launchd_triggers_fail_closed_without_job_mutation(fixture, key, value):
+    """Reject launchd persistence/activation keys before generating any job artifact."""
+    fixture.config[key] = value
+    repin(fixture)
+    blocked(lambda: app.generate_validation_job(fixture.config_path, fixture.pin))
+    assert not tuple(fixture.output.iterdir())
+    assert not any("launchctl" in str(call) for call in fixture.calls)
