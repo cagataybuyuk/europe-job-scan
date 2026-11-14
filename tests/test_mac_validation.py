@@ -370,3 +370,16 @@ def test_validation_cli_never_accepts_ats_url_or_http_method(fixture):
     assert not any("http://" in item or "https://" in item for item in args)
     assert not any(item.upper() in ("POST", "PUT", "PATCH", "DELETE") for item in args)
     assert not any(item in args for item in ("--url", "--redirect", "--upload", "--submit", "--method"))
+
+
+@pytest.mark.parametrize("key", [
+    " work_authorization ", "work\tauthorization", "visa\nsponsorship",
+    " legal\ranswer ", " privacy\tconsent ", " optional\nmarketing_consent ",
+])
+def test_whitespace_obfuscated_legal_or_consent_authority_fails_closed(fixture, key):
+    """Unreviewed legal/consent metadata cannot turn a validation job into ATS authority."""
+    fixture.config[key] = "yes"
+    repin(fixture)
+    blocked(lambda: app.generate_validation_job(fixture.config_path, fixture.pin))
+    assert not tuple(fixture.output.iterdir())
+    assert fixture.calls == []
