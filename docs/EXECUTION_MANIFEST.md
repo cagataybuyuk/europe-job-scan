@@ -26,7 +26,7 @@ Tests use synthetic values only.
 | `schema_version` | `EJS-EXECUTION-MANIFEST-1` |
 | `execution_id` | opaque identifier |
 | `candidate_profile_version` | identifier without `:` |
-| `prepared_by_run` | daily run id `YYYYMMDD-HHMM` in Europe/Istanbul; `prepared_at` must fall within 2 h after it |
+| `prepared_by_run` | daily run id `YYYYMMDD-HHMM` in Europe/Istanbul local time (the writer in GD-006 step 7 must stamp it so); `prepared_at` must fall within 2 h after it |
 | `prepared_at`, `expires_at` | ISO-8601 UTC (`Z` or `+00:00`, seconds required); `expires_at` within 24 h and still in the future |
 | `submit_key` | exactly `submit:<opportunity_key>:<requisition_id>:<candidate_profile_version>` |
 | `target` | `ats_family`, `company`, `posting_id` and `requisition_id` (no `:`), `opportunity_key`, `apply_url` |
@@ -40,8 +40,9 @@ and oversize input are rejected.
 Only `smartrecruiters` (`jobs.smartrecruiters.com`) is enabled. Another ATS family
 is added only together with its engine adapter, fixtures and an approved GD/TEST
 record. The apply URL must be HTTPS on the family host, without credentials,
-port, query, fragment, `%`, `..`, whitespace or control characters, and one
-path segment must be the `posting_id` (or start with `<posting_id>-`).
+port, query, fragment, `%`, `..`, whitespace or control characters. For
+SmartRecruiters the path must be exactly `/<company-slug>/<posting_id>` or
+`/<company-slug>/<posting_id>-<slug>`, with a numeric `posting_id`.
 
 ## Form inventory and fingerprint
 
@@ -61,7 +62,7 @@ fingerprint rejects the manifest; the engine must stop on any live difference.
 | Approved Neutral Choice | `demographic.*`, value "Prefer not to say" only | `policy:SUBMIT-1.0:A6` |
 | Default No | marketing / talent-pool consent only, never true | none or `policy:SUBMIT-1.0:A5` |
 | Blank Optional | optional fields only, value null | none |
-| Evidence Text | `application.motivation_text`, `application.cover_letter`, `application.question.<slug>`; `text`/`textarea` controls only | `evidence:<ref>` |
+| Evidence Text | `application.motivation_text`, `application.cover_letter`, `application.question.<slug>` only when the label is a motivation/experience prompt (allowlist); `text`/`textarea` only | `evidence:<ref>` |
 
 Work authorization and sponsorship (`work.*`) must be Verified Fact (A2). Select
 and radio values must be one of the observed options. Required fields can never
@@ -69,9 +70,12 @@ be blank. A canonical field may appear only once, and synonymous fields
 (for example `work.authorization` and `work.work_authorization`) count as one.
 
 Guarded topics: a field whose label (or `application.question.<slug>`) mentions
-work rights/visa/sponsorship, salary/compensation, consent/privacy/marketing or
-demographics must use the matching `work.`, `compensation.`, `consent.` or
-`demographic.` family, so free text or an unrelated fact cannot answer it.
+work rights/visa/sponsorship, salary/compensation, consent/privacy/marketing,
+demographics or notice period (English plus common German, French and Dutch
+terms) must use the matching family. Date of birth, age and criminal-record
+questions have no family and always need review. Because a denylist cannot cover
+every EU form, question Evidence Text additionally fails closed unless the label
+matches the motivation/experience allowlist.
 Checkboxes are allowed only for `consent.*` and `work.*`; a required checkbox
 cannot be left unchecked. Email and telephone values are format-checked.
 

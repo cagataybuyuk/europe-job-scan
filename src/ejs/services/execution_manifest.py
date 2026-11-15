@@ -96,8 +96,19 @@ _GUARDED_TOPICS = (
     ("consent.", re.compile(r"consent|privacy|gdpr|data[\s_-]*(?:processing|protection|retention)"
                             r"|marketing|talent[\s_-]*pool|newsletter|terms", re.I)),
     ("demographic.", re.compile(r"gender|\bsex\b|ethnic|\brace\b|disab|religio|orientation"
-                                r"|veteran|pronoun|caring[\s_-]*responsib", re.I)),
+                                r"|veteran|pronoun|caring[\s_-]*responsib|geschlecht", re.I)),
+    ("employment.notice_period", re.compile(r"notice|k(?:ü|u)ndigungsfrist|pr(?:é|e)avis", re.I)),
+    # No canonical family exists for these, so any field about them fails closed.
+    ("legal.", re.compile(r"birth|\bage\b|convict|criminal|offen[cs]e|background[\s_-]*check", re.I)),
+    ("work.", re.compile(r"entitled|right[\s_-]*to[\s_-]*(?:live|work)|legally|arbeitserlaubnis"
+                         r"|aufenthalt|permis|titre[\s_-]*de[\s_-]*s(?:é|e)jour|werkvergunning", re.I)),
+    ("compensation.", re.compile(r"package|gehalt|salaire|r(?:é|e)mun(?:é|e)ration|salaris|bonus", re.I)),
 )
+# Evidence Text may answer an application.question.* field only when its label is
+# a recognisable motivation/experience prompt; anything else needs review.
+_EVIDENCE_PROMPT = re.compile(
+    r"\bwhy\b|describe|tell us|about yourself|motivat|interest(?:ed)? in|experience with"
+    r"|example of|achievement|cover letter|what attracts|anything else|additional information", re.I)
 _CHECKBOX_FAMILIES = ("consent.", "work.")
 _QUESTION_FIELD = re.compile(r"application\.question\.[a-z0-9][a-z0-9_]{0,63}")
 _PRIVACY_FIELDS = frozenset({"consent.privacy", "consent.privacy_acknowledgement"})
@@ -113,6 +124,7 @@ _UTC_STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 _TEL = re.compile(r"\+?[0-9][0-9 ()-]{4,29}")
 _ISTANBUL = ZoneInfo("Europe/Istanbul")
+_SR_PATH = re.compile(r"/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[0-9]{6,20}(?:-[A-Za-z0-9-]{1,200})?/?")
 _RUN_ID = re.compile(r"[0-9]{8}-[0-9]{4}")
 _FIELD_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _CV_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.pdf")
@@ -241,8 +253,8 @@ def _apply_url(value: object, family: str, posting_id: str) -> str:
              and parts.netloc == parts.hostname and parts.port is None
              and not parts.query and not parts.fragment and parts.path.startswith("/")
              and ".." not in parts.path)
-    segments = [item for item in parts.path.split("/") if item]
-    _require(any(item == posting_id or item.startswith(posting_id + "-") for item in segments))
+    _require(posting_id.isdigit() and bool(_SR_PATH.fullmatch(parts.path))
+             and parts.path.split("/")[2].split("-", 1)[0] == posting_id)
     return value  # type: ignore[return-value]
 
 
@@ -338,7 +350,9 @@ def _validate_answer(field: dict) -> ManifestAnswer:
     if mode == "Approved Policy":
         _require(canonical in _PRIVACY_FIELDS or canonical in _SALARY_FIELDS)
     if mode == "Evidence Text":
-        _require((canonical in FREE_TEXT_FIELDS or _QUESTION_FIELD.fullmatch(canonical))
+        _require((canonical in FREE_TEXT_FIELDS
+                  or (_QUESTION_FIELD.fullmatch(canonical)
+                      and _EVIDENCE_PROMPT.search(field["label"])))
                  and control in ("text", "textarea"))  # A7
     elif canonical in FREE_TEXT_FIELDS:
         _require(mode == "Blank Optional")

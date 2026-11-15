@@ -359,7 +359,8 @@ def test_cv_upload_must_be_required_and_distinct():
 def test_too_many_fields_rejects():
     doc = base_document()
     extra = [field(f"q_{i}", f"application.question.q_{i}", "Synthetic.", mode="Evidence Text",
-                   ref="evidence:x", control="textarea") for i in range(80)]
+                   ref="evidence:x", control="textarea", label=f"Why this role ({i})?")
+             for i in range(80)]
     doc["form"]["fields"].extend(extra)
     rejected(refingerprint(doc))
 
@@ -530,3 +531,65 @@ def test_required_checkbox_left_unchecked_rejects():
     doc = base_document()
     doc["form"]["fields"][6]["required"] = True
     rejected(refingerprint(doc))
+
+
+
+@pytest.mark.parametrize("label", [
+    "Are you legally entitled to work in Ireland?",
+    "Do you have the right to live and work in the UK?",
+    "Can you legally work in the Netherlands without restrictions?",
+    "Benötigen Sie eine Arbeitserlaubnis?",
+    "Avez-vous un permis de travail valide ?",
+    "Gehaltsvorstellung (brutto/Jahr)",
+    "Expected annual package (EUR)",
+    "Geschlecht",
+    "What is your date of birth?",
+    "Have you ever been convicted of a criminal offence?",
+    "What is your notice period?",
+    "Q1",
+])
+def test_question_evidence_text_fails_closed_outside_prompt_allowlist(label):
+    doc = base_document()
+    doc["form"]["fields"].append(field("q1", "application.question.q1", "Yes",
+                                       mode="Evidence Text", ref="evidence:x",
+                                       control="textarea", label=label))
+    rejected(refingerprint(doc))
+
+
+@pytest.mark.parametrize("label", [
+    "Why do you want to join us?",
+    "Describe your experience with Dynamics 365 Finance & Operations.",
+    "Tell us about a transformation project you led.",
+])
+def test_question_evidence_text_accepts_motivation_prompts(label):
+    doc = base_document()
+    doc["form"]["fields"].append(field("q1", "application.question.q1", "Synthetic answer.",
+                                       mode="Evidence Text", ref="evidence:x",
+                                       control="textarea", label=label))
+    load_execution_manifest(encode(refingerprint(doc)), now=NOW)
+
+
+def test_notice_period_label_requires_notice_fact():
+    doc = base_document()
+    doc["form"]["fields"].append(field("notice", "employment.notice_period", "Synthetic",
+                                       label="What is your notice period?"))
+    load_execution_manifest(encode(refingerprint(doc)), now=NOW)
+
+
+@pytest.mark.parametrize("posting,url", [
+    ("ExampleCo", "https://jobs.smartrecruiters.com/ExampleCo/999999-other-role"),
+    ("744000000000001", "https://jobs.smartrecruiters.com/744000000000001/999999-other"),
+    ("744000000000001", "https://jobs.smartrecruiters.com/ExampleCo/x/744000000000001"),
+    ("744000000000001", "https://jobs.smartrecruiters.com/ExampleCo/7440000000000012-x"),
+])
+def test_smartrecruiters_path_is_company_then_posting(posting, url):
+    doc = base_document()
+    doc["target"]["posting_id"] = posting
+    doc["target"]["apply_url"] = url
+    rejected(doc)
+
+
+def test_smartrecruiters_bare_posting_path_is_accepted():
+    doc = base_document()
+    doc["target"]["apply_url"] = "https://jobs.smartrecruiters.com/ExampleCo/744000000000001"
+    load_execution_manifest(encode(doc), now=NOW)
