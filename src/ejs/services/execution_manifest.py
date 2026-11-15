@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import hashlib
 import json
 import math
@@ -29,6 +30,7 @@ ERROR = "EXECUTION_MANIFEST_REVIEW_REQUIRED"
 MAX_MANIFEST_BYTES = 512_000
 MAX_VALIDITY = timedelta(hours=24)
 MAX_OBSERVATION_AGE = timedelta(hours=6)
+MAX_RUN_DURATION = timedelta(hours=2)  # prepared_at must fall inside the run
 CLOCK_SKEW = timedelta(seconds=60)
 MAX_CV_BYTES = 10 * 1024 * 1024
 MAX_FIELDS = 80
@@ -46,6 +48,57 @@ CONTROLS = frozenset({"text", "email", "tel", "textarea", "select", "radio", "ch
 MODES = frozenset({"Verified Fact", "Approved Policy", "Approved Neutral Choice",
                    "Default No", "Blank Optional", "Evidence Text"})
 FREE_TEXT_FIELDS = frozenset({"application.motivation_text", "application.cover_letter"})
+# Employment facts the reviewed input compiler does not list but real forms ask.
+EXTRA_CANONICAL_FIELDS = frozenset({"employment.current_company", "employment.current_title"})
+
+# Verified Fact answers must cite the User Fact Registry key bound to their
+# canonical field. A field without a binding cannot be a Verified Fact.
+FACT_KEYS: dict[str, str] = {
+    "candidate.first_name": "identity.first_name",
+    "candidate.last_name": "identity.last_name",
+    "candidate.email": "contact.email",
+    "candidate.confirm_email": "contact.email",
+    "candidate.phone": "contact.phone",
+    "candidate.linkedin_url": "profile.linkedin",
+    "candidate.city": "location.current_city",
+    "location.city": "location.current_city",
+    "candidate.country": "location.current_country",
+    "location.country": "location.current_country",
+    "work.country_of_residence": "location.current_country",
+    "candidate.location": "location.current_full",
+    "employment.current_company": "employment.current_company",
+    "employment.current_title": "employment.current_title",
+    "employment.notice_period": "employment.notice_period",
+    "work.authorization": "work_right.eu_eea",
+    "work.work_authorization": "work_right.eu_eea",
+    "work.eligibility": "work_right.eu_eea",
+    "work.sponsorship_required": "work_right.sponsorship_required",
+    "work.requires_sponsorship": "work_right.sponsorship_required",
+}
+
+# Synonymous canonical fields: at most one member of a group per manifest.
+_ALIAS_GROUPS = (
+    frozenset({"work.authorization", "work.work_authorization", "work.eligibility"}),
+    frozenset({"work.sponsorship_required", "work.requires_sponsorship"}),
+    frozenset({"consent.privacy", "consent.privacy_acknowledgement"}),
+    frozenset({"consent.marketing", "consent.marketing_opt_in"}),
+    frozenset({"compensation.salary_expectation", "compensation.expected_salary",
+               "compensation.expected_annual_gross", "compensation.expected_salary_range"}),
+)
+
+# A label (or question slug) about a guarded topic must use that topic's
+# canonical family, so free text or another family cannot answer it.
+_GUARDED_TOPICS = (
+    ("work.", re.compile(r"authori[sz]|right[\s_-]*to[\s_-]*work|work[\s_-]*(?:right|permit|visa)"
+                         r"|permit|visa|sponsor|eligib|citizen|nationalit|immigra", re.I)),
+    ("compensation.", re.compile(r"salary|compensation|remuneration|wage|pay[\s_-]*(?:range|expect)"
+                                 r"|gross|\bpay\b", re.I)),
+    ("consent.", re.compile(r"consent|privacy|gdpr|data[\s_-]*(?:processing|protection|retention)"
+                            r"|marketing|talent[\s_-]*pool|newsletter|terms", re.I)),
+    ("demographic.", re.compile(r"gender|\bsex\b|ethnic|\brace\b|disab|religio|orientation"
+                                r"|veteran|pronoun|caring[\s_-]*responsib", re.I)),
+)
+_CHECKBOX_FAMILIES = ("consent.", "work.")
 _QUESTION_FIELD = re.compile(r"application\.question\.[a-z0-9][a-z0-9_]{0,63}")
 _PRIVACY_FIELDS = frozenset({"consent.privacy", "consent.privacy_acknowledgement"})
 _MARKETING_FIELDS = frozenset({"consent.marketing", "consent.marketing_opt_in"})
@@ -55,11 +108,16 @@ _SALARY_FIELDS = frozenset({"compensation.salary_expectation", "compensation.exp
 
 _HEX_64 = re.compile(r"[a-f0-9]{64}")
 _OPAQUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,199}")
+_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")  # no ':' (submit-key part)
+_UTC_STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:\+00:00|Z)")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+_TEL = re.compile(r"\+?[0-9][0-9 ()-]{4,29}")
+_ISTANBUL = ZoneInfo("Europe/Istanbul")
 _RUN_ID = re.compile(r"[0-9]{8}-[0-9]{4}")
 _FIELD_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _CV_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.pdf")
-_USER_FACT_REF = re.compile(r"user_fact:[a-z0-9_]+(?:\.[a-z0-9_]+)+")
 _POLICY_REF = re.compile(r"policy:SUBMIT-1\.0:(A[1-9]|G[1-7])")
+_FACT_REF = re.compile(r"user_fact:([a-z0-9_]+(?:\.[a-z0-9_]+)+)")
 _EVIDENCE_REF = re.compile(r"evidence:[A-Za-z0-9][A-Za-z0-9:_.-]{0,199}")
 
 _TOP_KEYS = frozenset({"schema_version", "execution_id", "prepared_by_run", "prepared_at",
@@ -160,7 +218,7 @@ def _text(value: object, limit: int) -> bool:
 
 
 def _utc(value: object) -> datetime:
-    _require(isinstance(value, str) and len(value) <= 40)
+    _require(isinstance(value, str) and bool(_UTC_STAMP.fullmatch(value)))
     try:
         parsed = datetime.fromisoformat(value)  # type: ignore[arg-type]
     except ValueError as exc:
@@ -174,13 +232,17 @@ def _strict_int(value: object, low: int, high: int) -> int:
     return value  # type: ignore[return-value]
 
 
-def _apply_url(value: object, family: str) -> str:
-    _require(isinstance(value, str) and len(value) <= 2048 and value.isascii())
+def _apply_url(value: object, family: str, posting_id: str) -> str:
+    _require(isinstance(value, str) and len(value) <= 2048 and value.isascii()
+             and value.isprintable() and not any(ch.isspace() for ch in value)
+             and "%" not in value and "\\" not in value)
     parts = urlsplit(value)  # type: ignore[arg-type]
     _require(parts.scheme == "https" and parts.hostname in ATS_HOSTS[family]
              and parts.netloc == parts.hostname and parts.port is None
              and not parts.query and not parts.fragment and parts.path.startswith("/")
-             and "\\" not in value and ".." not in parts.path)
+             and ".." not in parts.path)
+    segments = [item for item in parts.path.split("/") if item]
+    _require(any(item == posting_id or item.startswith(posting_id + "-") for item in segments))
     return value  # type: ignore[return-value]
 
 
@@ -209,6 +271,7 @@ def form_fingerprint(fields: list[dict] | tuple[ManifestField, ...], cv_upload: 
 
 def _canonical_field_allowed(name: object) -> bool:
     return isinstance(name, str) and (name in ALLOWED_CANONICAL_FIELDS
+                                      or name in EXTRA_CANONICAL_FIELDS
                                       or name in FREE_TEXT_FIELDS
                                       or bool(_QUESTION_FIELD.fullmatch(name)))
 
@@ -218,28 +281,34 @@ def _validate_answer(field: dict) -> ManifestAnswer:
     mode, value, ref = answer["mode"], answer["value"], answer["source_ref"]
     canonical, control, required = field["canonical_field"], field["control"], field["required"]
     options = field["options"]
-    _require(mode in MODES)
+    _require(isinstance(mode, str) and mode in MODES)
 
     # Mode-level source rules.
     if mode == "Verified Fact":
-        _require(isinstance(ref, str) and _USER_FACT_REF.fullmatch(ref))
+        match = _FACT_REF.fullmatch(ref) if isinstance(ref, str) else None
+        _require(match and canonical in FACT_KEYS and match.group(1) == FACT_KEYS[canonical])
     elif mode in ("Approved Policy", "Approved Neutral Choice"):
         _require(isinstance(ref, str) and _POLICY_REF.fullmatch(ref))
     elif mode == "Evidence Text":
         _require(isinstance(ref, str) and _EVIDENCE_REF.fullmatch(ref))
     elif mode == "Default No":
-        _require(ref is None or (isinstance(ref, str) and _POLICY_REF.fullmatch(ref)))
+        _require(ref is None or ref == "policy:SUBMIT-1.0:A5")
     else:  # Blank Optional
         _require(ref is None and value is None and required is False)
 
     # Value shape against the observed control.
     if mode != "Blank Optional":
         if control == "checkbox":
-            _require(isinstance(value, bool))
+            _require(isinstance(value, bool) and canonical.startswith(_CHECKBOX_FAMILIES)
+                     and (value or not field["required"]))  # required box unchecked blocks submit
         elif control in ("select", "radio"):
             _require(isinstance(value, str) and value in options)
         elif control == "textarea":
             _require(_text(value, MAX_TEXT_ANSWER))
+        elif control == "email":
+            _require(isinstance(value, str) and _EMAIL.fullmatch(value))
+        elif control == "tel":
+            _require(isinstance(value, str) and _TEL.fullmatch(value))
         else:
             _require(_text(value, 500))
 
@@ -269,7 +338,8 @@ def _validate_answer(field: dict) -> ManifestAnswer:
     if mode == "Approved Policy":
         _require(canonical in _PRIVACY_FIELDS or canonical in _SALARY_FIELDS)
     if mode == "Evidence Text":
-        _require(canonical in FREE_TEXT_FIELDS or _QUESTION_FIELD.fullmatch(canonical))  # A7
+        _require((canonical in FREE_TEXT_FIELDS or _QUESTION_FIELD.fullmatch(canonical))
+                 and control in ("text", "textarea"))  # A7
     elif canonical in FREE_TEXT_FIELDS:
         _require(mode == "Blank Optional")
 
@@ -283,7 +353,8 @@ def _validate_field(raw: object, seen_keys: set[str]) -> ManifestField:
     key, label, control = field["key"], field["label"], field["control"]
     _require(isinstance(key, str) and _FIELD_KEY.fullmatch(key) and key not in seen_keys)
     seen_keys.add(key)
-    _require(_text(label, 500) and control in CONTROLS and isinstance(field["required"], bool))
+    _require(_text(label, 500) and isinstance(control, str) and control in CONTROLS
+             and isinstance(field["required"], bool))
     options = field["options"]
     if control in ("select", "radio"):
         _require(isinstance(options, list) and 0 < len(options) <= MAX_OPTIONS
@@ -291,7 +362,12 @@ def _validate_field(raw: object, seen_keys: set[str]) -> ManifestField:
                  and len(set(options)) == len(options))
     else:
         _require(options is None)
-    _require(_canonical_field_allowed(field["canonical_field"]))
+    canonical = field["canonical_field"]
+    _require(_canonical_field_allowed(canonical))
+    topic_text = label + " " + (canonical.replace("_", " ") if canonical.startswith("application.") else "")
+    for prefix, pattern in _GUARDED_TOPICS:
+        if pattern.search(topic_text):
+            _require(canonical.startswith(prefix))
     answer = _validate_answer(field)
     return ManifestField(key=key, label=label, control=control, required=field["required"],
                          options=tuple(options) if options is not None else None,
@@ -312,28 +388,31 @@ def load_execution_manifest(raw: bytes, *, now: datetime,
         text = bytes(raw).decode("utf-8")
         document = json.loads(text, object_pairs_hook=_unique_pairs,
                               parse_constant=_reject_constant, parse_float=_finite_float)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise PermissionError(ERROR) from exc
 
     top = _exact_object(document, _TOP_KEYS)
     _require(top["schema_version"] == SCHEMA_VERSION)
-    for name in ("execution_id", "candidate_profile_version"):
-        _require(_opaque(top[name]))
+    _require(_opaque(top["execution_id"]))
+    _require(isinstance(top["candidate_profile_version"], str)
+             and _SEGMENT.fullmatch(top["candidate_profile_version"]))
     _require(isinstance(top["prepared_by_run"], str) and _RUN_ID.fullmatch(top["prepared_by_run"]))
 
     target = _exact_object(top["target"], _TARGET_KEYS)
     family = target["ats_family"]
     _require(isinstance(family, str) and family in ATS_HOSTS)
     _require(_text(target["company"], 200))
-    for name in ("posting_id", "requisition_id", "opportunity_key"):
-        _require(_opaque(target[name]))
-    apply_url = _apply_url(target["apply_url"], family)
+    for name in ("posting_id", "requisition_id"):
+        _require(isinstance(target[name], str) and _SEGMENT.fullmatch(target[name]))
+    _require(_opaque(target["opportunity_key"]))
+    apply_url = _apply_url(target["apply_url"], family, target["posting_id"])
     expected_key = (f"submit:{target['opportunity_key']}:{target['requisition_id']}:"
                     f"{top['candidate_profile_version']}")
     _require(top["submit_key"] == expected_key)
 
     policy = _exact_object(top["policy"], _POLICY_KEYS)
-    _require(policy["version"] == POLICY_VERSION and policy["rollout_stage"] in ROLLOUT_CAPS)
+    _require(policy["version"] == POLICY_VERSION and isinstance(policy["rollout_stage"], str)
+             and policy["rollout_stage"] in ROLLOUT_CAPS)
     cap = _strict_int(policy["daily_cap"], 1, ROLLOUT_CAPS[policy["rollout_stage"]])
 
     prepared_at, expires_at = _utc(top["prepared_at"]), _utc(top["expires_at"])
@@ -342,12 +421,19 @@ def load_execution_manifest(raw: bytes, *, now: datetime,
     _require(observed_at <= prepared_at <= now + CLOCK_SKEW)
     _require(prepared_at - observed_at <= MAX_OBSERVATION_AGE)
     _require(prepared_at < expires_at <= prepared_at + MAX_VALIDITY and now < expires_at)
+    try:
+        run_started = datetime.strptime(top["prepared_by_run"], "%Y%m%d-%H%M").replace(tzinfo=_ISTANBUL)
+    except ValueError as exc:
+        raise PermissionError(ERROR) from exc
+    _require(run_started - CLOCK_SKEW <= prepared_at <= run_started + MAX_RUN_DURATION)
 
     raw_fields = form["fields"]
     _require(isinstance(raw_fields, list) and 0 < len(raw_fields) <= MAX_FIELDS)
     seen: set[str] = set()
     fields = tuple(_validate_field(item, seen) for item in raw_fields)
-    _require(len({f.canonical_field for f in fields}) == len(fields))
+    groups = [next((min(group) for group in _ALIAS_GROUPS if f.canonical_field in group),
+                   f.canonical_field) for f in fields]
+    _require(len(set(groups)) == len(groups))
 
     upload = _exact_object(form["cv_upload"], _UPLOAD_KEYS)
     _require(isinstance(upload["key"], str) and _FIELD_KEY.fullmatch(upload["key"])
