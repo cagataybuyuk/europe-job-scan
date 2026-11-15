@@ -71,8 +71,8 @@ be blank. A canonical field may appear only once, and synonymous fields
 
 Guarded topics: a field whose label (or `application.question.<slug>`) mentions
 work rights/visa/sponsorship, salary/compensation, consent/privacy/marketing,
-demographics or notice period (English plus common German, French and Dutch
-terms) must use the matching family. Date of birth, age and criminal-record
+demographics, residency/Blue Card or notice period (English plus common German, French and Dutch
+terms) must use the matching family. Date of birth, age, criminal record, health, union and political
 questions have no family and always need review. Because a denylist cannot cover
 every EU form, question Evidence Text additionally fails closed unless the label
 matches the motivation/experience allowlist.

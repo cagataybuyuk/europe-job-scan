@@ -547,6 +547,11 @@ def test_required_checkbox_left_unchecked_rejects():
     "Have you ever been convicted of a criminal offence?",
     "What is your notice period?",
     "Q1",
+    "Tell us about your residency status",
+    "Why do you want to relocate to Germany? Do you hold a Blue Card?",
+    "Tell us about any health conditions we should know",
+    "Describe your trade union membership",
+    "Anything else we should know?",
 ])
 def test_question_evidence_text_fails_closed_outside_prompt_allowlist(label):
     doc = base_document()

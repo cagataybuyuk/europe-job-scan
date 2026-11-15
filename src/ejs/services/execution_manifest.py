@@ -99,16 +99,18 @@ _GUARDED_TOPICS = (
                                 r"|veteran|pronoun|caring[\s_-]*responsib|geschlecht", re.I)),
     ("employment.notice_period", re.compile(r"notice|k(?:ü|u)ndigungsfrist|pr(?:é|e)avis", re.I)),
     # No canonical family exists for these, so any field about them fails closed.
-    ("legal.", re.compile(r"birth|\bage\b|convict|criminal|offen[cs]e|background[\s_-]*check", re.I)),
+    ("legal.", re.compile(r"birth|\bage\b|convict|criminal|offen[cs]e|background[\s_-]*check"
+                          r"|health|medical|\bunion\b|politic", re.I)),
     ("work.", re.compile(r"entitled|right[\s_-]*to[\s_-]*(?:live|work)|legally|arbeitserlaubnis"
-                         r"|aufenthalt|permis|titre[\s_-]*de[\s_-]*s(?:é|e)jour|werkvergunning", re.I)),
+                         r"|aufenthalt|permis|titre[\s_-]*de[\s_-]*s(?:é|e)jour|werkvergunning|residen"
+                         r"|blue[\s_-]*card", re.I)),
     ("compensation.", re.compile(r"package|gehalt|salaire|r(?:é|e)mun(?:é|e)ration|salaris|bonus", re.I)),
 )
 # Evidence Text may answer an application.question.* field only when its label is
 # a recognisable motivation/experience prompt; anything else needs review.
 _EVIDENCE_PROMPT = re.compile(
     r"\bwhy\b|describe|tell us|about yourself|motivat|interest(?:ed)? in|experience with"
-    r"|example of|achievement|cover letter|what attracts|anything else|additional information", re.I)
+    r"|example of|achievement|cover letter|what attracts", re.I)
 _CHECKBOX_FAMILIES = ("consent.", "work.")
 _QUESTION_FIELD = re.compile(r"application\.question\.[a-z0-9][a-z0-9_]{0,63}")
 _PRIVACY_FIELDS = frozenset({"consent.privacy", "consent.privacy_acknowledgement"})
