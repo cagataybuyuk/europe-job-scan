@@ -181,12 +181,17 @@ class SqliteSubmissionLedger:
     @staticmethod
     def _check_schema(connection) -> None:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (_SCHEMA_VERSION, 2) or connection.execute("PRAGMA application_id").fetchone()[0] != _APPLICATION_ID:
+        if version not in (_SCHEMA_VERSION, 2, 3) or connection.execute("PRAGMA application_id").fetchone()[0] != _APPLICATION_ID:
             raise SubmissionLedgerError("LEDGER_SCHEMA_INVALID")
         tables = connection.execute("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
         expected = [("first_application", "table")]
-        if version == 2:
+        names = {row[0] for row in tables}
+        reviewed = version == 2 or (version == 3 and "reviewed_scope_grants" in names)
+        if reviewed:
             expected += [("reviewed_scope_grants", "table"), ("reviewed_scope_attempts", "table")]
+        if version == 3:
+            # GD-006 step 3: additive policy-submission table (v1 or v2 base).
+            expected += [("policy_submissions", "table")]
         if sorted((row[0], row[1]) for row in tables) != sorted(expected):
             raise SubmissionLedgerError("LEDGER_SCHEMA_INVALID")
         if tuple(row[1] for row in connection.execute("PRAGMA table_info(first_application)")) != _COLUMNS:
@@ -222,11 +227,14 @@ class SqliteSubmissionLedger:
                     or type(row["evidence_ref"]) is not str or not _EVIDENCE_REF.fullmatch(row["evidence_ref"])
                 ):
                     raise SubmissionLedgerError("LEDGER_STATE_INVALID")
-        if version == 2:
+        if reviewed:
             # Additive reviewed extension only. The original slot, row schema,
             # state checks and all legacy methods remain unchanged/consumed.
             from ejs.persistence.reviewed_scope_ledger import check_reviewed_scope_extension
             check_reviewed_scope_extension(connection)
+        if version == 3:
+            from ejs.persistence.policy_submission_ledger import check_policy_extension
+            check_policy_extension(connection)
 
     def reserve_intent(self, attempt: SubmissionAttempt, now: datetime) -> bool:
         now = _utc(now)

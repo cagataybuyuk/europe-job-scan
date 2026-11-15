@@ -30,7 +30,7 @@ Tests use synthetic values only.
 | `prepared_at`, `expires_at` | ISO-8601 UTC (`Z` or `+00:00`, seconds required); `expires_at` within 24 h and still in the future |
 | `submit_key` | exactly `submit:<opportunity_key>:<requisition_id>:<candidate_profile_version>` |
 | `target` | `ats_family`, `company`, `posting_id` and `requisition_id` (no `:`), `opportunity_key`, `apply_url` |
-| `policy` | `version=SUBMIT-1.0`, `rollout_stage` R2 (cap 1) or R3 (cap ≤ 5), integer `daily_cap` |
+| `policy` | `version=SUBMIT-1.0`; `rollout_stage` R2 (integer `daily_cap` 1), R3 (integer `daily_cap` ≤ 5) or R4 (`daily_cap` null: no cap, owner decision 2026-11-16) |
 | `form` | `observed_at` (UTC, ≤ 6 h before preparation), `fingerprint`, `fields[]`, `cv_upload` |
 | `cv` | `library_name`, bare `filename` (`*.pdf`, no path), lowercase SHA-256, `size_bytes` ≤ 10 MiB, `application/pdf` |
 

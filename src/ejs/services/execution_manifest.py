@@ -42,7 +42,7 @@ MAX_TEXT_ANSWER = 5000
 ATS_HOSTS: dict[str, frozenset[str]] = {
     "smartrecruiters": frozenset({"jobs.smartrecruiters.com"}),
 }
-ROLLOUT_CAPS = {"R2": 1, "R3": 5}
+ROLLOUT_CAPS: dict[str, int | None] = {"R2": 1, "R3": 5, "R4": None}  # R4: owner removed cap 2026-11-16
 
 CONTROLS = frozenset({"text", "email", "tel", "textarea", "select", "radio", "checkbox"})
 MODES = frozenset({"Verified Fact", "Approved Policy", "Approved Neutral Choice",
@@ -182,7 +182,7 @@ class ExecutionManifest:
     opportunity_key: str
     apply_url: str
     rollout_stage: str
-    daily_cap: int
+    daily_cap: int | None
     observed_at: datetime
     form_fingerprint: str
     fields: tuple[ManifestField, ...]
@@ -429,7 +429,12 @@ def load_execution_manifest(raw: bytes, *, now: datetime,
     policy = _exact_object(top["policy"], _POLICY_KEYS)
     _require(policy["version"] == POLICY_VERSION and isinstance(policy["rollout_stage"], str)
              and policy["rollout_stage"] in ROLLOUT_CAPS)
-    cap = _strict_int(policy["daily_cap"], 1, ROLLOUT_CAPS[policy["rollout_stage"]])
+    stage_cap = ROLLOUT_CAPS[policy["rollout_stage"]]
+    if stage_cap is None:
+        _require(policy["daily_cap"] is None)
+        cap = None
+    else:
+        cap = _strict_int(policy["daily_cap"], 1, stage_cap)
 
     prepared_at, expires_at = _utc(top["prepared_at"]), _utc(top["expires_at"])
     form = _exact_object(top["form"], _FORM_KEYS)
