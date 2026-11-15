@@ -126,6 +126,7 @@ jobs:
           tests/test_reviewed_scope_ledger.py
           tests/test_reviewed_scope_outcomes.py
           tests/test_reviewed_application_bootstrap.py
+          tests/test_mac_validation.py
           tests/test_work_rights_evidence_gate.py
           tests/test_bound_work_rights_gate.py
           tests/test_application_action_preflight.py
