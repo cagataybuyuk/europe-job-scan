@@ -220,6 +220,9 @@ class SmartRecruitersPolicyBrowser:
         context = chromium_browser.new_context(service_workers="block", accept_downloads=False)
         return cls(context, boundary, **options)
 
+    def close(self) -> None:
+        self.context.close()
+
     # ---- fences ------------------------------------------------------------------------------
 
     def _route(self, route):
