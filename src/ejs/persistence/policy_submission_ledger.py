@@ -141,7 +141,7 @@ def enable_policy_submissions(legacy: SqliteSubmissionLedger, *, now: datetime) 
                 attempt = connection.execute("SELECT status FROM reviewed_scope_attempts").fetchone()
                 finished = attempt is not None and attempt["status"] in (STARTED, CONFIRMED)
                 _require(finished or (now >= _parse_utc(grant["expires_at"])
-                                      and (attempt is None or attempt["status"] == "Preparing")))
+                                      and (attempt is None or attempt["status"] in ("Preparing", "Validated"))))
             connection.execute(TABLE_SQL)
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             legacy._check_schema(connection)
@@ -166,7 +166,8 @@ class PolicySubmissionLedger:
         cross-employer requisition collision blocks rather than duplicates).
         """
         raw = requisition_id.strip()
-        spellings = {raw, raw.upper(), raw.lower(), raw.casefold()}
+        bare = re.sub(r"[^A-Za-z0-9]", "", raw)
+        spellings = {raw, raw.upper(), raw.lower(), raw.casefold(), bare, bare.upper(), bare.lower()}
         req_hashes = [_hash(item) for item in spellings]
         marks = ",".join("?" for _ in req_hashes)
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}

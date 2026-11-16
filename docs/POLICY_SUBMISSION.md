@@ -13,7 +13,7 @@ changes `first_application` (slot 1, the confirmed first canary) or the reviewed
 scope tables. An existing v3 ledger is reused. The legacy view validates v3 strictly;
 any unknown table, column or invalid row fails closed. Only SHA-256 digests,
 timestamps and the row's cap are stored. A v2 ledger migrates only after its reviewed
-attempt was dispatched, or its grant expired without a reservation, so the reviewed
+attempt was dispatched, or its grant expired before dispatch, so the reviewed
 slot and this table can never both submit.
 
 ## Lifecycle
@@ -36,12 +36,14 @@ slot and this table can never both submit.
     requisition (normalized like `submit_identity`, so case and separators do not
     matter) under any profile version;
   - against slot 1, the reviewed attempt and the reviewed grant's pinned target: the
-    same submit key, or the same requisition in any common case spelling. Older
+    same submit key, or the same requisition in any common case spelling or without
+    separators. Older
     tables store raw-spelling hashes, so the requisition is compared alone; a rare
     cross-employer requisition collision blocks rather than risks a duplicate.
 - The cap (R2/R3) counts submissions started on the Europe/Istanbul day plus every
   reservation that may still start (Reserved, Awaiting User), and is checked again
-  at `mark_started`. R4 rows carry no cap.
+  at `mark_started`; if that recheck refuses, the adapter must `release` the row.
+  R4 rows carry no cap.
 
 ## CAPTCHA / MFA (A8)
 

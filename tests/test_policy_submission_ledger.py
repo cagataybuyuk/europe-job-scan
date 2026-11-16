@@ -334,6 +334,7 @@ def test_wrong_ledger_type_fails_closed(legacy):
 
 @pytest.mark.parametrize("opportunity,requisition", [
     ("opp:legacy", "ref7089x"), ("OPP:legacy", "REF7089X"), ("opp:other", " Ref7089x "),
+    ("opp:other", "REF-7089X"), ("opp:other", "ref_7089x"),
 ])
 def test_first_slot_requisition_blocks_case_and_space_variants(legacy, opportunity, requisition):
     confirmed_legacy(legacy)
@@ -409,3 +410,15 @@ def test_v2_after_grant_expiry_migrates_and_blocks_reviewed_target(reviewed):
                               daily_cap=None, now=now + timedelta(days=2)) == "DUPLICATE"
     assert ledger.reserve(**ident(1), execution_id="exec-1", manifest_sha256=MANIFEST_SHA,
                           rollout_stage="R4", daily_cap=None, now=now + timedelta(days=2)) == "RESERVED"
+
+
+def test_v2_validated_reviewed_attempt_migrates_after_expiry(reviewed, monkeypatch):
+    from tests.test_reviewed_scope_ledger import attempt
+    legacy, view, now = reviewed
+    assert view.reserve_intent(attempt(), now + timedelta(seconds=2))
+    with pytest.raises(SubmissionLedgerError):
+        enable_policy_submissions(legacy, now=now + timedelta(seconds=3))
+    ledger = enable_policy_submissions(legacy, now=now + timedelta(days=2))
+    assert ledger.reserve(opportunity_key="opp:any", requisition_id="REF00063", profile_version="p9",
+                          execution_id="exec-9", manifest_sha256=MANIFEST_SHA, rollout_stage="R4",
+                          daily_cap=None, now=now + timedelta(days=2)) == "DUPLICATE"
