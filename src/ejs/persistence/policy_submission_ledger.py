@@ -26,7 +26,7 @@ import hashlib
 import re
 from zoneinfo import ZoneInfo
 
-from ejs.contracts.submit import submit_identity
+from ejs.contracts.submit import _key_part, submit_identity
 from ejs.domain.submission import ConfirmationEvidence, ConfirmationType
 from ejs.persistence.submission_ledger import (
     SqliteSubmissionLedger, SubmissionLedgerError, _parse_utc, _time_text, _utc,
@@ -50,13 +50,14 @@ _HASHES = ("submit_key_sha256", "opportunity_requisition_sha256", "execution_id_
            "requisition_id_sha256", "manifest_sha256")
 _TIMES = ("reserved_at", "awaiting_at", "released_at", "started_at", "confirmed_at",
           "confirmation_observed_at")
-COLUMNS = (*_HASHES, "status", "rollout_stage", *_TIMES, "started_day",
+COLUMNS = (*_HASHES, "status", "rollout_stage", "daily_cap", *_TIMES, "started_day",
            "evidence_type", "evidence_ref")
 TABLE_SQL = ("CREATE TABLE policy_submissions ("
              "submit_key_sha256 TEXT PRIMARY KEY CHECK(length(submit_key_sha256) = 64),"
              + ",".join(name + " TEXT NOT NULL CHECK(length(" + name + ") = 64)" for name in _HASHES[1:])
              + ",status TEXT NOT NULL CHECK(status IN ('Reserved','Awaiting User','Released',"
                "'Submitted / Unconfirmed','Confirmed')),rollout_stage TEXT NOT NULL,"
+               "daily_cap INTEGER CHECK(daily_cap IS NULL OR daily_cap >= 1),"
              + ",".join(name + " TEXT" for name in _TIMES)
              + ",started_day TEXT,evidence_type TEXT,evidence_ref TEXT)")
 
@@ -78,7 +79,7 @@ def _identity(opportunity_key: str, requisition_id: str, profile_version: str) -
     """(submit key hash, opportunity+requisition hash) in the legacy hash form."""
     _require(all(type(v) is str and v.strip() for v in (opportunity_key, requisition_id, profile_version)))
     key = submit_identity(opportunity_key, requisition_id, profile_version)
-    return _hash(key), _hash(opportunity_key.strip().casefold() + "\x1f" + requisition_id.strip().casefold())
+    return _hash(key), _hash(_key_part(opportunity_key) + "\x1f" + _key_part(requisition_id))
 
 
 def check_policy_extension(connection) -> None:
@@ -92,7 +93,8 @@ def check_policy_extension(connection) -> None:
         for row in connection.execute("SELECT * FROM policy_submissions"):
             _require(all(type(row[k]) is str and _HEX.fullmatch(row[k]) for k in _HASHES))
             _require(row["status"] in _STATES and type(row["rollout_stage"]) is str
-                     and _STAGE.fullmatch(row["rollout_stage"]))
+                     and _STAGE.fullmatch(row["rollout_stage"])
+                     and (row["daily_cap"] is None or (type(row["daily_cap"]) is int and row["daily_cap"] >= 1)))
             reserved = _parse_utc(row["reserved_at"])
             status = row["status"]
             confirmation = ("confirmed_at", "confirmation_observed_at", "evidence_type", "evidence_ref")
@@ -121,16 +123,25 @@ def check_policy_extension(connection) -> None:
         raise SubmissionLedgerError(_ERROR) from None
 
 
-def enable_policy_submissions(legacy: SqliteSubmissionLedger) -> "PolicySubmissionLedger":
+def enable_policy_submissions(legacy: SqliteSubmissionLedger, *, now: datetime) -> "PolicySubmissionLedger":
     """Atomic additive v1/v2 -> v3 migration; an existing v3 ledger is reused as is.
 
-    The caller passes the already pinned canonical ledger, never a new path.
+    The caller passes the already pinned canonical ledger, never a new path. A v2
+    ledger migrates only once its reviewed attempt can no longer submit: it was
+    dispatched, or its grant has expired without a reservation.
     """
     _require(type(legacy) is SqliteSubmissionLedger)
+    now = _utc(now)
     with legacy._transaction() as connection:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         if version != SCHEMA_VERSION:
             _require(version in (1, 2))
+            if version == 2:
+                grant = connection.execute("SELECT expires_at FROM reviewed_scope_grants").fetchone()
+                attempt = connection.execute("SELECT status FROM reviewed_scope_attempts").fetchone()
+                finished = attempt is not None and attempt["status"] in (STARTED, CONFIRMED)
+                _require(finished or (now >= _parse_utc(grant["expires_at"])
+                                      and (attempt is None or attempt["status"] == "Preparing")))
             connection.execute(TABLE_SQL)
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             legacy._check_schema(connection)
@@ -147,20 +158,27 @@ class PolicySubmissionLedger:
     # ---- reads -----------------------------------------------------------------
 
     @staticmethod
-    def _consumed_elsewhere(connection, key_hash: str, opportunity_key: str, requisition_id: str) -> bool:
-        """True when slot 1 or the reviewed slot already used this key or vacancy."""
-        opp, req = _hash(opportunity_key), _hash(requisition_id)
+    def _consumed_elsewhere(connection, key_hash: str, requisition_id: str) -> bool:
+        """True when slot 1 or the reviewed slot already used this key or requisition.
+
+        Older tables store hashes of the raw spelling, so the requisition is
+        compared under its common spellings and alone (fail closed: a rare
+        cross-employer requisition collision blocks rather than duplicates).
+        """
+        raw = requisition_id.strip()
+        spellings = {raw, raw.upper(), raw.lower(), raw.casefold()}
+        req_hashes = [_hash(item) for item in spellings]
+        marks = ",".join("?" for _ in req_hashes)
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for table in ("first_application", "reviewed_scope_attempts"):
-            exists = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
-            if not exists:
-                continue
-            hit = connection.execute(
-                f"SELECT 1 FROM {table} WHERE submit_key_sha256=? OR "
-                "(opportunity_key_sha256=? AND requisition_id_sha256=?)", (key_hash, opp, req)).fetchone()
-            if hit:
+            if table in tables and connection.execute(
+                    f"SELECT 1 FROM {table} WHERE submit_key_sha256=? OR requisition_id_sha256 IN ({marks})",
+                    (key_hash, *req_hashes)).fetchone():
                 return True
-        return False
+        # The reviewed grant pins its target even before an attempt row has hashes.
+        return "reviewed_scope_grants" in tables and connection.execute(
+            f"SELECT 1 FROM reviewed_scope_grants WHERE requisition_sha256 IN ({marks})",
+            tuple(req_hashes)).fetchone() is not None
 
     def started_today(self, now: datetime) -> int:
         """Dispatched submissions on today's Istanbul calendar day (cap basis)."""
@@ -199,7 +217,7 @@ class PolicySubmissionLedger:
                     connection.execute("UPDATE policy_submissions SET status=?,released_at=? "
                                        "WHERE submit_key_sha256=?",
                                        (RELEASED, _time_text(now), row["submit_key_sha256"]))
-            if self._consumed_elsewhere(connection, key_hash, opportunity_key, requisition_id):
+            if self._consumed_elsewhere(connection, key_hash, requisition_id):
                 return "DUPLICATE"
             blocking = connection.execute(
                 "SELECT 1 FROM policy_submissions WHERE (submit_key_sha256=? OR "
@@ -210,20 +228,23 @@ class PolicySubmissionLedger:
             if connection.execute("SELECT 1 FROM policy_submissions WHERE status=?",
                                   (RESERVED,)).fetchone():
                 return "BUSY"  # G7: one engine dispatch in flight at a time
-            if daily_cap is not None:
-                today = connection.execute(
-                    "SELECT COUNT(*) FROM policy_submissions WHERE started_day=?",
-                    (_local_day(now),)).fetchone()[0]
-                if today >= daily_cap:
-                    return "CAP_REACHED"
+            if daily_cap is not None and self._committed_today(connection, now) >= daily_cap:
+                return "CAP_REACHED"
             values = (key_hash, pair_hash, _hash(execution_id), _hash(requisition_id.strip()),
-                      manifest_sha256, RESERVED, rollout_stage, _time_text(now))
+                      manifest_sha256, RESERVED, rollout_stage, daily_cap, _time_text(now))
             connection.execute("DELETE FROM policy_submissions WHERE submit_key_sha256=? AND status=?",
                                (key_hash, RELEASED))
             connection.execute(
-                "INSERT INTO policy_submissions (" + ",".join(COLUMNS[:8]) + ") VALUES ("
+                "INSERT INTO policy_submissions (" + ",".join(COLUMNS[:9]) + ") VALUES ("
                 + ",".join("?" for _ in values) + ")", values)
         return "RESERVED"
+
+    @staticmethod
+    def _committed_today(connection, now: datetime) -> int:
+        """Started today plus every claim that may still start (cap basis)."""
+        return connection.execute(
+            "SELECT COUNT(*) FROM policy_submissions WHERE started_day=? OR status IN (?,?)",
+            (_local_day(now), RESERVED, AWAITING)).fetchone()[0]
 
     def _row(self, connection, submit_key_hash: str, execution_id: str):
         row = connection.execute("SELECT * FROM policy_submissions WHERE submit_key_sha256=?",
@@ -238,7 +259,8 @@ class PolicySubmissionLedger:
         key_hash, _ = _identity(opportunity_key, requisition_id, profile_version)
         with self._legacy._transaction() as connection:
             row = self._row(connection, key_hash, execution_id)
-            _require(row["status"] == RESERVED and now >= _parse_utc(row["reserved_at"]))
+            reserved = _parse_utc(row["reserved_at"])
+            _require(row["status"] == RESERVED and reserved <= now <= reserved + RESERVATION_TTL)
             connection.execute("UPDATE policy_submissions SET status=?,awaiting_at=? WHERE submit_key_sha256=?",
                                (AWAITING, _time_text(now), key_hash))
 
@@ -275,6 +297,10 @@ class PolicySubmissionLedger:
             row = self._row(connection, key_hash, execution_id)
             reserved = _parse_utc(row["reserved_at"])
             _require(row["status"] == RESERVED and reserved <= now <= reserved + RESERVATION_TTL)
+            if row["daily_cap"] is not None:
+                started = connection.execute("SELECT COUNT(*) FROM policy_submissions WHERE started_day=?",
+                                             (_local_day(now),)).fetchone()[0]
+                _require(started < row["daily_cap"])
             connection.execute("UPDATE policy_submissions SET status=?,started_at=?,started_day=? "
                                "WHERE submit_key_sha256=?",
                                (STARTED, _time_text(now), _local_day(now), key_hash))

@@ -63,7 +63,7 @@ def legacy(tmp_path):
 
 @pytest.fixture
 def ledger(legacy):
-    return enable_policy_submissions(legacy)
+    return enable_policy_submissions(legacy, now=T0)
 
 
 def confirmed_legacy(legacy):
@@ -82,9 +82,9 @@ def confirmed_legacy(legacy):
 def test_migration_preserves_confirmed_first_slot_and_is_idempotent(legacy):
     confirmed_legacy(legacy)
     before = legacy.snapshot()
-    ledger = enable_policy_submissions(legacy)
+    ledger = enable_policy_submissions(legacy, now=T0)
     assert legacy.snapshot() == before and before["status"] == "Confirmed"
-    again = enable_policy_submissions(legacy)
+    again = enable_policy_submissions(legacy, now=T0)
     assert type(again) is PolicySubmissionLedger
     reopened = SqliteSubmissionLedger(legacy.path)  # legacy view still validates v3
     assert reopened.snapshot() == before
@@ -96,7 +96,7 @@ def test_policy_view_requires_v3(legacy):
     with pytest.raises(SubmissionLedgerError):
         PolicySubmissionLedger(legacy)
     with pytest.raises(SubmissionLedgerError):
-        enable_policy_submissions(object())  # type: ignore[arg-type]
+        enable_policy_submissions(object(), now=T0)  # type: ignore[arg-type]
 
 
 def test_tampered_policy_rows_fail_closed(ledger, legacy):
@@ -122,7 +122,7 @@ def test_unknown_extra_table_fails_closed(ledger, legacy):
 
 def test_first_slot_vacancy_blocks_policy_reservation_under_any_profile(legacy):
     confirmed_legacy(legacy)
-    ledger = enable_policy_submissions(legacy)
+    ledger = enable_policy_submissions(legacy, now=T0)
     outcome = ledger.reserve(opportunity_key="opp:legacy", requisition_id="REF7089X",
                              profile_version="profile-2026-11-16", execution_id="exec-x",
                              manifest_sha256=MANIFEST_SHA, rollout_stage="R4", daily_cap=None, now=T0)
@@ -327,3 +327,85 @@ def test_wrong_ledger_type_fails_closed(legacy):
     raw, digest = manifest_bytes()
     result = authorize_manifest(legacy, raw, now=MANIFEST_NOW, switch=ON, expected_sha256=digest)  # type: ignore[arg-type]
     assert result.decision is PolicyDecision.LEDGER_ERROR
+
+
+
+# ---- independent review of #108 ------------------------------------------------------
+
+@pytest.mark.parametrize("opportunity,requisition", [
+    ("opp:legacy", "ref7089x"), ("OPP:legacy", "REF7089X"), ("opp:other", " Ref7089x "),
+])
+def test_first_slot_requisition_blocks_case_and_space_variants(legacy, opportunity, requisition):
+    confirmed_legacy(legacy)
+    ledger = enable_policy_submissions(legacy, now=T0)
+    assert ledger.reserve(opportunity_key=opportunity, requisition_id=requisition, profile_version="p2",
+                          execution_id="exec-x", manifest_sha256=MANIFEST_SHA, rollout_stage="R4",
+                          daily_cap=None, now=T0) == "DUPLICATE"
+
+
+def test_separator_variants_are_one_vacancy(ledger):
+    def go(req, profile, execution, when):
+        return ledger.reserve(opportunity_key="opp:x", requisition_id=req, profile_version=profile,
+                              execution_id=execution, manifest_sha256=MANIFEST_SHA, rollout_stage="R4",
+                              daily_cap=None, now=when)
+    assert go("REF-1", "p1", "e1", T0) == "RESERVED"
+    ledger.mark_started(opportunity_key="opp:x", requisition_id="REF-1", profile_version="p1",
+                        execution_id="e1", now=T0 + timedelta(seconds=1))
+    for variant in ("REF_1", "ref.1", "Ref 1"):
+        assert go(variant, "p2", "e2", T0 + timedelta(minutes=1)) == "DUPLICATE"
+
+
+def test_awaiting_user_cannot_exceed_cap(ledger):
+    assert reserve(ledger, 1, stage="R2", cap=1) == "RESERVED"
+    ledger.await_user(**ident(1), execution_id="exec-1", now=T0 + timedelta(seconds=1))
+    assert reserve(ledger, 2, stage="R2", cap=1, now=T0 + timedelta(seconds=2)) == "CAP_REACHED"
+
+
+def test_cap_is_rechecked_at_dispatch(ledger, legacy):
+    assert reserve(ledger, 1, stage="R2", cap=1) == "RESERVED"
+    start(ledger, 1)
+    assert reserve(ledger, 2, stage="R4", cap=None, now=T0 + timedelta(minutes=1)) == "RESERVED"
+    connection = sqlite3.connect(legacy.path)  # simulate a capped row reserved before the start
+    connection.execute("UPDATE policy_submissions SET daily_cap=1 WHERE status='Reserved'")
+    connection.commit()
+    connection.close()
+    with pytest.raises(SubmissionLedgerError):
+        start(ledger, 2, now=T0 + timedelta(minutes=2))
+
+
+def test_expired_reservation_cannot_be_revived_through_awaiting(ledger):
+    assert reserve(ledger) == "RESERVED"
+    with pytest.raises(SubmissionLedgerError):
+        ledger.await_user(**ident(), execution_id="exec-1", now=T0 + RESERVATION_TTL + timedelta(seconds=1))
+
+
+# ---- v2 ledgers (reviewed scope) ---------------------------------------------------------
+
+@pytest.fixture
+def reviewed(tmp_path, monkeypatch):
+    from ejs.persistence import reviewed_scope_ledger as module
+    from tests.test_reviewed_scope_ledger import NOW, execution_case, issue_scope, make_legacy, migrate_and_claim
+    monkeypatch.setattr(module, "_now", lambda: NOW)
+    path = tmp_path / "private" / "first-application.db"
+    legacy = make_legacy(path)
+    case = execution_case(legacy.snapshot())
+    scope = issue_scope(case)
+    view = migrate_and_claim((path, legacy, case, scope))
+    return legacy, view, NOW
+
+
+def test_v2_with_open_reviewed_attempt_cannot_migrate(reviewed):
+    legacy, _view, now = reviewed
+    with pytest.raises(SubmissionLedgerError):
+        enable_policy_submissions(legacy, now=now)
+
+
+def test_v2_after_grant_expiry_migrates_and_blocks_reviewed_target(reviewed):
+    legacy, _view, now = reviewed
+    ledger = enable_policy_submissions(legacy, now=now + timedelta(days=2))
+    for requisition in ("REF00063", "ref00063"):
+        assert ledger.reserve(opportunity_key="opp:any", requisition_id=requisition, profile_version="p9",
+                              execution_id="exec-9", manifest_sha256=MANIFEST_SHA, rollout_stage="R4",
+                              daily_cap=None, now=now + timedelta(days=2)) == "DUPLICATE"
+    assert ledger.reserve(**ident(1), execution_id="exec-1", manifest_sha256=MANIFEST_SHA,
+                          rollout_stage="R4", daily_cap=None, now=now + timedelta(days=2)) == "RESERVED"

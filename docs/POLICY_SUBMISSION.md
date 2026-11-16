@@ -7,12 +7,14 @@ scope with the owner's standing policy: SUBMIT-1.0 plus the rollout stage. On
 
 ## Same canonical ledger, schema v3
 
-`enable_policy_submissions(legacy)` adds one table, `policy_submissions`, to the
+`enable_policy_submissions(legacy, now=...)` adds one table, `policy_submissions`, to the
 already pinned canonical ledger in a single transaction (v1 or v2 → v3). It never
 changes `first_application` (slot 1, the confirmed first canary) or the reviewed
 scope tables. An existing v3 ledger is reused. The legacy view validates v3 strictly;
-any unknown table, column or invalid row fails closed. Only SHA-256 digests and
-timestamps are stored.
+any unknown table, column or invalid row fails closed. Only SHA-256 digests,
+timestamps and the row's cap are stored. A v2 ledger migrates only after its reviewed
+attempt was dispatched, or its grant expired without a reservation, so the reviewed
+slot and this table can never both submit.
 
 ## Lifecycle
 
@@ -29,9 +31,17 @@ timestamps are stored.
 - A reservation that was never started had no click; it expires after 30 minutes
   (Awaiting User: 12 hours) and is released automatically.
 - Only one Reserved row may exist at a time (G7). Awaiting User rows do not block.
-- Duplicates: the same normalized submit key, or the same opportunity + requisition
-  under any profile version, in slot 1, the reviewed slot or this table, is refused.
-- The cap counts dispatched (started) submissions on the Europe/Istanbul day.
+- Duplicates are refused:
+  - in this table: the same normalized submit key, or the same opportunity +
+    requisition (normalized like `submit_identity`, so case and separators do not
+    matter) under any profile version;
+  - against slot 1, the reviewed attempt and the reviewed grant's pinned target: the
+    same submit key, or the same requisition in any common case spelling. Older
+    tables store raw-spelling hashes, so the requisition is compared alone; a rare
+    cross-employer requisition collision blocks rather than risks a duplicate.
+- The cap (R2/R3) counts submissions started on the Europe/Istanbul day plus every
+  reservation that may still start (Reserved, Awaiting User), and is checked again
+  at `mark_started`. R4 rows carry no cap.
 
 ## CAPTCHA / MFA (A8)
 
