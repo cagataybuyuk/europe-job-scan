@@ -173,8 +173,9 @@ class PolicyApplicationRuntime:
 
     @staticmethod
     def _url_ok(m: ExecutionManifest, url: object, step: int) -> bool:
-        if step == 0:
-            return url == m.apply_url
+        """Same ATS host as the apply URL; the binding's network boundary pins exact paths."""
+        if url == m.apply_url:
+            return True
         try:
             parts, apply = urlsplit(url), urlsplit(m.apply_url)  # type: ignore[arg-type]
             return (type(url) is str and parts.scheme == "https" and parts.netloc == apply.netloc
@@ -231,8 +232,11 @@ class PolicyApplicationRuntime:
         _require(solved, "POLICY_APP_OWNER_CHALLENGE_UNRESOLVED")
         self.ledger.resume(**self._ids(m), now=self.clock())
         # The owner had the page: from now on this runtime never releases the key.
+        before = snap.get("url")
         snap = self._surface(m, step) if structure_known else self._live(m, step)
         _require(snap["challenge"] is False, "POLICY_APP_OWNER_CHALLENGE_UNRESOLVED")
+        # The owner must hand back the same page; a moved page may be a hand submission.
+        _require(snap.get("url") == before, "POLICY_APP_SURFACE_CHANGED")
         return snap
 
     def _observe(self, m: ExecutionManifest, decision_time: datetime) -> RunResult:

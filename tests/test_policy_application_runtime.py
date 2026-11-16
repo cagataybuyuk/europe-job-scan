@@ -169,7 +169,7 @@ def test_switch_blocks_before_any_browser_action(env, switch, expected):
 
 @pytest.mark.parametrize("behaviour,code", [
     (dict(drift=True), "POLICY_APP_FORM_DRIFT"),
-    (dict(url=URL + "x"), "POLICY_APP_SURFACE_CHANGED"),
+    (dict(url="https://evil.example/apply"), "POLICY_APP_SURFACE_CHANGED"),
     (dict(overwrite="first_name"), "POLICY_APP_READBACK_MISMATCH"),
     (dict(upload_hash="0" * 64), "POLICY_APP_UPLOAD_UNVERIFIED"),
 ])
