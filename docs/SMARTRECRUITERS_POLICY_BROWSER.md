@@ -15,6 +15,14 @@ through `PolicyNetworkBoundary`.
 | Application | one POST to the publication's `/application` endpoint, armed only after the runtime committed `mark_started`; a premature attempt closes it for good |
 
 Everything else is blocked and counted; any blocked write makes the form "not ready".
+In production every allowed request is performed by the browser itself with redirects
+disabled (`route.fetch(max_redirects=0)`); a 3xx answer is aborted and counted, so no
+redirect hop can bypass the boundary. Any observed redirect hop or service worker makes
+the session fatal. Offline tests use `transport="fallback"`.
+
+Known limits: the CV upload's 24-hex company id is not pinned in advance (only one upload
+with the approved file name is possible); any iframe counts as a challenge, and CAPTCHA
+providers are not on the read list, so such runs usually end unresolved for the owner.
 The publication id is read from the single one-click link on the posting page.
 
 ## Control keys (shared with Claude's inspection)

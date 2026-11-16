@@ -178,7 +178,8 @@ def session(chromium, *, html=None, ack=True, upload_name="Synthetic_CV.pdf"):
     context.route("**/*", fulfill)
     clock = Clock()
     boundary = PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf")
-    browser = SmartRecruitersPolicyBrowser(context, boundary, poll_seconds=0.05, clock=clock)
+    browser = SmartRecruitersPolicyBrowser(context, boundary, poll_seconds=0.05, clock=clock,
+                                           transport="fallback")
     try:
         yield browser, boundary, seen, clock
     finally:
@@ -281,3 +282,104 @@ def test_boundary_rules():
         boundary.begin_submit()
     with pytest.raises(PermissionError):
         boundary.set_publication(PUBLICATION)
+
+
+
+class FakeResponse:
+    def __init__(self, status):
+        self.status = status
+
+
+class FakeRoute:
+    def __init__(self, method, url, status, navigation=False, resource="fetch"):
+        class Req:
+            pass
+        self.request = Req()
+        self.request.method, self.request.url = method, url
+        self.request.resource_type = resource
+        self.request.is_navigation_request = lambda: navigation
+        self._status, self.result = status, None
+
+    def fetch(self, **kwargs):
+        assert kwargs.get("max_redirects") == 0
+        return FakeResponse(self._status)
+
+    def fulfill(self, response):
+        self.result = ("fulfilled", response.status)
+
+    def abort(self, reason):
+        self.result = ("aborted", reason)
+
+    def fallback(self):
+        self.result = ("fallback",)
+
+
+class FakeContext:
+    def __init__(self):
+        self.handlers = {}
+
+    def new_page(self):
+        class Page:
+            def set_default_timeout(self, _):
+                pass
+        return Page()
+
+    def route(self, _pattern, handler):
+        self.route_handler = handler
+
+    def route_web_socket(self, _pattern, handler):
+        pass
+
+    def on(self, event, handler):
+        self.handlers[event] = handler
+
+
+def test_production_transport_refuses_redirects_and_counts_them():
+    context = FakeContext()
+    boundary = PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf")
+    browser = SmartRecruitersPolicyBrowser(context, boundary)
+    ok = FakeRoute("GET", URL, 200, navigation=True, resource="document")
+    browser._route(ok)
+    assert ok.result == ("fulfilled", 200)
+    moved = FakeRoute("GET", URL, 307, navigation=True, resource="document")
+    browser._route(moved)
+    assert moved.result == ("aborted", "blockedbyclient") and boundary.blocked_writes == 1
+    blocked = FakeRoute("GET", "https://evil.example/", 200)
+    browser._route(blocked)
+    assert blocked.result == ("aborted", "blockedbyclient")
+    with pytest.raises(PermissionError):
+        browser.submit_once()
+
+
+def test_service_worker_or_redirect_hop_is_fatal():
+    context = FakeContext()
+    boundary = PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf")
+    browser = SmartRecruitersPolicyBrowser(context, boundary)
+    context.handlers["serviceworker"](object())
+    assert browser._fatal and boundary.blocked_writes == 1
+    class Hop:
+        redirected_from = object()
+    browser2 = SmartRecruitersPolicyBrowser(FakeContext(), PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf"))
+    browser2._observe_request(Hop())
+    assert browser2._fatal
+
+
+def test_bad_transport_value_rejected():
+    with pytest.raises(PermissionError):
+        SmartRecruitersPolicyBrowser(FakeContext(), PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf"),
+                                     transport="direct")
+
+
+def test_entry_link_with_extra_query_does_not_pin_publication(chromium, env):
+    cv, ledger = env
+    bad_posting = POSTING_HTML.replace(ENTRY, ENTRY + "&x=1")
+    context = chromium.new_context(service_workers="block")
+    context.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=bad_posting))
+    boundary = PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf")
+    browser = SmartRecruitersPolicyBrowser(context, boundary, transport="fallback")
+    try:
+        with pytest.raises(PermissionError):
+            browser.open(URL)
+        assert boundary.publication_id is None
+    finally:
+        context.close()

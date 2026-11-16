@@ -124,6 +124,10 @@ class PolicyNetworkBoundary:
         return (parts.path in (prefix, prefix + "/screening", prefix + "/success")
                 and parts.query == f"dcr_ci={self.company}")
 
+    def note_blocked(self) -> None:
+        with self._lock:
+            self.blocked_writes += 1
+
     # ---- phases ---------------------------------------------------------------------------
 
     def begin_upload(self) -> None:
@@ -180,7 +184,13 @@ class SmartRecruitersPolicyBrowser:
     """One owned page implementing ``PolicyFormBrowser`` for SmartRecruiters one-click."""
 
     def __init__(self, context, boundary: PolicyNetworkBoundary, *, poll_seconds: float = 2.0,
-                 clock=lambda: datetime.now(timezone.utc)):
+                 clock=lambda: datetime.now(timezone.utc), transport: str = "fetch"):
+        """``transport="fetch"`` (production) performs every allowed request itself with
+        redirects disabled, so no redirect hop can bypass the boundary. ``"fallback"``
+        is only for offline tests whose own route handler fulfils the request."""
+        _require(transport in ("fetch", "fallback"), "POLICY_APP_SR_BOUNDARY")
+        self._transport = transport
+        self._fatal = False
         _require(isinstance(boundary, PolicyNetworkBoundary), "POLICY_APP_SR_BOUNDARY")
         self.context, self.boundary = context, boundary
         self.page = context.new_page()
@@ -196,16 +206,41 @@ class SmartRecruitersPolicyBrowser:
         _require(callable(getattr(context, "route_web_socket", None)), "POLICY_APP_SR_BOUNDARY")
         context.route_web_socket("**/*", self._deny_socket)
         context.on("page", self._new_page)
+        # Belt and braces: any redirect hop or service worker is fatal for this session.
+        context.on("request", self._observe_request)
+        context.on("serviceworker", self._service_worker)
 
     # ---- fences ------------------------------------------------------------------------------
 
     def _route(self, route):
         request = route.request
-        if self.boundary.allows(request.method, request.url, request.resource_type,
-                                request.is_navigation_request()):
-            route.fallback()
-        else:
+        if not self.boundary.allows(request.method, request.url, request.resource_type,
+                                    request.is_navigation_request()):
             route.abort("blockedbyclient")
+            return
+        if self._transport == "fallback":
+            route.fallback()
+            return
+        try:
+            response = route.fetch(max_redirects=0, timeout=30_000)
+        except Exception:
+            route.abort("failed")
+            return
+        if 300 <= response.status < 400:
+            self._fatal = True
+            self.boundary.note_blocked()
+            route.abort("blockedbyclient")
+            return
+        route.fulfill(response=response)
+
+    def _observe_request(self, request):
+        if request.redirected_from is not None:
+            self._fatal = True
+            self.boundary.note_blocked()
+
+    def _service_worker(self, _worker):
+        self._fatal = True
+        self.boundary.note_blocked()
 
     def _deny_socket(self, _socket):
         self._socket = True
@@ -278,8 +313,9 @@ class SmartRecruitersPolicyBrowser:
         _require(len(hrefs) == 1, "POLICY_APP_SR_ENTRY")
         entry = urlsplit(hrefs.pop())
         publication = entry.path[len(urlsplit(prefix).path):]
+        _require(entry.query == f"dcr_ci={self.boundary.company}" and not entry.fragment
+                 and _UUID.fullmatch(publication), "POLICY_APP_SR_ENTRY")
         self.boundary.set_publication(publication)
-        _require(entry.query == f"dcr_ci={self.boundary.company}", "POLICY_APP_SR_ENTRY")
         self.page.goto(self.boundary.entry_url(), wait_until="domcontentloaded", timeout=30_000)
         self.page.locator("input, select, textarea").first.wait_for(state="attached", timeout=30_000)
 
@@ -289,6 +325,7 @@ class SmartRecruitersPolicyBrowser:
         files = [row for _, _, row, _ in controls if row["control"] == "file"]
         _require(len(files) <= 1, "POLICY_APP_SR_CONTROL_UNSUPPORTED")
         body = self.page.locator("body").inner_text().casefold()
+        _require(not self._fatal, "POLICY_APP_SR_BOUNDARY")
         challenge = (self._popup or self._socket or self.page.locator("iframe").count() > 0
                      or any(text in body for text in _CHALLENGE_TEXT))
         form_valid = self.page.locator("input,select,textarea").evaluate_all(
@@ -384,7 +421,8 @@ class SmartRecruitersPolicyBrowser:
         return False
 
     def submit_once(self) -> SubmitObservation:
-        _require(not self._submitted and self.boundary.blocked_writes == 0, "POLICY_APP_SR_SUBMIT")
+        _require(not self._submitted and not self._fatal and self.boundary.blocked_writes == 0,
+                 "POLICY_APP_SR_SUBMIT")
         button = self._button(_SUBMIT_LABELS)
         _require(button is not None, "POLICY_APP_SR_SUBMIT")
         self._submitted = True
