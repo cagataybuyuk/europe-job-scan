@@ -610,3 +610,49 @@ def test_r4_requires_null_daily_cap():
         rejected(doc)
     doc["policy"].update(rollout_stage="R3", daily_cap=None)
     rejected(doc)
+
+
+# ---- GD-006 A1: page steps and pass kind -------------------------------------------
+
+def test_single_page_fingerprint_is_unchanged_by_step_support():
+    doc = base_document()
+    explicit = deepcopy(doc)
+    for item in explicit["form"]["fields"]:
+        item["step"] = 0
+    explicit["form"]["cv_upload"]["step"] = 0
+    assert form_fingerprint(explicit["form"]["fields"], explicit["form"]["cv_upload"]) == doc["form"]["fingerprint"]
+    result = load_execution_manifest(encode(explicit), now=NOW)
+    assert result.step_count == 1 and result.pass_kind == "submit"
+
+
+def test_steps_and_pass_are_parsed():
+    doc = base_document()
+    doc["pass"] = "observe"
+    doc["form"]["fields"][3]["step"] = 1
+    result = load_execution_manifest(encode(refingerprint(doc)), now=NOW)
+    assert result.pass_kind == "observe" and result.step_count == 2
+    assert [f.key for f in result.step_fields(1)] == ["work_auth"]
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda d: d.update({"pass": "preview"}),
+    lambda d: d.update({"pass": True}),
+    lambda d: d["form"]["fields"][3].update(step=2),        # page 1 would be empty
+    lambda d: d["form"]["fields"][3].update(step=-1),
+    lambda d: d["form"]["fields"][3].update(step=10),
+    lambda d: d["form"]["fields"][3].update(step=True),
+    lambda d: d["form"]["cv_upload"].update(step="1"),
+    lambda d: d["form"]["fields"][3].update(page=1),        # unknown key still rejected
+])
+def test_bad_steps_or_pass_rejected(mutate):
+    doc = base_document()
+    mutate(doc)
+    rejected(refingerprint(doc))
+
+
+def test_step_is_part_of_the_fingerprint():
+    doc = base_document()
+    before = doc["form"]["fingerprint"]
+    doc["form"]["fields"][3]["step"] = 1
+    assert form_fingerprint(doc["form"]["fields"], doc["form"]["cv_upload"]) != before
+    rejected(doc)  # stale fingerprint

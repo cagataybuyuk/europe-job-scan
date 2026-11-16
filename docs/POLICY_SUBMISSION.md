@@ -91,5 +91,11 @@ Every failure before step 6 releases the reservation (`BLOCKED`, no click), exce
 after any owner handoff: the owner may have acted in the page, so the row is held as
 Awaiting User for the owner to resolve. After
 `mark_started` the result is `SUBMITTED_UNCONFIRMED` unless confirmed, and the key is
-consumed forever. Results carry fixed `POLICY_APP_*` codes only. The SmartRecruiters
+consumed forever. Results carry fixed `POLICY_APP_*` codes only.
+
+Multi-page forms (GD-006 A1): each page's live structure is compared with that
+page's manifest fields; answers are written and read back per page; the CV is
+checked on its own page before Next. In an observe pass the runtime presses Next
+after the last known page, returns `OBSERVED` with that page's structure only, and
+releases the reservation (held for the owner after a handoff). It never clicks submit. The SmartRecruiters
 Playwright binding (multi-step page, network boundary) is step 4b.
