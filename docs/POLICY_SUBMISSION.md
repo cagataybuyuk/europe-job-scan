@@ -60,3 +60,27 @@ it. Defaults are safe: kill switch engaged, final submit disabled. Otherwise it
 returns `KILL_SWITCH`, `RUNTIME_DISABLED`, `MANIFEST_REJECTED`, `DUPLICATE`,
 `CAP_REACHED`, `BUSY` or `LEDGER_ERROR`. The module performs no browser, file or
 network I/O; the SmartRecruiters adapter (step 4) consumes it.
+
+## Runtime (GD-006 step 4a)
+
+`PolicyApplicationRuntime(browser, ledger).run(raw, expected_sha256=..., cv_path=..., switch=...)`
+drives one manifest through a `PolicyFormBrowser` (open, structure-only inspect,
+write/readback, upload, owner wait, submit once):
+
+1. `authorize_manifest`; anything but `RESERVED` returns before the browser opens.
+2. CV bytes are read owner-only (dir 0700, file 0600, no symlink) and must match the
+   manifest's SHA-256, size and file name.
+3. The live form fingerprint must equal the manifest's; every non-blank answer is
+   written and read back; Blank Optional fields are never touched.
+4. The approved CV is uploaded and verified, then every answer is read back again on
+   a fresh inspection.
+5. A CAPTCHA/MFA/login challenge moves the row to Awaiting User; the browser waits for
+   the owner (default up to 6 h) and the runtime verifies the surface again. It never
+   solves a challenge itself.
+6. `mark_started`, then exactly one `submit_once`; only an acknowledged and visible
+   confirmation becomes `EMPLOYER_CONFIRMED` via `ledger.confirm`.
+
+Every failure before step 6 releases the reservation (`BLOCKED`, no click). After
+`mark_started` the result is `SUBMITTED_UNCONFIRMED` unless confirmed, and the key is
+consumed forever. Results carry fixed `POLICY_APP_*` codes only. The SmartRecruiters
+Playwright binding (multi-step page, network boundary) is step 4b.
