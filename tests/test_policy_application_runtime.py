@@ -41,7 +41,7 @@ class FakeBrowser:
         self.clicks = 0
         self.b = dict(challenge_at=None, owner_solves=True, overwrite=None, drift=False, url=URL,
                       ack=True, visible=True, upload_hash=None, submit_raises=False,
-                      drop_attachment_on_wait=False, observed_tz=timezone.utc)
+                      drop_attachment_on_wait=False, observed_tz=timezone.utc, owner_submits=False)
         self.b.update(behaviour)
         self.inspections = 0
         self.attachment = None
@@ -83,6 +83,8 @@ class FakeBrowser:
             self.b["challenge_at"] = None
         if self.b["drop_attachment_on_wait"]:
             self.attachment = None
+        if self.b["owner_submits"]:
+            self.b["url"] = URL + "/thanks"
         return self.b["owner_solves"]
 
     def submit_once(self):
@@ -153,7 +155,6 @@ def test_switch_blocks_before_any_browser_action(env, switch, expected):
     (dict(url=URL + "x"), "POLICY_APP_SURFACE_CHANGED"),
     (dict(overwrite="first_name"), "POLICY_APP_READBACK_MISMATCH"),
     (dict(upload_hash="0" * 64), "POLICY_APP_UPLOAD_UNVERIFIED"),
-    (dict(challenge_at=2, drop_attachment_on_wait=True), "POLICY_APP_UPLOAD_UNVERIFIED"),
 ])
 def test_pre_dispatch_failures_release_and_never_click(env, behaviour, code):
     result, browser, ledger, _ = run(env, **behaviour)
@@ -279,3 +280,20 @@ def test_naive_clock_fails_closed(env):
     runtime = PolicyApplicationRuntime(FakeBrowser(base, Clock()), ledger, clock=lambda: datetime(2026, 11, 17))
     result = runtime.run(raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
     assert result.status == "BLOCKED" and result.code == "POLICY_APP_CLOCK" and status(ledger) is None
+
+
+@pytest.mark.parametrize("behaviour", [
+    dict(challenge_at=2, owner_submits=True), dict(challenge_at=2, drop_attachment_on_wait=True),
+])
+def test_after_owner_handoff_the_key_is_held_for_the_owner(env, behaviour):
+    result, browser, ledger, clock = run(env, **behaviour)
+    assert result.status == "BLOCKED" and browser.clicks == 0 and status(ledger) == "Awaiting User"
+    again, browser2, _, _ = run(env)
+    assert again.status == "DUPLICATE" and browser2.clicks == 0
+
+
+def test_non_bytes_manifest_returns_a_result(env):
+    base, cv, ledger = env
+    runtime = PolicyApplicationRuntime(FakeBrowser(base, Clock()), ledger, clock=Clock())
+    result = runtime.run("not-bytes", expected_sha256="0" * 64, cv_path=cv, switch=ON)  # type: ignore[arg-type]
+    assert result.status in ("BLOCKED", "MANIFEST_REJECTED") and status(ledger) is None

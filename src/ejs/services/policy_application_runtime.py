@@ -193,7 +193,7 @@ class PolicyApplicationRuntime:
         solved = self.browser.wait_for_owner(self.owner_wait_seconds) is True
         _require(solved, "POLICY_APP_OWNER_CHALLENGE_UNRESOLVED")
         self.ledger.resume(**self._ids(m), now=self.clock())
-        self._owner_handoff = False
+        # The owner had the page: from now on this runtime never releases the key.
         snap = self._surface(m)
         _require(snap["challenge"] is False, "POLICY_APP_OWNER_CHALLENGE_UNRESOLVED")
         return snap
@@ -205,8 +205,11 @@ class PolicyApplicationRuntime:
             decision_time = self.clock()
         except _Stop as error:
             return RunResult("BLOCKED", error.code)
-        decision = authorize_manifest(self.ledger, raw, now=decision_time, switch=switch,
-                                      expected_sha256=expected_sha256)
+        try:
+            decision = authorize_manifest(self.ledger, raw, now=decision_time, switch=switch,
+                                          expected_sha256=expected_sha256)
+        except Exception:
+            return RunResult("BLOCKED", "POLICY_APP_AUTHORIZE")
         if not decision.dispatch_allowed:
             return RunResult(decision.decision.value)
         m = decision.manifest
@@ -258,13 +261,16 @@ class PolicyApplicationRuntime:
                 result = RunResult("SUBMITTED_UNCONFIRMED", code, submit_clicks=-1)
             else:
                 result = RunResult("BLOCKED", code)
-                if not self._owner_handoff:
-                    # No click happened. After an owner handoff the owner may have
-                    # acted in the page, so the row stays Awaiting User instead.
-                    try:
+                try:
+                    if not self._owner_handoff:
                         self.ledger.release(**self._ids(m), now=self._last or decision_time)
-                    except BaseException:  # noqa: BLE001
-                        pass  # a stale reservation expires on its own
+                    elif self.ledger.status(m.opportunity_key, m.requisition_id,
+                                            m.candidate_profile_version) == "Reserved":
+                        # The owner had the page and may have submitted by hand:
+                        # hold the key for the owner instead of letting it expire.
+                        self.ledger.await_user(**self._ids(m), now=self._last or decision_time)
+                except BaseException:  # noqa: BLE001
+                    pass  # a plain reservation expires on its own; no click by this runtime
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
             return result

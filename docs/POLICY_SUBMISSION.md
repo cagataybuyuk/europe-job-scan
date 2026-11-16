@@ -28,8 +28,10 @@ slot and this table can never both submit.
 
 - `mark_started` is committed before the engine clicks submit. A started row is
   never released, retried or replaced, even if the outcome is ambiguous.
-- A reservation that was never started had no click; it expires after 30 minutes
-  (Awaiting User: 12 hours) and is released automatically.
+- A Reserved row that was never started had no click; it expires after 30 minutes and
+  is released automatically. Awaiting User rows never expire on their own: the owner
+  may have submitted by hand, so only `release(..., owner_confirmed_no_submit=True)`
+  frees them. `resume` is possible within 12 hours.
 - Only one Reserved row may exist at a time (G7). Awaiting User rows do not block.
 - Duplicates are refused:
   - in this table: the same normalized submit key, or the same opportunity +
@@ -82,8 +84,8 @@ write/readback, upload, owner wait, submit once):
    confirmation becomes `EMPLOYER_CONFIRMED` via `ledger.confirm`.
 
 Every failure before step 6 releases the reservation (`BLOCKED`, no click), except
-an unresolved owner handoff: the owner may have acted in the page, so that row stays
-Awaiting User until it expires. After
+after any owner handoff: the owner may have acted in the page, so the row is held as
+Awaiting User for the owner to resolve. After
 `mark_started` the result is `SUBMITTED_UNCONFIRMED` unless confirmed, and the key is
 consumed forever. Results carry fixed `POLICY_APP_*` codes only. The SmartRecruiters
 Playwright binding (multi-step page, network boundary) is step 4b.

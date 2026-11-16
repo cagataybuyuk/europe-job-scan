@@ -188,13 +188,18 @@ def test_awaiting_user_does_not_block_others_and_resumes(ledger):
     assert ledger.status(**ident(1)) == "Submitted / Unconfirmed"
 
 
-def test_awaiting_user_expires_without_dispatch(ledger):
+def test_awaiting_user_never_expires_and_only_owner_releases(ledger):
     assert reserve(ledger, 1) == "RESERVED"
     ledger.await_user(**ident(1), execution_id="exec-1", now=T0)
-    late = T0 + AWAITING_TTL + timedelta(seconds=1)
+    late = T0 + AWAITING_TTL + timedelta(days=3)
     with pytest.raises(SubmissionLedgerError):
         ledger.resume(**ident(1), execution_id="exec-1", now=late)
     assert reserve(ledger, 2, now=late) == "RESERVED"
+    assert ledger.status(**ident(1)) == "Awaiting User"
+    assert reserve(ledger, 1, execution="exec-1b", now=late + timedelta(minutes=1)) == "DUPLICATE"
+    with pytest.raises(SubmissionLedgerError):
+        ledger.release(**ident(1), execution_id="exec-1", now=late)
+    ledger.release(**ident(1), execution_id="exec-1", now=late, owner_confirmed_no_submit=True)
     assert ledger.status(**ident(1)) == "Released"
 
 

@@ -209,12 +209,12 @@ class PolicySubmissionLedger:
         key_hash, pair_hash = _identity(opportunity_key, requisition_id, profile_version)
         with self._legacy._transaction() as connection:
             # A reservation that was never started had no click: expire it.
+            # Awaiting User rows never expire on their own: the owner may have
+            # submitted by hand in the page, so only the owner may release them.
             for row in connection.execute(
-                    "SELECT submit_key_sha256,status,reserved_at,awaiting_at FROM policy_submissions "
-                    "WHERE status IN (?,?)", (RESERVED, AWAITING)).fetchall():
-                since = _parse_utc(row["awaiting_at"] or row["reserved_at"])
-                ttl = AWAITING_TTL if row["status"] == AWAITING else RESERVATION_TTL
-                if now - since > ttl:
+                    "SELECT submit_key_sha256,reserved_at FROM policy_submissions WHERE status=?",
+                    (RESERVED,)).fetchall():
+                if now - _parse_utc(row["reserved_at"]) > RESERVATION_TTL:
                     connection.execute("UPDATE policy_submissions SET status=?,released_at=? "
                                        "WHERE submit_key_sha256=?",
                                        (RELEASED, _time_text(now), row["submit_key_sha256"]))
@@ -280,13 +280,18 @@ class PolicySubmissionLedger:
                                "WHERE submit_key_sha256=?", (RESERVED, _time_text(now), key_hash))
 
     def release(self, *, opportunity_key: str, requisition_id: str, profile_version: str,
-                execution_id: str, now: datetime) -> None:
-        """Abort BEFORE dispatch (drift, blocker, closed vacancy). Never after start."""
+                execution_id: str, now: datetime, owner_confirmed_no_submit: bool = False) -> None:
+        """Abort BEFORE dispatch (drift, blocker, closed vacancy). Never after start.
+
+        An Awaiting User row is released only when the owner confirms that no
+        application was sent by hand during the handoff.
+        """
         now = _utc(now)
         key_hash, _ = _identity(opportunity_key, requisition_id, profile_version)
         with self._legacy._transaction() as connection:
             row = self._row(connection, key_hash, execution_id)
-            _require(row["status"] in (RESERVED, AWAITING))
+            _require(row["status"] == RESERVED
+                     or (row["status"] == AWAITING and owner_confirmed_no_submit is True))
             # A stepped-back clock must never write an inconsistent row.
             floor = max(_parse_utc(row["reserved_at"]), _parse_utc(row["awaiting_at"] or row["reserved_at"]))
             connection.execute("UPDATE policy_submissions SET status=?,released_at=? WHERE submit_key_sha256=?",
