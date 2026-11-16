@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 import os
 
@@ -40,9 +40,11 @@ class FakeBrowser:
         self.calls: list[str] = []
         self.clicks = 0
         self.b = dict(challenge_at=None, owner_solves=True, overwrite=None, drift=False, url=URL,
-                      ack=True, visible=True, upload_hash=None, submit_raises=False)
+                      ack=True, visible=True, upload_hash=None, submit_raises=False,
+                      drop_attachment_on_wait=False, observed_tz=timezone.utc)
         self.b.update(behaviour)
         self.inspections = 0
+        self.attachment = None
 
     def open(self, url):
         self.calls.append("open")
@@ -56,7 +58,8 @@ class FakeBrowser:
         challenge = self.b["challenge_at"] == self.inspections
         return dict(url=self.b["url"], fields=[{k: f[k] for k in ("key", "label", "control", "required", "options")}
                                                for f in fields],
-                    cv_upload=self.upload_control, challenge=challenge, form_valid=True, submit_visible=True)
+                    cv_upload=self.upload_control, challenge=challenge, form_valid=True, submit_visible=True,
+                    cv_attachment=self.attachment)
 
     def write(self, key, control, value):
         self.calls.append("write:" + key)
@@ -69,6 +72,8 @@ class FakeBrowser:
 
     def upload(self, key, payload, filename):
         self.calls.append("upload")
+        self.attachment = dict(sha256=hashlib.sha256(payload).hexdigest(), size=len(payload), filename=filename,
+                               visible=True)
         return UploadResult(self.b["upload_hash"] or hashlib.sha256(payload).hexdigest(), len(payload),
                             filename, True)
 
@@ -76,6 +81,8 @@ class FakeBrowser:
         self.calls.append("wait_for_owner")
         if self.b["owner_solves"]:
             self.b["challenge_at"] = None
+        if self.b["drop_attachment_on_wait"]:
+            self.attachment = None
         return self.b["owner_solves"]
 
     def submit_once(self):
@@ -83,7 +90,7 @@ class FakeBrowser:
         self.clicks += 1
         if self.b["submit_raises"]:
             raise RuntimeError("network")
-        return SubmitObservation(self.clock(), self.b["ack"], self.b["visible"], "e" * 64, False)
+        return SubmitObservation(self.clock().astimezone(self.b["observed_tz"]), self.b["ack"], self.b["visible"], "e" * 64, False)
 
 
 @pytest.fixture
@@ -146,7 +153,7 @@ def test_switch_blocks_before_any_browser_action(env, switch, expected):
     (dict(url=URL + "x"), "POLICY_APP_SURFACE_CHANGED"),
     (dict(overwrite="first_name"), "POLICY_APP_READBACK_MISMATCH"),
     (dict(upload_hash="0" * 64), "POLICY_APP_UPLOAD_UNVERIFIED"),
-    (dict(challenge_at=1, owner_solves=False), "POLICY_APP_OWNER_CHALLENGE_UNRESOLVED"),
+    (dict(challenge_at=2, drop_attachment_on_wait=True), "POLICY_APP_UPLOAD_UNVERIFIED"),
 ])
 def test_pre_dispatch_failures_release_and_never_click(env, behaviour, code):
     result, browser, ledger, _ = run(env, **behaviour)
@@ -206,3 +213,69 @@ def test_results_carry_no_candidate_values(env):
     result, _, _, _ = run(env, overwrite="email")
     text = repr(result)
     assert "synthetic@example.invalid" not in text and "Synthetic" not in text
+
+
+def test_unresolved_owner_handoff_keeps_row_awaiting_and_never_clicks(env):
+    result, browser, ledger, _ = run(env, challenge_at=1, owner_solves=False)
+    assert result.status == "BLOCKED" and result.code == "POLICY_APP_OWNER_CHALLENGE_UNRESOLVED"
+    assert browser.clicks == 0 and status(ledger) == "Awaiting User"
+
+
+def test_non_utc_confirmation_time_is_recorded_in_utc(env):
+    result, _, ledger, _ = run(env, observed_tz=timezone(timedelta(hours=3)))
+    assert result.status == "EMPLOYER_CONFIRMED" and status(ledger) == "Confirmed"
+
+
+class BackwardsClock(Clock):
+    def __call__(self):
+        value = super().__call__()
+        return value - timedelta(hours=1) if self.now > NOW + timedelta(seconds=8) else value
+
+
+def test_backwards_clock_keeps_ledger_consistent(env):
+    base, cv, ledger = env
+    clock = BackwardsClock()
+    browser = FakeBrowser(base, clock, drift=False)
+    raw = encode(base)
+    runtime = PolicyApplicationRuntime(browser, ledger, clock=clock)
+    result = runtime.run(raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
+    assert result.status in ("EMPLOYER_CONFIRMED", "BLOCKED") and browser.clicks <= 1
+    assert status(ledger) in ("Confirmed", "Released")  # ledger still readable
+
+
+class Interrupt(BaseException):
+    pass
+
+
+def test_base_exception_before_start_releases_and_returns(env):
+    base, cv, ledger = env
+    clock = Clock()
+    browser = FakeBrowser(base, clock)
+    browser.upload = lambda *a: (_ for _ in ()).throw(Interrupt())
+    raw = encode(base)
+    result = PolicyApplicationRuntime(browser, ledger, clock=clock).run(
+        raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
+    assert result.status == "BLOCKED" and status(ledger) == "Released"
+
+
+def test_keyboard_interrupt_after_start_is_reraised_with_row_consumed(env):
+    base, cv, ledger = env
+    clock = Clock()
+    browser = FakeBrowser(base, clock)
+    def interrupted():
+        browser.clicks += 1
+        raise KeyboardInterrupt
+    browser.submit_once = interrupted
+    raw = encode(base)
+    with pytest.raises(KeyboardInterrupt):
+        PolicyApplicationRuntime(browser, ledger, clock=clock).run(
+            raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
+    assert browser.clicks == 1 and status(ledger) == "Submitted / Unconfirmed"
+
+
+def test_naive_clock_fails_closed(env):
+    base, cv, ledger = env
+    raw = encode(base)
+    runtime = PolicyApplicationRuntime(FakeBrowser(base, Clock()), ledger, clock=lambda: datetime(2026, 11, 17))
+    result = runtime.run(raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
+    assert result.status == "BLOCKED" and result.code == "POLICY_APP_CLOCK" and status(ledger) is None

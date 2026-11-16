@@ -71,16 +71,19 @@ write/readback, upload, owner wait, submit once):
 2. CV bytes are read owner-only (dir 0700, file 0600, no symlink) and must match the
    manifest's SHA-256, size and file name.
 3. The live form fingerprint must equal the manifest's; every non-blank answer is
-   written and read back; Blank Optional fields are never touched.
-4. The approved CV is uploaded and verified, then every answer is read back again on
-   a fresh inspection.
+   written and read back; Blank Optional fields are never touched. The runtime clock
+   never moves backwards, and the ledger clamps release times to the reservation.
+4. The approved CV is uploaded and verified, then every answer is read back again and
+   the attachment (hash, size, name, visible) is checked on a fresh inspection.
 5. A CAPTCHA/MFA/login challenge moves the row to Awaiting User; the browser waits for
    the owner (default up to 6 h) and the runtime verifies the surface again. It never
    solves a challenge itself.
 6. `mark_started`, then exactly one `submit_once`; only an acknowledged and visible
    confirmation becomes `EMPLOYER_CONFIRMED` via `ledger.confirm`.
 
-Every failure before step 6 releases the reservation (`BLOCKED`, no click). After
+Every failure before step 6 releases the reservation (`BLOCKED`, no click), except
+an unresolved owner handoff: the owner may have acted in the page, so that row stays
+Awaiting User until it expires. After
 `mark_started` the result is `SUBMITTED_UNCONFIRMED` unless confirmed, and the key is
 consumed forever. Results carry fixed `POLICY_APP_*` codes only. The SmartRecruiters
 Playwright binding (multi-step page, network boundary) is step 4b.

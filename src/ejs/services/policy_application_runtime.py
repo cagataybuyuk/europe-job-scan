@@ -60,7 +60,8 @@ class PolicyFormBrowser(Protocol):
     """One owned page. ``inspect`` returns structure only:
 
     ``{"url": str, "fields": [{key,label,control,required,options}], "cv_upload": {key,label,required},
-       "challenge": bool, "form_valid": bool, "submit_visible": bool}``
+       "challenge": bool, "form_valid": bool, "submit_visible": bool,
+       "cv_attachment": None | {"sha256": str, "size": int, "filename": str, "visible": bool}}``
     """
 
     def open(self, url: str) -> None: ...
@@ -101,13 +102,15 @@ def _utc_now() -> datetime:
 
 def read_cv(path: Path, manifest: ExecutionManifest) -> bytes:
     """Owner-only regular file whose bytes match the manifest (no symlink, no TOCTOU)."""
-    fd = None
+    fd = dfd = None
     try:
         _require(isinstance(path, Path) and path.name == manifest.cv_filename, "POLICY_APP_CV")
         for component in (path.parent, *path.parent.parents):
             _require(not component.is_symlink(), "POLICY_APP_CV")
-        _require(stat.S_IMODE(path.parent.stat().st_mode) == 0o700, "POLICY_APP_CV")
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        folder = os.fstat(dfd)
+        _require(folder.st_uid == os.getuid() and stat.S_IMODE(folder.st_mode) == 0o700, "POLICY_APP_CV")
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
         info = os.fstat(fd)
         _require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
                  and stat.S_IMODE(info.st_mode) == 0o600, "POLICY_APP_CV")
@@ -124,13 +127,27 @@ def read_cv(path: Path, manifest: ExecutionManifest) -> bytes:
     finally:
         if fd is not None:
             os.close(fd)
+        if dfd is not None:
+            os.close(dfd)
 
 
 class PolicyApplicationRuntime:
     def __init__(self, browser: PolicyFormBrowser, ledger: PolicySubmissionLedger, *,
                  clock=_utc_now, owner_wait_seconds: float = 6 * 3600):
-        self.browser, self.ledger, self.clock = browser, ledger, clock
+        self.browser, self.ledger, self._clock = browser, ledger, clock
         self.owner_wait_seconds = owner_wait_seconds
+        self._last: datetime | None = None
+
+    def clock(self) -> datetime:
+        """Never earlier than a time this runtime already used."""
+        now = self._clock()
+        if not isinstance(now, datetime) or now.tzinfo is None:
+            raise _Stop("POLICY_APP_CLOCK")
+        now = now.astimezone(timezone.utc)
+        if self._last is not None and now < self._last:
+            now = self._last
+        self._last = now
+        return now
 
     # ---- helpers ---------------------------------------------------------------------
 
@@ -154,39 +171,51 @@ class PolicyApplicationRuntime:
     def _filled(m: ExecutionManifest) -> tuple[ManifestField, ...]:
         return tuple(f for f in m.fields if f.answer.mode != "Blank Optional")
 
+    @staticmethod
+    def _attachment_ok(m: ExecutionManifest, snap: dict) -> bool:
+        item = snap.get("cv_attachment")
+        return (isinstance(item, dict) and item.get("sha256") == m.cv_sha256
+                and type(item.get("size")) is int and item["size"] == m.cv_size_bytes
+                and item.get("filename") == m.cv_filename and item.get("visible") is True)
+
     def _verify_readbacks(self, m: ExecutionManifest) -> None:
         for field in self._filled(m):
             value = self.browser.readback(field.key, field.control)
             _require(type(value) is type(field.answer.value) and value == field.answer.value,
                      "POLICY_APP_READBACK_MISMATCH")
 
-    def _settle_challenge(self, m: ExecutionManifest, snap: dict, *, written: bool) -> dict:
+    def _settle_challenge(self, m: ExecutionManifest, snap: dict) -> dict:
         """CAPTCHA/MFA/login: only the owner may solve it. Never automated."""
         if snap["challenge"] is False:
             return snap
         self.ledger.await_user(**self._ids(m), now=self.clock())
+        self._owner_handoff = True
         solved = self.browser.wait_for_owner(self.owner_wait_seconds) is True
         _require(solved, "POLICY_APP_OWNER_CHALLENGE_UNRESOLVED")
         self.ledger.resume(**self._ids(m), now=self.clock())
+        self._owner_handoff = False
         snap = self._surface(m)
         _require(snap["challenge"] is False, "POLICY_APP_OWNER_CHALLENGE_UNRESOLVED")
-        if written:
-            self._verify_readbacks(m)
         return snap
 
     # ---- run -------------------------------------------------------------------------
 
     def run(self, raw: bytes, *, expected_sha256: str, cv_path: Path, switch: RuntimeSwitch) -> RunResult:
-        decision = authorize_manifest(self.ledger, raw, now=self.clock(), switch=switch,
+        try:
+            decision_time = self.clock()
+        except _Stop as error:
+            return RunResult("BLOCKED", error.code)
+        decision = authorize_manifest(self.ledger, raw, now=decision_time, switch=switch,
                                       expected_sha256=expected_sha256)
         if not decision.dispatch_allowed:
             return RunResult(decision.decision.value)
         m = decision.manifest
         started = False
+        self._owner_handoff = False
         try:
             cv = read_cv(cv_path, m)
             self.browser.open(m.apply_url)
-            snap = self._settle_challenge(m, self._surface(m), written=False)
+            snap = self._settle_challenge(m, self._surface(m))
             for field in self._filled(m):
                 self.browser.write(field.key, field.control, field.answer.value)
                 value = self.browser.readback(field.key, field.control)
@@ -197,8 +226,9 @@ class PolicyApplicationRuntime:
                      and upload.payload_size == m.cv_size_bytes and upload.filename == m.cv_filename
                      and upload.attachment_visible is True, "POLICY_APP_UPLOAD_UNVERIFIED")
             # Everything again on a fresh surface: catches reactive overwrites.
-            snap = self._settle_challenge(m, self._surface(m), written=True)
+            snap = self._settle_challenge(m, self._surface(m))
             self._verify_readbacks(m)
+            _require(self._attachment_ok(m, snap), "POLICY_APP_UPLOAD_UNVERIFIED")
             _require(snap.get("form_valid") is True and snap.get("submit_visible") is True,
                      "POLICY_APP_FORM_NOT_READY")
             inspected_at = self.clock()
@@ -211,21 +241,30 @@ class PolicyApplicationRuntime:
                      and type(observation.acknowledgement_sha256) is str
                      and _HEX.fullmatch(observation.acknowledgement_sha256)
                      and isinstance(observation.observed_at, datetime)
+                     and observation.observed_at.tzinfo is not None
                      and inspected_at <= observation.observed_at <= self.clock(),
                      "POLICY_APP_CONFIRMATION_UNVERIFIED")
             evidence = ConfirmationEvidence(
                 submit_identity(m.opportunity_key, m.requisition_id, m.candidate_profile_version),
                 ConfirmationType.ATS_ACKNOWLEDGEMENT, "evidence:sha256:" + observation.acknowledgement_sha256,
-                observation.observed_at.isoformat(), True, m.execution_id, m.requisition_id)
+                observation.observed_at.astimezone(timezone.utc).isoformat(), True, m.execution_id,
+                m.requisition_id)
             _require(self.ledger.confirm(**self._ids(m), evidence=evidence, now=self.clock()),
                      "POLICY_APP_CONFIRMATION_UNVERIFIED")
             return RunResult("EMPLOYER_CONFIRMED", submit_clicks=1, evidence_ref=evidence.evidence_ref)
-        except Exception as error:
+        except BaseException as error:  # noqa: BLE001 - every exit must leave a consistent ledger
             code = error.code if isinstance(error, _Stop) and _CODE.fullmatch(error.code) else "POLICY_APP_BLOCKED"
             if started:
-                return RunResult("SUBMITTED_UNCONFIRMED", code, submit_clicks=-1)
-            try:
-                self.ledger.release(**self._ids(m), now=self.clock())
-            except Exception:
-                pass  # stale reservation expires on its own; no click happened
-            return RunResult("BLOCKED", code)
+                result = RunResult("SUBMITTED_UNCONFIRMED", code, submit_clicks=-1)
+            else:
+                result = RunResult("BLOCKED", code)
+                if not self._owner_handoff:
+                    # No click happened. After an owner handoff the owner may have
+                    # acted in the page, so the row stays Awaiting User instead.
+                    try:
+                        self.ledger.release(**self._ids(m), now=self._last or decision_time)
+                    except BaseException:  # noqa: BLE001
+                        pass  # a stale reservation expires on its own
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
+            return result

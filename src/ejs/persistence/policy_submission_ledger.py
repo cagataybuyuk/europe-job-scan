@@ -272,7 +272,8 @@ class PolicySubmissionLedger:
         key_hash, _ = _identity(opportunity_key, requisition_id, profile_version)
         with self._legacy._transaction() as connection:
             row = self._row(connection, key_hash, execution_id)
-            _require(row["status"] == AWAITING and now - _parse_utc(row["awaiting_at"]) <= AWAITING_TTL)
+            awaiting = _parse_utc(row["awaiting_at"])
+            _require(row["status"] == AWAITING and awaiting <= now <= awaiting + AWAITING_TTL)
             _require(connection.execute("SELECT 1 FROM policy_submissions WHERE status=?",
                                         (RESERVED,)).fetchone() is None)
             connection.execute("UPDATE policy_submissions SET status=?,reserved_at=?,awaiting_at=NULL "
@@ -286,8 +287,10 @@ class PolicySubmissionLedger:
         with self._legacy._transaction() as connection:
             row = self._row(connection, key_hash, execution_id)
             _require(row["status"] in (RESERVED, AWAITING))
+            # A stepped-back clock must never write an inconsistent row.
+            floor = max(_parse_utc(row["reserved_at"]), _parse_utc(row["awaiting_at"] or row["reserved_at"]))
             connection.execute("UPDATE policy_submissions SET status=?,released_at=? WHERE submit_key_sha256=?",
-                               (RELEASED, _time_text(now), key_hash))
+                               (RELEASED, _time_text(max(now, floor)), key_hash))
 
     def mark_started(self, *, opportunity_key: str, requisition_id: str, profile_version: str,
                      execution_id: str, now: datetime) -> None:
