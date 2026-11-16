@@ -28,8 +28,14 @@ slot and this table can never both submit.
 
 - `mark_started` is committed before the engine clicks submit. A started row is
   never released, retried or replaced, even if the outcome is ambiguous.
-- A reservation that was never started had no click; it expires after 30 minutes
-  (Awaiting User: 12 hours) and is released automatically.
+- A Reserved row that was never started had no click; it expires after 30 minutes and
+  is released automatically. Awaiting User rows never expire on their own: the owner
+  may have submitted by hand, so only `release(..., owner_confirmed_no_submit=True)`
+  frees them. `resume` is possible within 12 hours. After a handoff the runtime moves
+  its own unstarted row to Awaiting User atomically (`hold_for_owner`, no TTL), also
+  taking back a row of its own that expired meanwhile. A row that ever went through a
+  handoff carries `owner_handoff=1`: it never expires to Released (it returns to
+  Awaiting User) and is released only with the owner's confirmation.
 - Only one Reserved row may exist at a time (G7). Awaiting User rows do not block.
 - Duplicates are refused:
   - in this table: the same normalized submit key, or the same opportunity +
@@ -60,3 +66,30 @@ it. Defaults are safe: kill switch engaged, final submit disabled. Otherwise it
 returns `KILL_SWITCH`, `RUNTIME_DISABLED`, `MANIFEST_REJECTED`, `DUPLICATE`,
 `CAP_REACHED`, `BUSY` or `LEDGER_ERROR`. The module performs no browser, file or
 network I/O; the SmartRecruiters adapter (step 4) consumes it.
+
+## Runtime (GD-006 step 4a)
+
+`PolicyApplicationRuntime(browser, ledger).run(raw, expected_sha256=..., cv_path=..., switch=...)`
+drives one manifest through a `PolicyFormBrowser` (open, structure-only inspect,
+write/readback, upload, owner wait, submit once):
+
+1. `authorize_manifest`; anything but `RESERVED` returns before the browser opens.
+2. CV bytes are read owner-only (dir 0700, file 0600, no symlink) and must match the
+   manifest's SHA-256, size and file name.
+3. The live form fingerprint must equal the manifest's; every non-blank answer is
+   written and read back; Blank Optional fields are never touched. The runtime clock
+   never moves backwards, and the ledger clamps release times to the reservation.
+4. The approved CV is uploaded and verified, then every answer is read back again and
+   the attachment (hash, size, name, visible) is checked on a fresh inspection.
+5. A CAPTCHA/MFA/login challenge moves the row to Awaiting User; the browser waits for
+   the owner (default up to 6 h) and the runtime verifies the surface again. It never
+   solves a challenge itself.
+6. `mark_started`, then exactly one `submit_once`; only an acknowledged and visible
+   confirmation becomes `EMPLOYER_CONFIRMED` via `ledger.confirm`.
+
+Every failure before step 6 releases the reservation (`BLOCKED`, no click), except
+after any owner handoff: the owner may have acted in the page, so the row is held as
+Awaiting User for the owner to resolve. After
+`mark_started` the result is `SUBMITTED_UNCONFIRMED` unless confirmed, and the key is
+consumed forever. Results carry fixed `POLICY_APP_*` codes only. The SmartRecruiters
+Playwright binding (multi-step page, network boundary) is step 4b.
