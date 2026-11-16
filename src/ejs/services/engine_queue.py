@@ -41,7 +41,7 @@ from ejs.services.policy_submission import RuntimeSwitch
 
 RESULT_SCHEMA = "EJS-ENGINE-RESULT-1"
 RUNTIME_SCHEMA = "EJS-ENGINE-RUNTIME-1"
-SUBDIRS = ("inbox", "processing", "outbox", "archive", "control")
+SUBDIRS = ("inbox", "processing", "outbox", "archive", "control", "logs")
 MAX_MANIFEST_BYTES = 512_000
 MAX_ITEMS_PER_RUN = 200
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.json\Z")
