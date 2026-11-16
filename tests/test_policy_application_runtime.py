@@ -415,3 +415,51 @@ def test_observe_with_no_next_page_fails_closed(env):
     single = observe_doc(base)  # live form has only one page; nothing to advance to
     result, browser, ledger, _ = run(env, doc=single, pages=FakeBrowser._pages_from(single))
     assert result.status == "BLOCKED" and browser.clicks == 0 and status(ledger) == "Released"
+
+
+class EchoBrowser(FakeBrowser):
+    """Page 1 echoes a filled value into its label."""
+
+    def inspect(self):
+        snap = super().inspect()
+        if self.page == 1 and snap["fields"]:
+            snap["fields"][0]["label"] = "Confirm your email " + str(self.values.get("email"))
+        return snap
+
+
+@pytest.mark.parametrize("bad", [
+    dict(label="x" * 600), dict(required="maybe"), dict(control={"evil": 1}), dict(key="k" * 300),
+    dict(options=["Yes", {"nested": "Applicant"}]), dict(control="select", options=None),
+])
+def test_observation_rows_are_validated(env, bad):
+    base, cv, ledger = env
+    full = two_page(base)
+    doc = observe_doc(full)
+    pages = FakeBrowser._pages_from(full)
+    pages[1] = deepcopy(pages[1])
+    pages[1][0] = {**{k: pages[1][0][k] for k in ("key", "label", "control", "required", "options")}, **bad}
+    result, browser, ledger, _ = run(env, doc=doc, pages=pages)
+    assert result.status == "BLOCKED" and result.code == "POLICY_APP_OBSERVATION_INVALID"
+    assert browser.clicks == 0 and result.observation is None
+
+
+def test_observation_refuses_echoed_candidate_values(env):
+    base, cv, ledger = env
+    full = two_page(base)
+    doc = observe_doc(full)
+    clock = Clock()
+    browser = EchoBrowser(doc, clock, pages=FakeBrowser._pages_from(full))
+    raw = encode(doc)
+    result = PolicyApplicationRuntime(browser, ledger, clock=clock).run(
+        raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
+    assert result.status == "BLOCKED" and result.code == "POLICY_APP_OBSERVATION_INVALID"
+    assert "synthetic@example.invalid" not in repr(result)
+
+
+def test_submit_refused_when_live_form_has_another_page(env):
+    base, _, _ = env
+    full = two_page(base)
+    pages = FakeBrowser._pages_from(full) + [[dict(key="extra", label="Extra", control="text",
+                                                   required=False, options=None)]]
+    result, browser, ledger, _ = run(env, doc=full, pages=pages)
+    assert result.status == "BLOCKED" and result.code == "POLICY_APP_FORM_NOT_READY" and browser.clicks == 0

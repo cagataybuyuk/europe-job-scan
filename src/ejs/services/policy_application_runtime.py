@@ -38,6 +38,9 @@ from ejs.services.policy_submission import PolicyDecision, RuntimeSwitch, author
 _HEX = re.compile(r"[a-f0-9]{64}\Z")
 _CODE = re.compile(r"POLICY_APP_[A-Z0-9_]{1,80}\Z")
 MAX_CV_BYTES = 10 * 1024 * 1024
+MAX_OBSERVED_FIELDS = 80
+OBSERVED_CONTROLS = frozenset({"text", "email", "tel", "textarea", "select", "radio", "checkbox"})
+_OBSERVED_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 
 
 @dataclass(frozen=True)
@@ -230,21 +233,45 @@ class PolicyApplicationRuntime:
         step = m.step_count
         snap = self._settle_challenge(m, self._live(m, step), step, structure_known=False)
         fields, upload = snap.get("fields"), snap.get("cv_upload")
-        try:
-            form_fingerprint(fields, upload)  # structure must be well formed
-            rows = [dict(key=f["key"], label=f["label"], control=f["control"], required=f["required"],
-                         options=f["options"], step=step) for f in fields]
-        except Exception:
-            raise _Stop("POLICY_APP_OBSERVATION_INVALID") from None
-        _require(isinstance(fields, list) and 0 < len(fields) <= 80 and upload is None
+        _require(type(fields) is list and 0 < len(fields) <= MAX_OBSERVED_FIELDS and upload is None
                  and type(snap.get("submit_visible")) is bool and type(snap.get("next_visible")) is bool,
                  "POLICY_APP_OBSERVATION_INVALID")
+        rows = [self._observed_row(item, step) for item in fields]
+        _require(len({row["key"] for row in rows}) == len(rows), "POLICY_APP_OBSERVATION_INVALID")
+        # The observation must not carry any answer this run wrote (e.g. echoed labels).
+        written = [f.answer.value.casefold() for f in m.fields
+                   if type(f.answer.value) is str and len(f.answer.value.strip()) >= 3]
+        for row in rows:
+            for text in (row["key"], row["label"], *(row["options"] or ())):
+                folded = text.casefold()
+                _require(not any(value in folded for value in written), "POLICY_APP_OBSERVATION_INVALID")
         observation = dict(step=step, fields=rows, final=snap["submit_visible"] and not snap["next_visible"])
         if not self._owner_handoff:
             self.ledger.release(**self._ids(m), now=self._last or decision_time)
         else:
             self.ledger.hold_for_owner(**self._ids(m), now=self._last or decision_time)
         return RunResult("OBSERVED", observation=observation)
+
+    @staticmethod
+    def _observed_row(item: object, step: int) -> dict:
+        """Fresh, bounded copy of one observed control; anything else fails closed."""
+        _require(type(item) is dict and set(item) == {"key", "label", "control", "required", "options"},
+                 "POLICY_APP_OBSERVATION_INVALID")
+        key, label, control, required, options = (item[k] for k in ("key", "label", "control",
+                                                                     "required", "options"))
+        _require(type(key) is str and _OBSERVED_KEY.fullmatch(key) and type(label) is str
+                 and 0 < len(label) <= 500 and label == label.strip() and label.isprintable()
+                 and type(control) is str and control in OBSERVED_CONTROLS and type(required) is bool,
+                 "POLICY_APP_OBSERVATION_INVALID")
+        if control in ("select", "radio"):
+            _require(type(options) is list and 0 < len(options) <= 200
+                     and all(type(o) is str and 0 < len(o) <= 300 and o.isprintable() for o in options)
+                     and len(set(options)) == len(options), "POLICY_APP_OBSERVATION_INVALID")
+            options = [str(o) for o in options]
+        else:
+            _require(options is None, "POLICY_APP_OBSERVATION_INVALID")
+        return dict(key=str(key), label=str(label), control=str(control), required=bool(required),
+                    options=options, step=step)
 
     # ---- run -------------------------------------------------------------------------
 
@@ -289,8 +316,8 @@ class PolicyApplicationRuntime:
                     self.browser.advance()
             if m.pass_kind == "observe":
                 return self._observe(m, decision_time)
-            _require(snap.get("form_valid") is True and snap.get("submit_visible") is True,
-                     "POLICY_APP_FORM_NOT_READY")
+            _require(snap.get("form_valid") is True and snap.get("submit_visible") is True
+                     and snap.get("next_visible") is False, "POLICY_APP_FORM_NOT_READY")
             inspected_at = self.clock()
             self.ledger.mark_started(**self._ids(m), now=inspected_at)
             started = True
