@@ -97,6 +97,7 @@ Multi-page forms (GD-006 A1): each page's live structure is compared with that
 page's manifest fields; answers are written and read back per page; the CV is
 checked on its own page before Next. In an observe pass the runtime presses Next
 after the last known page, returns `OBSERVED` with that page's structure only (each row
-validated and copied; any echo of a written answer fails closed), and
+validated and copied; an echo of a written answer, compared after NFKC folding and
+removing non-alphanumerics, fails closed; this is a best-effort guard, not a proof), and
 releases the reservation (held for the owner after a handoff). It never clicks submit. The SmartRecruiters
 Playwright binding (multi-step page, network boundary) is step 4b.

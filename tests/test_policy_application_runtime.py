@@ -463,3 +463,27 @@ def test_submit_refused_when_live_form_has_another_page(env):
                                                    required=False, options=None)]]
     result, browser, ledger, _ = run(env, doc=full, pages=pages)
     assert result.status == "BLOCKED" and result.code == "POLICY_APP_FORM_NOT_READY" and browser.clicks == 0
+
+
+
+@pytest.mark.parametrize("disguise", [
+    lambda v: v.upper(), lambda v: " ".join(v), lambda v: "".join(chr(ord(c) + 0xFEE0) if "!" <= c <= "~" else c for c in v),
+])
+def test_disguised_echo_is_refused(env, disguise):
+    base, cv, ledger = env
+    full = two_page(base)
+    doc = observe_doc(full)
+
+    class Disguised(FakeBrowser):
+        def inspect(self):
+            snap = super().inspect()
+            if self.page == 1:
+                snap["fields"][0]["label"] = "Check " + disguise(str(self.values.get("email")))
+            return snap
+
+    clock = Clock()
+    raw = encode(doc)
+    result = PolicyApplicationRuntime(Disguised(doc, clock, pages=FakeBrowser._pages_from(full)), ledger,
+                                      clock=clock).run(raw, expected_sha256=hashlib.sha256(raw).hexdigest(),
+                                                       cv_path=cv, switch=ON)
+    assert result.status == "BLOCKED" and result.code == "POLICY_APP_OBSERVATION_INVALID"

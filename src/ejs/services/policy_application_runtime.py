@@ -27,6 +27,7 @@ from pathlib import Path
 import re
 import stat
 from typing import Protocol
+import unicodedata
 from urllib.parse import urlsplit
 
 from ejs.contracts.submit import submit_identity
@@ -103,6 +104,12 @@ class _Stop(Exception):
 def _require(condition: object, code: str) -> None:
     if not condition:
         raise _Stop(code)
+
+
+def _fold(text: str) -> str:
+    """Best-effort comparison form: NFKC, no combining marks, alphanumerics only."""
+    decomposed = unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", text))
+    return "".join(ch for ch in decomposed.casefold() if ch.isalnum() and not unicodedata.combining(ch))
 
 
 def _utc_now() -> datetime:
@@ -239,11 +246,11 @@ class PolicyApplicationRuntime:
         rows = [self._observed_row(item, step) for item in fields]
         _require(len({row["key"] for row in rows}) == len(rows), "POLICY_APP_OBSERVATION_INVALID")
         # The observation must not carry any answer this run wrote (e.g. echoed labels).
-        written = [f.answer.value.casefold() for f in m.fields
-                   if type(f.answer.value) is str and len(f.answer.value.strip()) >= 3]
+        written = [_fold(f.answer.value) for f in m.fields
+                   if type(f.answer.value) is str and len(_fold(f.answer.value)) >= 3]
         for row in rows:
             for text in (row["key"], row["label"], *(row["options"] or ())):
-                folded = text.casefold()
+                folded = _fold(text)
                 _require(not any(value in folded for value in written), "POLICY_APP_OBSERVATION_INVALID")
         observation = dict(step=step, fields=rows, final=snap["submit_visible"] and not snap["next_visible"])
         if not self._owner_handoff:
