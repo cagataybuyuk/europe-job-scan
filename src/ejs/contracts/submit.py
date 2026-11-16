@@ -46,8 +46,10 @@ ROLLOUT_DAILY_CAPS: dict[RolloutStage, int] = {
     RolloutStage.R1_PREFILL: 0,
     RolloutStage.R2_SINGLE_CANARY: 1,
     RolloutStage.R3_BOUNDED_ATS: 5,
-    RolloutStage.R4_MULTI_ATS: 5,
-    RolloutStage.R5_BROAD: 5,
+    # Owner decision 2026-11-16 (Auto Submit Policy Registry A9): no daily cap
+    # from R4. A negative cap means unlimited; per-opportunity gates still apply.
+    RolloutStage.R4_MULTI_ATS: -1,
+    RolloutStage.R5_BROAD: -1,
 }
 
 

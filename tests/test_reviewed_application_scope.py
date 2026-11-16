@@ -81,7 +81,8 @@ def test_different_pinned_test_target_has_no_actions_or_mutations(case):
     assert case == original
     with pytest.raises(FrozenInstanceError):
         result.final_submit_authorized = True
-    with pytest.raises(ValueError):
+    # Python <=3.12 raises ValueError, 3.13+ TypeError, for init=False fields.
+    with pytest.raises((ValueError, TypeError)):
         replace(result, final_submit_authorized=True)
 
 

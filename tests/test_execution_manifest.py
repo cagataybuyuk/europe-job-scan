@@ -598,3 +598,15 @@ def test_smartrecruiters_bare_posting_path_is_accepted():
     doc = base_document()
     doc["target"]["apply_url"] = "https://jobs.smartrecruiters.com/ExampleCo/744000000000001"
     load_execution_manifest(encode(doc), now=NOW)
+
+
+def test_r4_requires_null_daily_cap():
+    doc = base_document()
+    doc["policy"].update(rollout_stage="R4", daily_cap=None)
+    result = load_execution_manifest(encode(doc), now=NOW)
+    assert result.rollout_stage == "R4" and result.daily_cap is None
+    for cap in (5, 0, "none"):
+        doc["policy"]["daily_cap"] = cap
+        rejected(doc)
+    doc["policy"].update(rollout_stage="R3", daily_cap=None)
+    rejected(doc)
