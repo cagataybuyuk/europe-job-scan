@@ -229,7 +229,7 @@ class EngineQueue:
         target = self.root / "archive" / path.name
         while True:
             try:
-                os.link(path, target)
+                os.link(path, target, follow_symlinks=False)
                 break
             except FileExistsError:
                 target = self.root / "archive" / (path.stem + "." + secrets.token_hex(6) + ".json")
@@ -239,6 +239,15 @@ class EngineQueue:
         """Never re-run an interrupted item; report it once."""
         reports = []
         for path in sorted((self.root / "processing").iterdir()):
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                # Never read, moved or reported twice: the owner must remove it.
+                reports.append(ItemReport(path.name, "STUCK", "ENGINE_PROCESSING_ENTRY_UNSAFE"))
+                continue
+            if info.st_nlink > 1 and any(os.path.samestat(info, other.lstat())
+                                         for other in (self.root / "archive").iterdir()):
+                os.unlink(path)  # a crash between archive link and unlink; already reported
+                continue
             raw = b""
             status = "INTERRUPTED"
             try:

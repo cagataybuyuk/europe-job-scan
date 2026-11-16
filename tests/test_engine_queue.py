@@ -280,3 +280,21 @@ def test_cli_does_nothing_while_disabled(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "QUEUE_ROOT", tmp_path / "engine-queue")
     assert cli.main([]) == 0
     assert json.loads(capsys.readouterr().out) == {"status": "DISABLED"}
+
+
+def test_crash_between_archive_link_and_unlink_is_finished_quietly(setup):
+    root, cv_dir, ledger, doc = setup
+    queue, made = make_queue(root, cv_dir, ledger, doc)
+    private_write(root / "archive" / "a.json", encode(doc))
+    os.link(root / "archive" / "a.json", root / "processing" / "a.json")
+    assert queue.run_once() == [] and results(root) == {}
+    assert not (root / "processing" / "a.json").exists()
+
+
+def test_unsafe_processing_entry_is_reported_without_new_results(setup):
+    root, cv_dir, ledger, doc = setup
+    queue, _ = make_queue(root, cv_dir, ledger, doc)
+    (root / "processing" / "odd").mkdir(mode=0o700)
+    for _ in range(2):
+        assert [r.status for r in queue.run_once()] == ["STUCK"]
+    assert results(root) == {}
