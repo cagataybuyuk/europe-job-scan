@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push origin main*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Read(~/.ssh/**)",
+      "Read(**/.ejs-local/**)",
+      "Read(**/*.env)",
+      "Edit(**/engine-queue/control/**)",
+      "Write(**/engine-queue/control/**)"
+    ]
+  }
+}
