@@ -29,7 +29,7 @@ Kullanıcı istediği an iki ortam arasında geçebilir. Ortamların sohbet geç
 
 - `main`'e doğrudan push yok. Her değişiklik: branch → PR → exact-head CI → işi görmemiş ayrı bir alt-ajanla bağımsız inceleme → bulguların düzeltilmesi → **kullanıcının açık "merge" onayı** → squash merge (head SHA sabitlenerek) → birleşme sonrası `main` CI.
 - Başlamış bir PR bitmeden aynı sorunu çözen ikinci PR açma; önce açık PR'ları kontrol et.
-- Yeni test dosyası `.github/workflows/ci.yml` içindeki ilgili pytest listesine eklenmeli; tarayıcı testleri `upload-e2e-regression` job'unda koşar.
+- Yeni test dosyası `.github/workflows/ci.yml` içindeki uygun job'un pytest listesine eklenmeli (ör. çekirdek testler `core-regression`, SmartRecruiters tarayıcı testleri `upload-e2e-regression`).
 - Her merge sonrası dokümantasyon: Issue #79 checkpoint; Drive 02_Guncel_Durum sürüm artışı; gerekiyorsa GD dokümanına değişiklik bölümü; claude.ai proje dokümanı `EJS_CLAUDE_CALISMA_MODELI.md`.
 - Dış sistemlere yazma (tracker, Drive, e-posta, zamanlanmış görev), dış iletişim ve maddi işlem için kullanıcının açık onayı gerekir.
 
@@ -46,7 +46,8 @@ Kullanıcı istediği an iki ortam arasında geçebilir. Ortamların sohbet geç
 - Pazarlama ve talent pool izinleri varsayılan olarak Hayır veya boş.
 - Form şeması, host, seçenekler, CV dosyası veya başarı yanıtı beklenenden farklıysa dur. Belirsiz kalan ya da çöken bir gönderimi yeniden deneme.
 - Canlı gönderim yalnız SUBMIT-1.0 politikası içinde (R4: günlük sınır yok).
-- `engine-queue/control/` (`runtime.json`, `STOP`) yalnız kullanıcı tarafından yazılır; motoru açmak veya kapatmak kullanıcının işidir.
+- `engine-queue/control/` (`runtime.json`, `STOP`) yalnız kullanıcı tarafından yazılır; motoru açmak veya kapatmak kullanıcının işidir. `.claude/settings.json` bunu yalnız dosya araçlarında engeller; kabuk komutlarında da bu kurala uy.
+- `.claude/settings.json` içindeki push engelleri bir hız tümseğidir; asıl kural yukarıdaki değişiklik akışıdır.
 
 ## Yerel düzen (Mac)
 
@@ -56,4 +57,4 @@ Kullanıcı istediği an iki ortam arasında geçebilir. Ortamların sohbet geç
 ## Test
 
 - `python -m pip install -e '.[test]' && python -m playwright install chromium && python -m pytest -q`
-- Yönetilen Chromium yoksa tarayıcı testleri için `EJS_TEST_CHROME=<chrome yolu>` kullan.
+- Yönetilen Chromium yoksa `tests/test_smartrecruiters_policy_browser.py` için `EJS_TEST_CHROME=<chrome yolu>` kullan.
