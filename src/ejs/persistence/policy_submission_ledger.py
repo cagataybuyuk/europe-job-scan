@@ -265,6 +265,26 @@ class PolicySubmissionLedger:
             connection.execute("UPDATE policy_submissions SET status=?,awaiting_at=? WHERE submit_key_sha256=?",
                                (AWAITING, _time_text(now), key_hash))
 
+    def hold_for_owner(self, *, opportunity_key: str, requisition_id: str, profile_version: str,
+                       execution_id: str, now: datetime) -> None:
+        """Atomically hand this execution's unstarted key to the owner (Awaiting User).
+
+        Used after an owner handoff, when the owner may have submitted by hand.
+        No TTL applies; a row this execution reserved and that expired meanwhile
+        is taken back, unless a newer execution has reserved the key since.
+        """
+        now = _utc(now)
+        key_hash, _ = _identity(opportunity_key, requisition_id, profile_version)
+        with self._legacy._transaction() as connection:
+            row = self._row(connection, key_hash, execution_id)
+            if row["status"] == AWAITING:
+                return
+            _require(row["status"] in (RESERVED, RELEASED))
+            floor = max(_parse_utc(row[name]) for name in ("reserved_at", "awaiting_at", "released_at")
+                        if row[name] is not None)
+            connection.execute("UPDATE policy_submissions SET status=?,awaiting_at=?,released_at=NULL "
+                               "WHERE submit_key_sha256=?", (AWAITING, _time_text(max(now, floor)), key_hash))
+
     def resume(self, *, opportunity_key: str, requisition_id: str, profile_version: str,
                execution_id: str, now: datetime) -> None:
         """The user solved the challenge; the engine continues towards dispatch."""

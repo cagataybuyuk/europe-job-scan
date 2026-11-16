@@ -297,3 +297,35 @@ def test_non_bytes_manifest_returns_a_result(env):
     runtime = PolicyApplicationRuntime(FakeBrowser(base, Clock()), ledger, clock=Clock())
     result = runtime.run("not-bytes", expected_sha256="0" * 64, cv_path=cv, switch=ON)  # type: ignore[arg-type]
     assert result.status in ("BLOCKED", "MANIFEST_REJECTED") and status(ledger) is None
+
+
+class SlowFillClock(Clock):
+    """Jumps 31 minutes during the fill, after the owner resumed."""
+
+    def __init__(self, browser_ref):
+        super().__init__()
+        self.browser_ref = browser_ref
+
+    def __call__(self):
+        value = super().__call__()
+        browser = self.browser_ref[0]
+        if browser is not None and "upload" in browser.calls and not getattr(self, "jumped", False):
+            self.jumped = True
+            self.now += timedelta(minutes=31)
+            return self.now
+        return value
+
+
+def test_owner_hold_survives_an_expired_reservation_after_resume(env):
+    base, cv, ledger = env
+    ref = [None]
+    clock = SlowFillClock(ref)
+    browser = FakeBrowser(base, clock, challenge_at=1)
+    ref[0] = browser
+    raw = encode(base)
+    result = PolicyApplicationRuntime(browser, ledger, clock=clock).run(
+        raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
+    assert result.status == "BLOCKED" and browser.clicks == 0
+    assert status(ledger) == "Awaiting User"
+    again, browser2, _, _ = run(env)
+    assert again.status == "DUPLICATE" and browser2.clicks == 0

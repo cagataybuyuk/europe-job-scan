@@ -427,3 +427,18 @@ def test_v2_validated_reviewed_attempt_migrates_after_expiry(reviewed, monkeypat
     assert ledger.reserve(opportunity_key="opp:any", requisition_id="REF00063", profile_version="p9",
                           execution_id="exec-9", manifest_sha256=MANIFEST_SHA, rollout_stage="R4",
                           daily_cap=None, now=now + timedelta(days=2)) == "DUPLICATE"
+
+
+def test_hold_for_owner_takes_back_only_its_own_row(ledger):
+    assert reserve(ledger, 1) == "RESERVED"
+    later = T0 + RESERVATION_TTL + timedelta(minutes=5)
+    assert reserve(ledger, 2, now=later) == "RESERVED"  # auto-releases row 1
+    assert ledger.status(**ident(1)) == "Released"
+    ledger.hold_for_owner(**ident(1), execution_id="exec-1", now=later)
+    assert ledger.status(**ident(1)) == "Awaiting User"
+    ledger.hold_for_owner(**ident(1), execution_id="exec-1", now=later)  # idempotent
+    with pytest.raises(SubmissionLedgerError):
+        ledger.hold_for_owner(**ident(1), execution_id="exec-other", now=later)
+    start(ledger, 2, now=later + timedelta(seconds=1))
+    with pytest.raises(SubmissionLedgerError):
+        ledger.hold_for_owner(**ident(2), execution_id="exec-2", now=later)

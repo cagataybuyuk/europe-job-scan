@@ -261,16 +261,18 @@ class PolicyApplicationRuntime:
                 result = RunResult("SUBMITTED_UNCONFIRMED", code, submit_clicks=-1)
             else:
                 result = RunResult("BLOCKED", code)
-                try:
-                    if not self._owner_handoff:
+                if not self._owner_handoff:
+                    try:
                         self.ledger.release(**self._ids(m), now=self._last or decision_time)
-                    elif self.ledger.status(m.opportunity_key, m.requisition_id,
-                                            m.candidate_profile_version) == "Reserved":
-                        # The owner had the page and may have submitted by hand:
-                        # hold the key for the owner instead of letting it expire.
-                        self.ledger.await_user(**self._ids(m), now=self._last or decision_time)
-                except BaseException:  # noqa: BLE001
-                    pass  # a plain reservation expires on its own; no click by this runtime
+                    except BaseException:  # noqa: BLE001
+                        pass  # a plain reservation expires on its own; no click happened
+                else:
+                    # The owner had the page and may have submitted by hand: the key
+                    # is held for the owner and never released or expired here.
+                    try:
+                        self.ledger.hold_for_owner(**self._ids(m), now=self._last or decision_time)
+                    except BaseException:  # noqa: BLE001
+                        result = RunResult("BLOCKED", "POLICY_APP_OWNER_HOLD_FAILED")
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
             return result

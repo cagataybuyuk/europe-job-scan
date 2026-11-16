@@ -31,7 +31,9 @@ slot and this table can never both submit.
 - A Reserved row that was never started had no click; it expires after 30 minutes and
   is released automatically. Awaiting User rows never expire on their own: the owner
   may have submitted by hand, so only `release(..., owner_confirmed_no_submit=True)`
-  frees them. `resume` is possible within 12 hours.
+  frees them. `resume` is possible within 12 hours. After a handoff the runtime moves
+  its own unstarted row to Awaiting User atomically (`hold_for_owner`, no TTL), also
+  taking back a row of its own that expired meanwhile.
 - Only one Reserved row may exist at a time (G7). Awaiting User rows do not block.
 - Duplicates are refused:
   - in this table: the same normalized submit key, or the same opportunity +
