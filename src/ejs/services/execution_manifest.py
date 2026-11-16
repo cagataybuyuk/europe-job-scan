@@ -146,6 +146,12 @@ _FIELD_KEYS = frozenset({"key", "label", "control", "required", "options",
 _ANSWER_KEYS = frozenset({"mode", "value", "source_ref"})
 _UPLOAD_KEYS = frozenset({"key", "label", "required"})
 _CV_KEYS = frozenset({"library_name", "filename", "sha256", "size_bytes", "mime_type"})
+# GD-006 A1 (two passes for multi-page forms): optional, backwards compatible.
+_TOP_OPTIONAL = frozenset({"pass"})
+_FIELD_OPTIONAL = frozenset({"step"})
+_UPLOAD_OPTIONAL = frozenset({"step"})
+PASSES = frozenset({"submit", "observe"})
+MAX_STEPS = 10
 
 
 @dataclass(frozen=True)
@@ -164,6 +170,7 @@ class ManifestField:
     options: tuple[str, ...] | None
     canonical_field: str
     answer: ManifestAnswer
+    step: int = 0
 
 
 @dataclass(frozen=True)
@@ -192,6 +199,12 @@ class ExecutionManifest:
     cv_filename: str
     cv_sha256: str
     cv_size_bytes: int
+    pass_kind: str = "submit"
+    cv_upload_step: int = 0
+    step_count: int = 1
+
+    def step_fields(self, step: int) -> tuple["ManifestField", ...]:
+        return tuple(item for item in self.fields if item.step == step)
 
 
 def _require(condition: object) -> None:
@@ -217,9 +230,14 @@ def _finite_float(value: str) -> float:
     return result
 
 
-def _exact_object(value: object, keys: frozenset[str]) -> dict:
-    _require(isinstance(value, dict) and set(value) == keys)
+def _exact_object(value: object, keys: frozenset[str],
+                  optional: frozenset[str] = frozenset()) -> dict:
+    _require(isinstance(value, dict) and keys <= set(value) <= keys | optional)
     return value  # type: ignore[return-value]
+
+
+def _step(container: dict) -> int:
+    return _strict_int(container["step"], 0, MAX_STEPS - 1) if "step" in container else 0
 
 
 def _opaque(value: object) -> bool:
@@ -260,7 +278,7 @@ def _apply_url(value: object, family: str, posting_id: str) -> str:
     return value  # type: ignore[return-value]
 
 
-def form_fingerprint(fields: list[dict] | tuple[ManifestField, ...], cv_upload: dict) -> str:
+def form_fingerprint(fields: list[dict] | tuple[ManifestField, ...], cv_upload: dict | None) -> str:
     """Return the canonical SHA-256 of the observed form inventory.
 
     Only structure is hashed (key, label, control, requiredness, options and
@@ -272,12 +290,21 @@ def form_fingerprint(fields: list[dict] | tuple[ManifestField, ...], cv_upload: 
         if isinstance(field, ManifestField):
             row = [field.key, field.label, field.control, field.required,
                    list(field.options) if field.options is not None else None]
+            step = field.step
         else:
             row = [field["key"], field["label"], field["control"], field["required"],
                    field["options"]]
+            step = field.get("step", 0)
+        if step:  # step 0 is omitted so single-page fingerprints are unchanged
+            row.append(step)
         rows.append(row)
     rows.sort(key=lambda item: item[0])
-    upload = [cv_upload["key"], cv_upload["label"], cv_upload["required"]]
+    if cv_upload is None:  # a later page without the CV control
+        upload = None
+    else:
+        upload = [cv_upload["key"], cv_upload["label"], cv_upload["required"]]
+        if cv_upload.get("step", 0):
+            upload.append(cv_upload["step"])
     canonical = json.dumps({"fields": rows, "cv_upload": upload}, ensure_ascii=False,
                            separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -365,7 +392,8 @@ def _validate_answer(field: dict) -> ManifestAnswer:
 
 
 def _validate_field(raw: object, seen_keys: set[str]) -> ManifestField:
-    field = _exact_object(raw, _FIELD_KEYS)
+    field = _exact_object(raw, _FIELD_KEYS, _FIELD_OPTIONAL)
+    step = _step(field)
     key, label, control = field["key"], field["label"], field["control"]
     _require(isinstance(key, str) and _FIELD_KEY.fullmatch(key) and key not in seen_keys)
     seen_keys.add(key)
@@ -387,7 +415,7 @@ def _validate_field(raw: object, seen_keys: set[str]) -> ManifestField:
     answer = _validate_answer(field)
     return ManifestField(key=key, label=label, control=control, required=field["required"],
                          options=tuple(options) if options is not None else None,
-                         canonical_field=field["canonical_field"], answer=answer)
+                         canonical_field=field["canonical_field"], answer=answer, step=step)
 
 
 def load_execution_manifest(raw: bytes, *, now: datetime,
@@ -407,7 +435,9 @@ def load_execution_manifest(raw: bytes, *, now: datetime,
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise PermissionError(ERROR) from exc
 
-    top = _exact_object(document, _TOP_KEYS)
+    top = _exact_object(document, _TOP_KEYS, _TOP_OPTIONAL)
+    pass_kind = top.get("pass", "submit")
+    _require(isinstance(pass_kind, str) and pass_kind in PASSES)
     _require(top["schema_version"] == SCHEMA_VERSION)
     _require(_opaque(top["execution_id"]))
     _require(isinstance(top["candidate_profile_version"], str)
@@ -456,7 +486,11 @@ def load_execution_manifest(raw: bytes, *, now: datetime,
                    f.canonical_field) for f in fields]
     _require(len(set(groups)) == len(groups))
 
-    upload = _exact_object(form["cv_upload"], _UPLOAD_KEYS)
+    upload = _exact_object(form["cv_upload"], _UPLOAD_KEYS, _UPLOAD_OPTIONAL)
+    upload_step = _step(upload)
+    used = {f.step for f in fields} | {upload_step}
+    step_count = max(used) + 1
+    _require(used == set(range(step_count)))  # every known page has a control
     _require(isinstance(upload["key"], str) and _FIELD_KEY.fullmatch(upload["key"])
              and upload["key"] not in seen and _text(upload["label"], 500)
              and upload["required"] is True)
@@ -482,4 +516,5 @@ def load_execution_manifest(raw: bytes, *, now: datetime,
         cv_upload_key=upload["key"], cv_upload_label=upload["label"],
         cv_library_name=cv["library_name"], cv_filename=cv["filename"],
         cv_sha256=cv["sha256"], cv_size_bytes=size,
+        pass_kind=pass_kind, cv_upload_step=upload_step, step_count=step_count,
     )

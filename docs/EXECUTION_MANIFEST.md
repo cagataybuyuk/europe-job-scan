@@ -53,6 +53,25 @@ sorted by key plus the CV upload control), never the answers, so the engine can
 compare its own live observation with the prepared package. A stale or altered
 fingerprint rejects the manifest; the engine must stop on any live difference.
 
+## Multi-page forms and the two passes (GD-006 A1)
+
+Optional, backwards compatible keys:
+
+| Key | Meaning |
+|---|---|
+| top-level `pass` | `"submit"` (default) or `"observe"` |
+| field `step`, `cv_upload.step` | 0-based page index (default 0, at most 9); every page from 0 to the last must hold a control |
+
+Step 0 is omitted from the fingerprint rows, so single-page fingerprints are unchanged;
+a non-zero step is part of the fingerprint.
+
+- **Observe pass:** the manifest holds only the pages Claude already knows (usually page 0
+  with the CV). The engine fills them, uploads the CV, presses Next, reports the following
+  page's structure (key, label, control, requiredness, options; never answers) and stops
+  without submitting. The reservation is released.
+- **Submit pass:** the manifest holds every page; the engine checks each page's structure
+  and submits once on the last page.
+
 ## Answers (SUBMIT-1.0)
 
 | Mode | Allowed for | Source |

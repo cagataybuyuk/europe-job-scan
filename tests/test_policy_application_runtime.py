@@ -32,10 +32,13 @@ class Clock:
 class FakeBrowser:
     """Synthetic SmartRecruiters-like page; values live only in memory."""
 
-    def __init__(self, doc, clock, **behaviour):
+    def __init__(self, doc, clock, *, pages=None, **behaviour):
         self.doc, self.clock = doc, clock
-        self.fields = deepcopy(doc["form"]["fields"])
-        self.upload_control = dict(doc["form"]["cv_upload"])
+        # pages: list of field lists per page (the live form). Default: the manifest's own.
+        self.pages = pages or self._pages_from(doc)
+        self.upload_control = {k: v for k, v in doc["form"]["cv_upload"].items() if k != "step"}
+        self.upload_step = doc["form"]["cv_upload"].get("step", 0)
+        self.page = 0
         self.values: dict[str, object] = {}
         self.calls: list[str] = []
         self.clicks = 0
@@ -46,20 +49,34 @@ class FakeBrowser:
         self.inspections = 0
         self.attachment = None
 
+    @staticmethod
+    def _pages_from(doc):
+        pages = {}
+        for item in doc["form"]["fields"]:
+            pages.setdefault(item.get("step", 0), []).append(item)
+        return [pages[i] for i in sorted(pages)]
+
     def open(self, url):
         self.calls.append("open")
         assert url == URL
 
     def inspect(self):
         self.inspections += 1
-        fields = deepcopy(self.fields)
-        if self.b["drift"]:
+        fields = deepcopy(self.pages[self.page]) if self.page < len(self.pages) else []
+        if self.b["drift"] and self.page == self.b.get("drift_page", 0):
             fields.append(dict(key="new_required", label="New", control="text", required=True, options=None))
         challenge = self.b["challenge_at"] == self.inspections
-        return dict(url=self.b["url"], fields=[{k: f[k] for k in ("key", "label", "control", "required", "options")}
-                                               for f in fields],
-                    cv_upload=self.upload_control, challenge=challenge, form_valid=True, submit_visible=True,
-                    cv_attachment=self.attachment)
+        last = self.page >= len(self.pages) - 1
+        url = self.b["url"] if self.page == 0 else "https://jobs.smartrecruiters.com/oneclick-ui/screening"
+        return dict(url=url, step=self.page,
+                    fields=[{k: f[k] for k in ("key", "label", "control", "required", "options")} for f in fields],
+                    cv_upload=self.upload_control if self.page == self.upload_step else None,
+                    challenge=challenge, form_valid=True, submit_visible=last, next_visible=not last,
+                    cv_attachment=self.attachment if self.page == self.upload_step else None)
+
+    def advance(self):
+        self.calls.append("advance")
+        self.page += 1
 
     def write(self, key, control, value):
         self.calls.append("write:" + key)
@@ -329,3 +346,144 @@ def test_owner_hold_survives_an_expired_reservation_after_resume(env):
     assert status(ledger) == "Awaiting User"
     again, browser2, _, _ = run(env)
     assert again.status == "DUPLICATE" and browser2.clicks == 0
+
+
+
+# ---- GD-006 A1: multi-page forms and the observe pass ------------------------------------
+
+def two_page(doc):
+    """Personal page + CV (step 0); screening questions (step 1)."""
+    doc = deepcopy(doc)
+    for item in doc["form"]["fields"]:
+        if item["key"] in ("work_auth", "sponsorship", "motivation", "gender"):
+            item["step"] = 1
+    from ejs.services.execution_manifest import form_fingerprint
+    doc["form"]["fingerprint"] = form_fingerprint(doc["form"]["fields"], doc["form"]["cv_upload"])
+    return doc
+
+
+def observe_doc(doc):
+    """Only page 0 is known; the engine must report page 1 and stop."""
+    doc = deepcopy(doc)
+    doc["pass"] = "observe"
+    doc["form"]["fields"] = [f for f in doc["form"]["fields"] if f.get("step", 0) == 0]
+    from ejs.services.execution_manifest import form_fingerprint
+    doc["form"]["fingerprint"] = form_fingerprint(doc["form"]["fields"], doc["form"]["cv_upload"])
+    return doc
+
+
+def test_two_page_submit_pass_fills_each_page_and_submits_once(env):
+    base, _, _ = env
+    doc = two_page(base)
+    result, browser, ledger, _ = run(env, doc=doc)
+    assert result.status == "EMPLOYER_CONFIRMED" and browser.clicks == 1
+    assert browser.calls.index("upload") < browser.calls.index("advance") < browser.calls.index("write:work_auth")
+    assert status(ledger) == "Confirmed"
+
+
+def test_observe_pass_reports_next_page_and_never_clicks(env):
+    base, _, _ = env
+    full = two_page(base)
+    live_pages = FakeBrowser._pages_from(full)
+    result, browser, ledger, _ = run(env, doc=observe_doc(full), pages=live_pages)
+    assert result.status == "OBSERVED" and browser.clicks == 0 and "submit" not in browser.calls
+    assert result.observation["step"] == 1 and result.observation["final"] is True
+    assert {f["key"] for f in result.observation["fields"]} == {"work_auth", "sponsorship", "motivation", "gender"}
+    assert all("value" not in f and "answer" not in f for f in result.observation["fields"])
+    assert status(ledger) == "Released"
+    # Pass 2 with the full manifest completes the application.
+    done, browser2, _, _ = run(env, doc=full)
+    assert done.status == "EMPLOYER_CONFIRMED" and browser2.clicks == 1
+
+
+def test_observe_pass_does_not_echo_candidate_values(env):
+    base, _, _ = env
+    full = two_page(base)
+    result, _, _, _ = run(env, doc=observe_doc(full), pages=FakeBrowser._pages_from(full))
+    assert "synthetic@example.invalid" not in repr(result) and "Synthetic" not in repr(result)
+
+
+def test_second_page_drift_blocks_before_click(env):
+    base, _, _ = env
+    result, browser, ledger, _ = run(env, doc=two_page(base), drift=True, drift_page=1)
+    assert result.status == "BLOCKED" and result.code == "POLICY_APP_FORM_DRIFT" and browser.clicks == 0
+    assert status(ledger) == "Released"
+
+
+def test_observe_with_no_next_page_fails_closed(env):
+    base, _, _ = env
+    single = observe_doc(base)  # live form has only one page; nothing to advance to
+    result, browser, ledger, _ = run(env, doc=single, pages=FakeBrowser._pages_from(single))
+    assert result.status == "BLOCKED" and browser.clicks == 0 and status(ledger) == "Released"
+
+
+class EchoBrowser(FakeBrowser):
+    """Page 1 echoes a filled value into its label."""
+
+    def inspect(self):
+        snap = super().inspect()
+        if self.page == 1 and snap["fields"]:
+            snap["fields"][0]["label"] = "Confirm your email " + str(self.values.get("email"))
+        return snap
+
+
+@pytest.mark.parametrize("bad", [
+    dict(label="x" * 600), dict(required="maybe"), dict(control={"evil": 1}), dict(key="k" * 300),
+    dict(options=["Yes", {"nested": "Applicant"}]), dict(control="select", options=None),
+])
+def test_observation_rows_are_validated(env, bad):
+    base, cv, ledger = env
+    full = two_page(base)
+    doc = observe_doc(full)
+    pages = FakeBrowser._pages_from(full)
+    pages[1] = deepcopy(pages[1])
+    pages[1][0] = {**{k: pages[1][0][k] for k in ("key", "label", "control", "required", "options")}, **bad}
+    result, browser, ledger, _ = run(env, doc=doc, pages=pages)
+    assert result.status == "BLOCKED" and result.code == "POLICY_APP_OBSERVATION_INVALID"
+    assert browser.clicks == 0 and result.observation is None
+
+
+def test_observation_refuses_echoed_candidate_values(env):
+    base, cv, ledger = env
+    full = two_page(base)
+    doc = observe_doc(full)
+    clock = Clock()
+    browser = EchoBrowser(doc, clock, pages=FakeBrowser._pages_from(full))
+    raw = encode(doc)
+    result = PolicyApplicationRuntime(browser, ledger, clock=clock).run(
+        raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
+    assert result.status == "BLOCKED" and result.code == "POLICY_APP_OBSERVATION_INVALID"
+    assert "synthetic@example.invalid" not in repr(result)
+
+
+def test_submit_refused_when_live_form_has_another_page(env):
+    base, _, _ = env
+    full = two_page(base)
+    pages = FakeBrowser._pages_from(full) + [[dict(key="extra", label="Extra", control="text",
+                                                   required=False, options=None)]]
+    result, browser, ledger, _ = run(env, doc=full, pages=pages)
+    assert result.status == "BLOCKED" and result.code == "POLICY_APP_FORM_NOT_READY" and browser.clicks == 0
+
+
+
+@pytest.mark.parametrize("disguise", [
+    lambda v: v.upper(), lambda v: " ".join(v), lambda v: "".join(chr(ord(c) + 0xFEE0) if "!" <= c <= "~" else c for c in v),
+])
+def test_disguised_echo_is_refused(env, disguise):
+    base, cv, ledger = env
+    full = two_page(base)
+    doc = observe_doc(full)
+
+    class Disguised(FakeBrowser):
+        def inspect(self):
+            snap = super().inspect()
+            if self.page == 1:
+                snap["fields"][0]["label"] = "Check " + disguise(str(self.values.get("email")))
+            return snap
+
+    clock = Clock()
+    raw = encode(doc)
+    result = PolicyApplicationRuntime(Disguised(doc, clock, pages=FakeBrowser._pages_from(full)), ledger,
+                                      clock=clock).run(raw, expected_sha256=hashlib.sha256(raw).hexdigest(),
+                                                       cv_path=cv, switch=ON)
+    assert result.status == "BLOCKED" and result.code == "POLICY_APP_OBSERVATION_INVALID"
