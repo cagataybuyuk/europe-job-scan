@@ -65,3 +65,8 @@ python -m ejs.apps.policy_engine           # dry run: prints {"status": "DISABLE
 The agent runs at 08:30 Mac local time (set the Mac to Europe/Istanbul), only while the
 owner is logged in, with a visible browser. It stays harmless until the owner writes
 `control/runtime.json`. To remove it: `launchctl bootout gui/$(id -u)/com.ejs.policy-engine`.
+Before reinstalling, run that `bootout` first (a second `bootstrap` of a loaded job fails).
+
+Missed runs: a run missed while the Mac sleeps fires once on wake (possibly late); a run
+missed while it is off or logged out is skipped. The log (`logs/engine.log`, 0600) is not
+rotated; it holds status codes only.

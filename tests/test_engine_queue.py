@@ -314,3 +314,10 @@ def test_launchd_plist_is_fixed_and_installs_nothing(tmp_path, monkeypatch, caps
     assert not (tmp_path / "engine-queue").exists()  # printing creates nothing
     with pytest.raises(PermissionError):
         cli.launchd_plist("relative/python")
+
+
+def test_prepare_creates_owner_only_log_file(setup):
+    root, *_ = setup
+    prepare_root(root)
+    assert oct((root / "logs" / "engine.log").stat().st_mode & 0o777) == "0o600"
+    prepare_root(root)  # idempotent

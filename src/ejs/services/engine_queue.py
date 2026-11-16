@@ -7,6 +7,7 @@ Layout under one owner-only root (default ``~/Local/Projeler/EJS/engine-queue``)
     outbox/       EJS-ENGINE-RESULT-1 files for Claude (``<execution_id>.result.json``)
     archive/      processed manifests
     control/      ``runtime.json`` and the ``STOP`` file
+    logs/         ``engine.log`` written by launchd (0600)
 
 Runtime switch (safe by default):
   * ``control/STOP`` exists (any content)          -> kill switch engaged, no submit
@@ -82,6 +83,10 @@ def prepare_root(root: Path) -> None:
             sub.mkdir(mode=0o700)
             os.chmod(sub, 0o700)
         _owner_only(sub, directory=True)
+    log = root / "logs" / "engine.log"
+    if not os.path.lexists(log):
+        os.close(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+    _owner_only(log, directory=False)
 
 
 def _read_private(path: Path, limit: int) -> bytes:
