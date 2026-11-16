@@ -50,7 +50,7 @@ _HASHES = ("submit_key_sha256", "opportunity_requisition_sha256", "execution_id_
            "requisition_id_sha256", "manifest_sha256")
 _TIMES = ("reserved_at", "awaiting_at", "released_at", "started_at", "confirmed_at",
           "confirmation_observed_at")
-COLUMNS = (*_HASHES, "status", "rollout_stage", "daily_cap", *_TIMES, "started_day",
+COLUMNS = (*_HASHES, "status", "rollout_stage", "daily_cap", "owner_handoff", *_TIMES, "started_day",
            "evidence_type", "evidence_ref")
 TABLE_SQL = ("CREATE TABLE policy_submissions ("
              "submit_key_sha256 TEXT PRIMARY KEY CHECK(length(submit_key_sha256) = 64),"
@@ -58,6 +58,7 @@ TABLE_SQL = ("CREATE TABLE policy_submissions ("
              + ",status TEXT NOT NULL CHECK(status IN ('Reserved','Awaiting User','Released',"
                "'Submitted / Unconfirmed','Confirmed')),rollout_stage TEXT NOT NULL,"
                "daily_cap INTEGER CHECK(daily_cap IS NULL OR daily_cap >= 1),"
+               "owner_handoff INTEGER NOT NULL DEFAULT 0 CHECK(owner_handoff IN (0,1)),"
              + ",".join(name + " TEXT" for name in _TIMES)
              + ",started_day TEXT,evidence_type TEXT,evidence_ref TEXT)")
 
@@ -94,18 +95,19 @@ def check_policy_extension(connection) -> None:
             _require(all(type(row[k]) is str and _HEX.fullmatch(row[k]) for k in _HASHES))
             _require(row["status"] in _STATES and type(row["rollout_stage"]) is str
                      and _STAGE.fullmatch(row["rollout_stage"])
-                     and (row["daily_cap"] is None or (type(row["daily_cap"]) is int and row["daily_cap"] >= 1)))
+                     and (row["daily_cap"] is None or (type(row["daily_cap"]) is int and row["daily_cap"] >= 1))
+                     and type(row["owner_handoff"]) is int and row["owner_handoff"] in (0, 1))
             reserved = _parse_utc(row["reserved_at"])
             status = row["status"]
             confirmation = ("confirmed_at", "confirmation_observed_at", "evidence_type", "evidence_ref")
             if status in (RESERVED, AWAITING, RELEASED):
                 _require(row["started_at"] is None and row["started_day"] is None
                          and all(row[k] is None for k in confirmation))
-                _require((row["awaiting_at"] is not None) == (status == AWAITING)
-                         or (status == RELEASED))
                 _require((row["released_at"] is not None) == (status == RELEASED))
+                if status == AWAITING:
+                    _require(row["owner_handoff"] == 1 and row["awaiting_at"] is not None)
                 for name in ("awaiting_at", "released_at"):
-                    if row[name] is not None:
+                    if row[name] is not None and not (name == "awaiting_at" and status == RESERVED):
                         _require(_parse_utc(row[name]) >= reserved)
                 continue
             started = _parse_utc(row["started_at"])
@@ -212,9 +214,15 @@ class PolicySubmissionLedger:
             # Awaiting User rows never expire on their own: the owner may have
             # submitted by hand in the page, so only the owner may release them.
             for row in connection.execute(
-                    "SELECT submit_key_sha256,reserved_at FROM policy_submissions WHERE status=?",
+                    "SELECT submit_key_sha256,reserved_at,owner_handoff FROM policy_submissions WHERE status=?",
                     (RESERVED,)).fetchall():
-                if now - _parse_utc(row["reserved_at"]) > RESERVATION_TTL:
+                if now - _parse_utc(row["reserved_at"]) > RESERVATION_TTL and row["owner_handoff"] == 1:
+                    # The owner had this page: hold it for the owner, never free it.
+                    connection.execute("UPDATE policy_submissions SET status=?,awaiting_at=? "
+                                       "WHERE submit_key_sha256=?",
+                                       (AWAITING, _time_text(max(now, _parse_utc(row["reserved_at"]))),
+                                        row["submit_key_sha256"]))
+                elif now - _parse_utc(row["reserved_at"]) > RESERVATION_TTL:
                     connection.execute("UPDATE policy_submissions SET status=?,released_at=? "
                                        "WHERE submit_key_sha256=?",
                                        (RELEASED, _time_text(now), row["submit_key_sha256"]))
@@ -236,7 +244,7 @@ class PolicySubmissionLedger:
             connection.execute("DELETE FROM policy_submissions WHERE submit_key_sha256=? AND status=?",
                                (key_hash, RELEASED))
             connection.execute(
-                "INSERT INTO policy_submissions (" + ",".join(COLUMNS[:9]) + ") VALUES ("
+                "INSERT INTO policy_submissions (" + ",".join((*COLUMNS[:8], "reserved_at")) + ") VALUES ("
                 + ",".join("?" for _ in values) + ")", values)
         return "RESERVED"
 
@@ -262,8 +270,8 @@ class PolicySubmissionLedger:
             row = self._row(connection, key_hash, execution_id)
             reserved = _parse_utc(row["reserved_at"])
             _require(row["status"] == RESERVED and reserved <= now <= reserved + RESERVATION_TTL)
-            connection.execute("UPDATE policy_submissions SET status=?,awaiting_at=? WHERE submit_key_sha256=?",
-                               (AWAITING, _time_text(now), key_hash))
+            connection.execute("UPDATE policy_submissions SET status=?,awaiting_at=?,owner_handoff=1 "
+                               "WHERE submit_key_sha256=?", (AWAITING, _time_text(now), key_hash))
 
     def hold_for_owner(self, *, opportunity_key: str, requisition_id: str, profile_version: str,
                        execution_id: str, now: datetime) -> None:
@@ -280,10 +288,15 @@ class PolicySubmissionLedger:
             if row["status"] == AWAITING:
                 return
             _require(row["status"] in (RESERVED, RELEASED))
+            _require(connection.execute(
+                "SELECT 1 FROM policy_submissions WHERE opportunity_requisition_sha256=? "
+                "AND submit_key_sha256!=? AND status!=?",
+                (row["opportunity_requisition_sha256"], key_hash, RELEASED)).fetchone() is None)
             floor = max(_parse_utc(row[name]) for name in ("reserved_at", "awaiting_at", "released_at")
                         if row[name] is not None)
-            connection.execute("UPDATE policy_submissions SET status=?,awaiting_at=?,released_at=NULL "
-                               "WHERE submit_key_sha256=?", (AWAITING, _time_text(max(now, floor)), key_hash))
+            connection.execute("UPDATE policy_submissions SET status=?,awaiting_at=?,released_at=NULL,"
+                               "owner_handoff=1 WHERE submit_key_sha256=?",
+                               (AWAITING, _time_text(max(now, floor)), key_hash))
 
     def resume(self, *, opportunity_key: str, requisition_id: str, profile_version: str,
                execution_id: str, now: datetime) -> None:
@@ -310,8 +323,8 @@ class PolicySubmissionLedger:
         key_hash, _ = _identity(opportunity_key, requisition_id, profile_version)
         with self._legacy._transaction() as connection:
             row = self._row(connection, key_hash, execution_id)
-            _require(row["status"] == RESERVED
-                     or (row["status"] == AWAITING and owner_confirmed_no_submit is True))
+            _require((row["status"] == RESERVED and row["owner_handoff"] == 0)
+                     or (row["status"] in (RESERVED, AWAITING) and owner_confirmed_no_submit is True))
             # A stepped-back clock must never write an inconsistent row.
             floor = max(_parse_utc(row["reserved_at"]), _parse_utc(row["awaiting_at"] or row["reserved_at"]))
             connection.execute("UPDATE policy_submissions SET status=?,released_at=? WHERE submit_key_sha256=?",

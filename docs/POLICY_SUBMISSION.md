@@ -33,7 +33,9 @@ slot and this table can never both submit.
   may have submitted by hand, so only `release(..., owner_confirmed_no_submit=True)`
   frees them. `resume` is possible within 12 hours. After a handoff the runtime moves
   its own unstarted row to Awaiting User atomically (`hold_for_owner`, no TTL), also
-  taking back a row of its own that expired meanwhile.
+  taking back a row of its own that expired meanwhile. A row that ever went through a
+  handoff carries `owner_handoff=1`: it never expires to Released (it returns to
+  Awaiting User) and is released only with the owner's confirmation.
 - Only one Reserved row may exist at a time (G7). Awaiting User rows do not block.
 - Duplicates are refused:
   - in this table: the same normalized submit key, or the same opportunity +

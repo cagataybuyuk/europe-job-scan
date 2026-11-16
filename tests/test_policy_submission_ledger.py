@@ -442,3 +442,25 @@ def test_hold_for_owner_takes_back_only_its_own_row(ledger):
     start(ledger, 2, now=later + timedelta(seconds=1))
     with pytest.raises(SubmissionLedgerError):
         ledger.hold_for_owner(**ident(2), execution_id="exec-2", now=later)
+
+
+def test_resumed_handoff_row_is_held_not_freed_when_it_expires(ledger):
+    assert reserve(ledger, 1) == "RESERVED"
+    ledger.await_user(**ident(1), execution_id="exec-1", now=T0)
+    ledger.resume(**ident(1), execution_id="exec-1", now=T0 + timedelta(minutes=5))
+    later = T0 + timedelta(minutes=5) + RESERVATION_TTL + timedelta(seconds=1)
+    # Same key, and same vacancy under a new profile, stay blocked; the row is held.
+    assert reserve(ledger, 1, execution="exec-1b", now=later) == "DUPLICATE"
+    assert reserve(ledger, 1, profile="profile-2027", execution="exec-1c", now=later) == "DUPLICATE"
+    assert ledger.status(**ident(1)) == "Awaiting User"
+    with pytest.raises(SubmissionLedgerError):
+        ledger.release(**ident(1), execution_id="exec-1", now=later)
+    assert reserve(ledger, 2, now=later) == "RESERVED"  # other vacancies are not blocked
+
+
+def test_hold_for_owner_refuses_when_vacancy_is_live_elsewhere(ledger):
+    assert reserve(ledger, 1) == "RESERVED"
+    later = T0 + RESERVATION_TTL + timedelta(minutes=1)
+    assert reserve(ledger, 1, profile="profile-2027", execution="exec-9", now=later) == "RESERVED"
+    with pytest.raises(SubmissionLedgerError):
+        ledger.hold_for_owner(**ident(1), execution_id="exec-1", now=later)
