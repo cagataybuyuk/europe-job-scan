@@ -46,3 +46,27 @@ the owner's hands; check the employer before any retry).
 - The browser is visible (`headless=False`) so the owner can solve a CAPTCHA/MFA
   challenge; the engine never solves one.
 - Only SmartRecruiters is supported; any other ATS family is `BLOCKED`.
+
+## Mac installation (GD-006 step 6; the owner runs these)
+
+From the repo checkout on the Mac, with its venv active:
+
+```sh
+git pull                                   # main with GD-006 steps 1-5
+python -m pip install -e '.[test]'
+python -m playwright install chromium
+python -m ejs.apps.policy_engine --prepare # owner-only folders, incl. logs/
+python -m ejs.apps.policy_engine --launchd-plist > ~/Library/LaunchAgents/com.ejs.policy-engine.plist
+chmod 600 ~/Library/LaunchAgents/com.ejs.policy-engine.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ejs.policy-engine.plist
+python -m ejs.apps.policy_engine           # dry run: prints {"status": "DISABLED"}
+```
+
+The agent runs at 08:30 Mac local time (set the Mac to Europe/Istanbul), only while the
+owner is logged in, with a visible browser. It stays harmless until the owner writes
+`control/runtime.json`. To remove it: `launchctl bootout gui/$(id -u)/com.ejs.policy-engine`.
+Before reinstalling, run that `bootout` first (a second `bootstrap` of a loaded job fails).
+
+Missed runs: a run missed while the Mac sleeps fires once on wake (possibly late); a run
+missed while it is off or logged out is skipped. The log (`logs/engine.log`, 0600) is not
+rotated; it holds status codes only.

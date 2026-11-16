@@ -2,6 +2,7 @@
 
     python -m ejs.apps.policy_engine            # process the queue once
     python -m ejs.apps.policy_engine --prepare  # only create the owner-only folders
+    python -m ejs.apps.policy_engine --launchd-plist  # print the 08:30 LaunchAgent (installs nothing)
 
 Fixed private locations under ~/Local/Projeler/EJS; no path, URL or authority is
 read from arguments or the environment. The runtime switch lives in
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import plistlib
 import json
 import os
 from pathlib import Path
@@ -20,12 +22,36 @@ import sys
 _BASE = Path(pwd.getpwuid(os.getuid()).pw_dir) / "Local" / "Projeler" / "EJS"
 QUEUE_ROOT = _BASE / "engine-queue"
 CV_DIR = _BASE / "claude-applications"
+LAUNCHD_LABEL = "com.ejs.policy-engine"
+
+
+def launchd_plist(python: str) -> bytes:
+    """The LaunchAgent for 08:30 Europe/Istanbul (the Mac's local time). Nothing is installed."""
+    if not (isinstance(python, str) and python.startswith("/") and "\n" not in python):
+        raise PermissionError("ENGINE_PYTHON_PATH_INVALID")
+    log = str(QUEUE_ROOT / "logs" / "engine.log")
+    return plistlib.dumps({
+        "Label": LAUNCHD_LABEL,
+        "ProgramArguments": [python, "-I", "-B", "-m", "ejs.apps.policy_engine"],
+        "StartCalendarInterval": {"Hour": 8, "Minute": 30},
+        "RunAtLoad": False,
+        "KeepAlive": False,
+        "ProcessType": "Interactive",  # visible browser: the owner may solve a challenge
+        "StandardOutPath": log,
+        "StandardErrorPath": log,
+        "Umask": 0o077,
+    })
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Process the EJS engine queue once.")
     parser.add_argument("--prepare", action="store_true", help="create the owner-only queue folders and exit")
+    parser.add_argument("--launchd-plist", action="store_true",
+                        help="print the 08:30 LaunchAgent plist for this interpreter; installs nothing")
     args = parser.parse_args(argv)
+    if args.launchd_plist:
+        sys.stdout.write(launchd_plist(sys.executable).decode("utf-8"))
+        return 0
 
     from ejs.services.engine_queue import EngineQueue, prepare_root
     prepare_root(QUEUE_ROOT)

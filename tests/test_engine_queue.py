@@ -298,3 +298,26 @@ def test_unsafe_processing_entry_is_reported_without_new_results(setup):
     for _ in range(2):
         assert [r.status for r in queue.run_once()] == ["STUCK"]
     assert results(root) == {}
+
+
+def test_launchd_plist_is_fixed_and_installs_nothing(tmp_path, monkeypatch, capsys):
+    import plistlib
+    import ejs.apps.policy_engine.__main__ as cli
+    monkeypatch.setattr(cli, "QUEUE_ROOT", tmp_path / "engine-queue")
+    assert cli.main(["--launchd-plist"]) == 0
+    plist = plistlib.loads(capsys.readouterr().out.encode())
+    assert plist["Label"] == "com.ejs.policy-engine"
+    assert plist["ProgramArguments"][1:] == ["-I", "-B", "-m", "ejs.apps.policy_engine"]
+    assert plist["StartCalendarInterval"] == {"Hour": 8, "Minute": 30}
+    assert plist["RunAtLoad"] is False and plist["KeepAlive"] is False and plist["Umask"] == 0o077
+    assert plist["StandardOutPath"].endswith("engine-queue/logs/engine.log")
+    assert not (tmp_path / "engine-queue").exists()  # printing creates nothing
+    with pytest.raises(PermissionError):
+        cli.launchd_plist("relative/python")
+
+
+def test_prepare_creates_owner_only_log_file(setup):
+    root, *_ = setup
+    prepare_root(root)
+    assert oct((root / "logs" / "engine.log").stat().st_mode & 0o777) == "0o600"
+    prepare_root(root)  # idempotent
