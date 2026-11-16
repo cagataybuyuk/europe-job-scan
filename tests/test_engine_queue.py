@@ -56,7 +56,7 @@ def enable(root):
 
 
 def results(root):
-    return {p.name: json.loads(p.read_text()) for p in (root / "outbox").iterdir()}
+    return {p.name: json.loads(p.read_text()) for p in (root / "outbox").iterdir() if not p.name.startswith(".")}
 
 
 def test_layout_is_owner_only(setup):
@@ -198,3 +198,85 @@ def test_cli_prepare_creates_owner_only_layout(tmp_path, monkeypatch, capsys):
     assert cli.main(["--prepare"]) == 0
     assert json.loads(capsys.readouterr().out) == {"status": "PREPARED"}
     assert oct((tmp_path / "engine-queue" / "control").stat().st_mode & 0o777) == "0o700"
+
+
+def test_leftover_temp_file_never_blocks_a_result(setup):
+    root, cv_dir, ledger, doc = setup
+    queue, made = make_queue(root, cv_dir, ledger, doc)
+    enable(root)
+    private_write(root / "outbox" / ".exec-20261117-example-1.result.json.tmp", b"partial")
+    private_write(root / "inbox" / "a.json", encode(doc))
+    assert [r.status for r in queue.run_once()] == ["EMPLOYER_CONFIRMED"]
+    assert "exec-20261117-example-1.result.json" in results(root)
+
+
+def test_duplicate_execution_id_is_not_run_and_rest_of_inbox_continues(setup):
+    root, cv_dir, ledger, doc = setup
+    queue, made = make_queue(root, cv_dir, ledger, doc)
+    enable(root)
+    private_write(root / "inbox" / "a.json", encode(doc))
+    queue.run_once()
+    other = deepcopy(doc)
+    other["target"]["requisition_id"] = "REF002"
+    other["execution_id"] = "exec-20261117-example-2"
+    other["submit_key"] = "submit:opp:example:sr:744000000000001:REF002:profile-2026-11-16"
+    private_write(root / "inbox" / "b.json", encode(doc))      # same execution id again
+    private_write(root / "inbox" / "c.json", encode(other))    # still processed afterwards
+    reports = queue.run_once()
+    assert [(r.name, r.code) for r in reports][0] == ("b.json", "ENGINE_DUPLICATE_EXECUTION_ID")
+    assert len(made) == 2 and made[0].clicks == 1  # b never got a browser
+    assert len(list((root / "archive").iterdir())) == 3
+
+
+def test_recovery_releases_an_unstarted_reservation(setup):
+    root, cv_dir, ledger, doc = setup
+    ids = dict(opportunity_key="opp:example:sr:744000000000001", requisition_id="REF001",
+               profile_version="profile-2026-11-16")
+    assert ledger.reserve(**ids, execution_id="exec-20261117-example-1", manifest_sha256="a" * 64,
+                          rollout_stage="R4", daily_cap=None, now=NOW) == "RESERVED"
+    queue, _ = make_queue(root, cv_dir, ledger, doc)
+    private_write(root / "processing" / "a.json", encode(doc))
+    assert [r.status for r in queue.run_once()] == ["INTERRUPTED"]
+    assert ledger.status(*ids.values()) == "Released"
+
+
+def test_recovery_flags_an_owner_handoff(setup):
+    root, cv_dir, ledger, doc = setup
+    ids = dict(opportunity_key="opp:example:sr:744000000000001", requisition_id="REF001",
+               profile_version="profile-2026-11-16")
+    ledger.reserve(**ids, execution_id="exec-20261117-example-1", manifest_sha256="a" * 64,
+                   rollout_stage="R4", daily_cap=None, now=NOW)
+    ledger.await_user(**ids, execution_id="exec-20261117-example-1", now=NOW)
+    queue, _ = make_queue(root, cv_dir, ledger, doc)
+    private_write(root / "processing" / "a.json", encode(doc))
+    reports = queue.run_once()
+    assert [r.status for r in reports] == ["OWNER_CHECK_REQUIRED"]
+    assert list(results(root).values())[0]["submit_clicks"] == -1
+
+
+def test_fifo_and_duplicate_keys_never_enable(setup):
+    root, *_ = setup
+    prepare_root(root)
+    os.mkfifo(root / "control" / "runtime.json", 0o600)
+    assert not read_switch(root).final_submit_enabled
+    os.remove(root / "control" / "runtime.json")
+    private_write(root / "control" / "runtime.json",
+                  b'{"schema_version": "EJS-ENGINE-RUNTIME-1", "final_submit": false, "final_submit": true}')
+    assert not read_switch(root).final_submit_enabled
+
+
+def test_archive_never_overwrites(setup):
+    root, cv_dir, ledger, doc = setup
+    queue, _ = make_queue(root, cv_dir, ledger, doc)
+    private_write(root / "archive" / "a.json", b"older")
+    private_write(root / "processing" / "a.json", b"not json")
+    queue.run_once()
+    contents = sorted(p.read_bytes() for p in (root / "archive").iterdir())
+    assert b"older" in contents and b"not json" in contents
+
+
+def test_cli_does_nothing_while_disabled(tmp_path, monkeypatch, capsys):
+    import ejs.apps.policy_engine.__main__ as cli
+    monkeypatch.setattr(cli, "QUEUE_ROOT", tmp_path / "engine-queue")
+    assert cli.main([]) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "DISABLED"}

@@ -27,15 +27,22 @@ opened (`RUNTIME_DISABLED` / `KILL_SWITCH`). `STOP` is re-read between items.
 
 Statuses: `EMPLOYER_CONFIRMED`, `SUBMITTED_UNCONFIRMED`, `OBSERVED`, `BLOCKED`,
 `KILL_SWITCH`, `RUNTIME_DISABLED`, `MANIFEST_REJECTED`, `DUPLICATE`, `CAP_REACHED`,
-`BUSY`, `LEDGER_ERROR`, `INTERRUPTED`.
+`BUSY`, `LEDGER_ERROR`, `INTERRUPTED`, `OWNER_CHECK_REQUIRED` (an interrupted item was in
+the owner's hands; check the employer before any retry).
 
 ## Rules
 
-- One engine at a time (`engine.lock`).
+- One engine at a time (`engine.lock`). While submission is off, the CLI opens no browser
+  and leaves the inbox untouched (`DISABLED`).
+- Results are published atomically and never overwrite: a second item with an execution
+  id that already has a result is not run (`ENGINE_DUPLICATE_EXECUTION_ID`, written under a
+  hash-based name). Archived manifests are never overwritten either.
+- A failure while processing one item never stops the rest of the inbox.
 - Unsafe or oddly named inbox files are never read or moved (`SKIPPED_UNSAFE`).
 - A manifest left in `processing/` by a crash is never re-run: it is reported as
   `INTERRUPTED`, or `SUBMITTED_UNCONFIRMED`/`EMPLOYER_CONFIRMED` if the ledger shows a
-  dispatch, then archived. Claude decides on any new attempt.
+  dispatch, then archived. An unstarted reservation is released; one the owner handled
+  is reported as `OWNER_CHECK_REQUIRED`. Claude decides on any new attempt.
 - The browser is visible (`headless=False`) so the owner can solve a CAPTCHA/MFA
   challenge; the engine never solves one.
 - Only SmartRecruiters is supported; any other ATS family is `BLOCKED`.

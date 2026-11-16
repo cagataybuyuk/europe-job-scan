@@ -33,6 +33,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "PREPARED"}))
         return 0
 
+    from ejs.services.engine_queue import read_switch, switch_enabled
+    if not switch_enabled(read_switch(QUEUE_ROOT)):
+        # No browser is opened and the inbox is left untouched while submission is off.
+        print(json.dumps({"status": "DISABLED"}))
+        return 0
+
     from playwright.sync_api import sync_playwright
 
     from ejs.apps.reviewed_application.__main__ import open_existing_canonical_ledger

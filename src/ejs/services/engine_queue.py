@@ -31,6 +31,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 from typing import Callable
 
@@ -84,7 +85,7 @@ def prepare_root(root: Path) -> None:
 
 
 def _read_private(path: Path, limit: int) -> bytes:
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # a FIFO never blocks
     try:
         info = os.fstat(fd)
         _require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
@@ -100,15 +101,36 @@ def _read_private(path: Path, limit: int) -> bytes:
 
 
 def _write_private(path: Path, payload: bytes) -> None:
-    """Atomic owner-only write: temp file in the same folder, fsync, rename."""
-    temp = path.with_name("." + path.name + ".tmp")
+    """Atomic owner-only publish that never overwrites: random temp, fsync, hard link.
+
+    Raises FileExistsError if ``path`` already exists; the temp file is always removed.
+    """
+    temp = path.with_name("." + path.name + "." + secrets.token_hex(8) + ".tmp")
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
-        os.write(fd, payload)
-        os.fsync(fd)
+        try:
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.link(temp, path)
     finally:
-        os.close(fd)
-    os.replace(temp, path)
+        try:
+            os.unlink(temp)
+        except FileNotFoundError:
+            pass
+
+
+def _no_duplicates(pairs):
+    keys = [key for key, _ in pairs]
+    _require(len(keys) == len(set(keys)))
+    return dict(pairs)
+
+
+def switch_enabled(switch: RuntimeSwitch) -> bool:
+    return switch.final_submit_enabled is True and switch.kill_switch_engaged is False
 
 
 def read_switch(root: Path) -> RuntimeSwitch:
@@ -118,7 +140,7 @@ def read_switch(root: Path) -> RuntimeSwitch:
         _owner_only(control, directory=True)
         if os.path.lexists(control / "STOP"):
             return RuntimeSwitch(final_submit_enabled=False, kill_switch_engaged=True)
-        data = json.loads(_read_private(control / "runtime.json", 4096))
+        data = json.loads(_read_private(control / "runtime.json", 4096), object_pairs_hook=_no_duplicates)
         if (type(data) is dict and set(data) == {"schema_version", "final_submit"}
                 and data["schema_version"] == RUNTIME_SCHEMA and data["final_submit"] is True):
             return RuntimeSwitch(final_submit_enabled=True, kill_switch_engaged=False)
@@ -170,7 +192,8 @@ def _execution_id(raw: bytes) -> str | None:
 
 
 def _result_name(execution_id: str | None, digest: str) -> str:
-    base = execution_id.replace(":", "_") if execution_id else "unidentified-" + digest[:16]
+    """One-to-one: '~' never occurs in an execution id, so ':' -> '~' cannot collide."""
+    base = execution_id.replace(":", "~") if execution_id else "unidentified-" + digest[:16]
     return base + ".result.json"
 
 
@@ -184,22 +207,33 @@ class EngineQueue:
         self.root, self.ledger, self.cv_dir = root, ledger, cv_dir
         self.browser_factory, self.clock = browser_factory, clock
 
-    def _emit(self, raw: bytes, result: RunResult) -> None:
+    def _result_path(self, raw: bytes) -> Path:
+        return self.root / "outbox" / _result_name(_execution_id(raw), hashlib.sha256(raw).hexdigest())
+
+    def _emit(self, raw: bytes, result: RunResult, *, name: str | None = None) -> None:
         digest = hashlib.sha256(raw).hexdigest()
         execution_id = _execution_id(raw)
         document = _result_document(execution_id=execution_id or "", manifest_sha256=digest,
                                     result=result, now=self.clock())
         payload = json.dumps(document, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        target = self.root / "outbox" / _result_name(execution_id, digest)
-        _require(not os.path.lexists(target), "ENGINE_RESULT_EXISTS")
-        _write_private(target, payload)
+        target = self.root / "outbox" / name if name else self._result_path(raw)
+        try:
+            _write_private(target, payload)
+        except FileExistsError:
+            # Never overwrite: keep this outcome under a unique, hash-based name.
+            fallback = "conflict-" + digest[:16] + "-" + secrets.token_hex(4) + ".result.json"
+            _write_private(self.root / "outbox" / fallback, payload)
 
     def _archive(self, path: Path) -> None:
+        """Move without ever overwriting an archived manifest."""
         target = self.root / "archive" / path.name
-        if os.path.lexists(target):
-            target = self.root / "archive" / (path.stem + "." + hashlib.sha256(path.name.encode()
-                                              + str(self.clock()).encode()).hexdigest()[:8] + ".json")
-        os.replace(path, target)
+        while True:
+            try:
+                os.link(path, target)
+                break
+            except FileExistsError:
+                target = self.root / "archive" / (path.stem + "." + secrets.token_hex(6) + ".json")
+        os.unlink(path)
 
     def _recover(self) -> list[ItemReport]:
         """Never re-run an interrupted item; report it once."""
@@ -215,14 +249,25 @@ class EngineQueue:
                                            document["candidate_profile_version"])
                 if state in ("Submitted / Unconfirmed", "Confirmed"):
                     status = "SUBMITTED_UNCONFIRMED" if state != "Confirmed" else "EMPLOYER_CONFIRMED"
+                elif state == "Awaiting User":
+                    status = "OWNER_CHECK_REQUIRED"  # the owner may have submitted by hand
+                elif state == "Reserved":
+                    try:  # no click happened; refused for rows the owner handled
+                        self.ledger.release(opportunity_key=document["target"]["opportunity_key"],
+                                            requisition_id=document["target"]["requisition_id"],
+                                            profile_version=document["candidate_profile_version"],
+                                            execution_id=document["execution_id"], now=self.clock())
+                    except Exception:
+                        status = "OWNER_CHECK_REQUIRED"
             except Exception:
                 pass  # expired or unreadable: still reported as INTERRUPTED
-            result = RunResult(status, "ENGINE_INTERRUPTED", submit_clicks=-1 if status != "INTERRUPTED" else 0)
+            result = RunResult(status, "ENGINE_INTERRUPTED", submit_clicks=0 if status == "INTERRUPTED" else -1)
             try:
                 self._emit(raw or path.name.encode(), result)
-            except QueueError:
-                pass
-            self._archive(path)
+                self._archive(path)
+            except (OSError, QueueError):
+                reports.append(ItemReport(path.name, "STUCK", "ENGINE_RECOVERY_FAILED"))
+                continue
             reports.append(ItemReport(path.name, status, "ENGINE_INTERRUPTED"))
         return reports
 
@@ -231,10 +276,8 @@ class EngineQueue:
         with _engine_lock(self.root):
             reports = self._recover()
             switch = read_switch(self.root)
-            inbox = sorted(p for p in (self.root / "inbox").iterdir() if not p.name.startswith("."))
+            inbox = sorted(p for p in (self.root / "inbox").iterdir() if _NAME.fullmatch(p.name))
             for path in inbox[:MAX_ITEMS_PER_RUN]:
-                if not _NAME.fullmatch(path.name):
-                    continue  # never touched
                 claimed = self.root / "processing" / path.name
                 try:
                     _owner_only(path, directory=False)
@@ -242,7 +285,11 @@ class EngineQueue:
                 except (OSError, QueueError):
                     reports.append(ItemReport(path.name, "SKIPPED_UNSAFE", "ENGINE_QUEUE_UNSAFE"))
                     continue
-                reports.append(self._process(claimed, switch))
+                try:
+                    reports.append(self._process(claimed, switch))
+                except Exception:
+                    # Left in processing/: the next run reports it once, never re-runs it.
+                    reports.append(ItemReport(path.name, "STUCK", "ENGINE_ITEM_FAILED"))
                 switch = read_switch(self.root)  # STOP takes effect between items
             return reports
 
@@ -255,6 +302,11 @@ class EngineQueue:
             self._archive(path)
             return ItemReport(path.name, result.status, result.code)
         digest = hashlib.sha256(raw).hexdigest()
+        if os.path.lexists(self._result_path(raw)):
+            result = RunResult("BLOCKED", "ENGINE_DUPLICATE_EXECUTION_ID")
+            self._emit(raw, result, name="duplicate-" + digest[:16] + "-" + secrets.token_hex(4) + ".result.json")
+            self._archive(path)
+            return ItemReport(path.name, result.status, result.code)
         cv_name, document = None, {}
         try:
             document = json.loads(raw)
