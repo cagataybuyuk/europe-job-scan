@@ -184,11 +184,13 @@ class SmartRecruitersPolicyBrowser:
     """One owned page implementing ``PolicyFormBrowser`` for SmartRecruiters one-click."""
 
     def __init__(self, context, boundary: PolicyNetworkBoundary, *, poll_seconds: float = 2.0,
-                 clock=lambda: datetime.now(timezone.utc), transport: str = "fetch"):
+                 clock=lambda: datetime.now(timezone.utc), transport: str = "fetch",
+                 offline_test_transport: bool = False):
         """``transport="fetch"`` (production) performs every allowed request itself with
         redirects disabled, so no redirect hop can bypass the boundary. ``"fallback"``
         is only for offline tests whose own route handler fulfils the request."""
-        _require(transport in ("fetch", "fallback"), "POLICY_APP_SR_BOUNDARY")
+        _require(transport == "fetch" or (transport == "fallback" and offline_test_transport is True),
+                 "POLICY_APP_SR_BOUNDARY")
         self._transport = transport
         self._fatal = False
         _require(isinstance(boundary, PolicyNetworkBoundary), "POLICY_APP_SR_BOUNDARY")
@@ -209,6 +211,14 @@ class SmartRecruitersPolicyBrowser:
         # Belt and braces: any redirect hop or service worker is fatal for this session.
         context.on("request", self._observe_request)
         context.on("serviceworker", self._service_worker)
+
+    @classmethod
+    def launch(cls, chromium_browser, boundary: PolicyNetworkBoundary, **options) -> "SmartRecruitersPolicyBrowser":
+        """Production entry point: a fresh context with service workers blocked."""
+        _require("transport" not in options and "offline_test_transport" not in options,
+                 "POLICY_APP_SR_BOUNDARY")
+        context = chromium_browser.new_context(service_workers="block", accept_downloads=False)
+        return cls(context, boundary, **options)
 
     # ---- fences ------------------------------------------------------------------------------
 

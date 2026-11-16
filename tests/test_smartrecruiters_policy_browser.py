@@ -179,7 +179,7 @@ def session(chromium, *, html=None, ack=True, upload_name="Synthetic_CV.pdf"):
     clock = Clock()
     boundary = PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf")
     browser = SmartRecruitersPolicyBrowser(context, boundary, poll_seconds=0.05, clock=clock,
-                                           transport="fallback")
+                                           transport="fallback", offline_test_transport=True)
     try:
         yield browser, boundary, seen, clock
     finally:
@@ -376,10 +376,31 @@ def test_entry_link_with_extra_query_does_not_pin_publication(chromium, env):
     context = chromium.new_context(service_workers="block")
     context.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=bad_posting))
     boundary = PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf")
-    browser = SmartRecruitersPolicyBrowser(context, boundary, transport="fallback")
+    browser = SmartRecruitersPolicyBrowser(context, boundary, transport="fallback", offline_test_transport=True)
     try:
         with pytest.raises(PermissionError):
             browser.open(URL)
         assert boundary.publication_id is None
     finally:
         context.close()
+
+
+def test_fallback_transport_needs_explicit_test_flag():
+    with pytest.raises(PermissionError):
+        SmartRecruitersPolicyBrowser(FakeContext(), PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf"),
+                                     transport="fallback")
+
+
+def test_launch_creates_a_service_worker_blocking_context():
+    created = {}
+
+    class Chromium:
+        def new_context(self, **kwargs):
+            created.update(kwargs)
+            return FakeContext()
+
+    browser = SmartRecruitersPolicyBrowser.launch(Chromium(), PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf"))
+    assert created["service_workers"] == "block" and browser._transport == "fetch"
+    with pytest.raises(PermissionError):
+        SmartRecruitersPolicyBrowser.launch(Chromium(), PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf"),
+                                            transport="fallback")

@@ -16,9 +16,13 @@ through `PolicyNetworkBoundary`.
 
 Everything else is blocked and counted; any blocked write makes the form "not ready".
 In production every allowed request is performed by the browser itself with redirects
-disabled (`route.fetch(max_redirects=0)`); a 3xx answer is aborted and counted, so no
+disabled (`route.fetch(max_redirects=0)`). Production code must create the browser with
+`SmartRecruitersPolicyBrowser.launch(chromium, boundary)`, which opens a fresh context with
+service workers blocked; a 3xx answer is aborted and counted, so no
 redirect hop can bypass the boundary. Any observed redirect hop or service worker makes
-the session fatal. Offline tests use `transport="fallback"`.
+the session fatal. Offline tests use `transport="fallback"`, which requires an explicit
+`offline_test_transport=True`. Multipart uploads and large bodies through `route.fetch`
+are covered only by fake routes; the first real Mac run must confirm them.
 
 Known limits: the CV upload's 24-hex company id is not pinned in advance (only one upload
 with the approved file name is possible); any iframe counts as a challenge, and CAPTCHA
