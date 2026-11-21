@@ -27,7 +27,8 @@ Kullanıcı istediği an iki ortam arasında geçebilir. Ortamların sohbet geç
 
 ## Değişiklik akışı (yönetim yöntemi)
 
-- `main`'e doğrudan push yok. Her değişiklik: branch → PR → exact-head CI → işi görmemiş ayrı bir alt-ajanla bağımsız inceleme → bulguların düzeltilmesi → **kullanıcının açık "merge" onayı** → squash merge (head SHA sabitlenerek) → birleşme sonrası `main` CI.
+- `main`'e doğrudan push yok. Her değişiklik: branch → PR → exact-head CI (tüm işler yeşil) → squash merge (head SHA sabitlenerek) → birleşme sonrası `main` CI.
+- **Kullanıcı kararı (21 Kasım 2026, Paperclip görevi AIW-6: kart 5c2ade95 "Her yolda doğrudan ben" ve 7b4d936e yorumu):** "bağımsız inceleme" ve "kullanıcının her PR için açık merge onayı" koşulları kaldırıldı. AI Workspace Orchestrator, CI yeşilse tüm yollarda (gönderim, ledger ve motor kuyruğu dahil) PR'ı kendisi birleştirebilir. Bağımsız inceleme zorunlu bir kapı değildir; riskli bir değişiklikte ajan takdirine göre isteyebilir. Bu karar `engine-queue/control/` (`runtime.json`, `STOP`) yazma yetkisini ve aşağıdaki güvenlik sınırlarını DEĞİŞTİRMEZ.
 - Başlamış bir PR bitmeden aynı sorunu çözen ikinci PR açma; önce açık PR'ları kontrol et.
 - Yeni test dosyası `.github/workflows/ci.yml` içindeki uygun job'un pytest listesine eklenmeli (ör. çekirdek testler `core-regression`, SmartRecruiters tarayıcı testleri `upload-e2e-regression`).
 - Her merge sonrası dokümantasyon: Issue #79 checkpoint; Drive 02_Guncel_Durum sürüm artışı; gerekiyorsa GD dokümanına değişiklik bölümü; claude.ai proje dokümanı `EJS_CLAUDE_CALISMA_MODELI.md`.
