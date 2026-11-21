@@ -1,0 +1,90 @@
+# EJS kriter dosyası şablonu (TASLAK r6, AIW-17) — AIW-6/criteria.draft.yaml şemasıyla uyumlu; kullanıcı doldurur.
+# Bu dosyada KİŞİSEL DEĞER YOK; tüm değerler yer tutucudur. Doldurulmuş taslak (AIW-6/criteria.draft.yaml) ayrı kalır.
+# Kural: belirsiz veya eksik alan ilanı otomatik ELEMEZ ve ONAYLAMAZ; sonuç needs_user olur
+# (sert engeller hariç: yalnız açıkça tanımlı engeller eler).
+# Kişisel veri (ad, telefon, adres, CV içeriği/bağlantısı) bu dosyaya YAZILMAZ; repo public.
+schema: EJS-CRITERIA-0.1-DRAFT        # criteria.draft.yaml ile aynı
+source: "<KAYNAK: ör. tracker dışa aktarımı + tarih>"
+countries:
+  tier_1: []                          # <ÜLKE_ADI>; Sponsor-First Targeting ağırlıkları
+  others: []
+role_tracks:
+  primary: null                       # <ROL_AİLESİ>
+  secondary: []
+seniority:
+  include: []                         # <KIDEM>
+  exclude: []
+exclusions: []                        # <ENGEL_KODU>, ör. mandatory-local-language-unmet
+work_rights:
+  eu_work_authorization: null         # <true|false>; sistem TAHMİN ETMEZ
+  unknown_sponsorship_is_hard_reject: null   # K2 ile uyumlu değer kullanıcıdan
+compensation:
+  target_net_monthly_eur_min: null    # <MİNİMUM>
+  unknown_salary_is_hard_reject: null
+  # Başvuruda maaş beklentisi sorusu TAHMİN EDİLMEZ; yanıt yanıt bankasından gelir.
+languages_required_met: []            # <DİL>
+score_weights:                        # OPPORTUNITY-1.0; toplam 100 olmalı (yükleyici doğrular)
+  sponsorship: null
+  compensation_living: null
+  role_fit: null
+  scope: null
+  career_upside: null
+  english_intl: null
+  seniority_title: null
+thresholds: {priority_apply: null, apply: null, consider: null}   # <EŞİK>
+auto_apply:                           # K2 (max_volume): değerler kullanıcıdan
+  opportunity_min: null
+  hard_blockers: []                   # ör. explicit-no-sponsorship, mandatory-language-unmet, closed-vacancy, junior-or-technical-only
+  calibration_review_after_applications: null   # <N>; öneri: 30
+  previous_sheet_rule: null           # {opportunity_min, role_fit_min, if_sponsorship_unknown: {...}} — kayıt amaçlı
+submit_mode: null                     # conditional_auto | manual ; conditional_auto = kill switch + tek-gönderim ledger + bilinmeyen şema/CAPTCHA/MFA'da dur
+rollout:                              # ROADMAP kademeli rampa; kullanıcı onaylı
+  daily_submit_cap: null              # <GÜNLÜK_SINIR>
+  pilot_applications: null            # <PİLOT_N>
+sources:
+  default: [employer_watchlist, official_career_pages]
+  linkedin: url_resolve_only          # url_resolve_only | "off" (tırnaklı) ; toplu çekim YOK (K4)
+  indeed: "off"                        # TIRNAKLI: tırnaksız off/on/yes/no Ruby/YAML 1.1'de boolean olur
+  eures: "off"                         # otomasyon dışı; tırnaklı string
+employer_watchlist:
+  location: "owner-only, repo dışı (<YOL>)"   # şirket listesi burada YAZILMAZ
+cv_selection:                         # kural sırası önemli; ilk eşleşen
+  - {match: null, cv: null}           # <REGEX>, <CV_KİMLİĞİ> (dosya yolu/bağlantı YAZILMAZ)
+  - {fallback: null}                  # <MASTER_CV_KİMLİĞİ>
+dedupe_key: "company + normalized role + location"
+follow_up_default_business_days: null
+rule_version: null                    # r3: kural kümesi sürümü (ör. OPPORTUNITY-1.0+K2); her ledger kararına yazılır; kurallar repo'da sürümlü YAML
+ledger:                               # r3 (K5): SQLite tek doğruluk kaynağı; yol repo dışı owner-only
+  path: "owner-only, repo dışı (<YOL>)"
+  single_writer: true                 # yalnız ledger erişim katmanı yazar
+chain:                                # r3: tek LaunchAgent zinciri
+  steps: [discover, triage, manifest, engine, outcome, notifier]
+  schedule_local_time: null           # <SS:DD>, ör. 08:30
+  catch_up: {enabled: null, max_catch_up_runs: 1}    # kaçan çalışma telafisi; günlük gönderim sınırı biriktirilmez
+health:                               # r3: sessiz arıza önleme; değerler kullanıcıdan
+  feeder_dead_after_hours: null       # <EŞİK_SAAT, öneri 36>
+  feeder_dead_after_zero_runs: null   # <N, öneri 3>
+  notify_feeder_dead_immediately: true
+  daily_summary: true                 # her gün, olay olmasa da
+export:                               # r3: Sheet isteğe bağlı SALT-OKUNUR dışa aktarım; Sheet'e yazma anahtarı YOK
+  csv_dir: "owner-only, repo dışı (<YOL>)"
+  enabled: null
+outcome_source:
+  adapter: csv_import                 # csv_import | sheet_export | imap | gmail (imap/gmail = yazılı izin gerekir)
+  cutover_date: null                  # r3: 3a→3b kesme tarihi T (ARCHITECTURE §4); örtüşme penceresi:
+  overlap_days: null                  # <GÜN, öneri 7>
+  canonical_event_id: gmail_message_id   # F1: kaynak türünden bağımsız kanonik olay kimliği (Gmail RFC Message-ID); ledger UNIQUE yalnız bu
+  source_trace: [adapter_kind, adapter_ref]   # adaptör/taşıyıcı izi; olay başına birden fazla olabilir; UNIQUE (canonical_event_id, adapter_kind, adapter_ref)
+  missing_canonical_id: reject_and_needs_user # kimliği çıkarılamayan satır içe aktarılmaz; import_rejected + needs_user
+  same_id_different_class: conflict_needs_user   # yeni olay açılmaz; iz eklenir; çatışan olay dışlanır, durum kalan kümeden yeniden hesaplanır (geri alma = tek açık istisna)
+  attribute_mismatch: conflict_needs_user   # event_class / occurred_at / match_confidence farklıysa; birleştirme yok. F2-R: aynı canonical_event_id nitelik uyuşmazlığı; sıra bağımsız
+  conflict_policy: no_auto_winner             # F2: güven yüksek olsa da otomatik kazanan yok; çatışan/düşük güvenli olay duruma katılmaz
+  state_model: recompute_on_conflict          # F2-R Model A: ara durum da olay kümesinin işlevi; çatışmada çatışan olaylar dışlanıp yeniden hesap
+  monotonic_scope: conflict_free_events_only   # monotonluk yalnız çatışmasız ingest için; tek istisna çatışma geri alması
+  rollback_trigger: conflict_id_set_gains_new_id   # F2-R2: geri alma, çatışan kimlik kümesine yeni kimlik girdiği her adımda (conflict zaten true olsa da); küme büyümüyorsa düşüş yok
+  rollback_surface: [conflict, needs_user, state_rollback]   # geri alma sessiz değil
+  state_is_function_of_event_set: true        # gelme sırasından bağımsız; sıra = occurred_at, eşitse canonical_event_id
+profile_answer_bank:
+  location: "owner-only, repo dışı (<YOL>)"   # yanıtlar burada YAZILMAZ
+ranking:
+  mode: rules_only                    # rules_only | ai_within_subscription_quota (ücretli API yok)
