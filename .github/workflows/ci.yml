@@ -134,6 +134,10 @@ jobs:
           tests/test_work_rights_evidence_gate.py
           tests/test_bound_work_rights_gate.py
           tests/test_application_action_preflight.py
+          tests/unit/test_ejs_phase1a_criteria.py
+          tests/unit/test_ejs_phase1a_score_autoreview.py
+          tests/unit/test_ejs_phase1a_dedupe_queue.py
+          tests/unit/test_ejs_phase1a_csv_export.py
 
   mvp01-render-regression:
     runs-on: ubuntu-latest
