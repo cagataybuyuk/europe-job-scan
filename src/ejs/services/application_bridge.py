@@ -60,7 +60,7 @@ class _PostingText(HTMLParser):
 
     def handle_data(self, data):
         if self.hidden is None:
-            self.parts.append(data)
+            self.parts.append(re.sub(r"\s+", " ", data))
 
 
 def _detail(raw: bytes, tenant: str, posting_id: str) -> dict:

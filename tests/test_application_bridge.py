@@ -166,3 +166,49 @@ def test_cli_publishes_private_non_executable_fixture_report(tmp_path, monkeypat
     with pytest.raises(ValueError, match="report files already exist"):
         runpy.run_path(str(script), run_name="__main__")
     assert report_path.read_bytes() == original
+
+
+def test_source_wrapping_does_not_turn_conditional_sponsorship_into_general_restriction():
+    payload = deepcopy(DETAIL)
+    payload["jobAd"]["sections"]["qualifications"]["text"] = (
+        "<p>We do not provide visa sponsorship\n"
+        "  for internships only.</p>\n"
+        "<p>Applicants must have the legal\n<strong>right to work</strong> in Ireland.</p>"
+    )
+    candidate = enriched(payload)
+    assert candidate["eligibility_conditions"] == [
+        dict(condition="existing_work_rights_required", section="qualifications",
+             quote="Applicants must have the legal right to work in Ireland"),
+    ]
+
+
+@pytest.mark.parametrize("failure", [OSError, KeyboardInterrupt])
+def test_failed_publication_never_creates_final_report_and_can_retry(tmp_path, monkeypatch, failure):
+    import os
+    import runpy
+
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.syspath_prepend(str(root / "scripts"))
+    publish = runpy.run_path(str(root / "scripts/application_bridge.py"))["publish_report"]
+    parent = tmp_path.resolve()
+    parent.chmod(0o700)
+    output = parent / "output"
+    final = output / "preparation-report.json"
+    payload = b'{"executable": false}\n'
+
+    def interrupted(_fd):
+        assert not final.exists()
+        raise failure("injected failure during staged write")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", interrupted)
+        with pytest.raises(failure, match="injected failure"):
+            publish(output, payload)
+
+    assert list(output.iterdir()) == []
+    publish(output, payload)
+    assert final.read_bytes() == payload
+    with pytest.raises(ValueError, match="report files already exist"):
+        publish(output, b"replacement")
+    assert list(output.iterdir()) == [final]
+    assert final.read_bytes() == payload

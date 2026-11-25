@@ -105,7 +105,7 @@ def require_no_extended_acl(fd: int) -> None:
     raise ValueError("cannot verify effective owner-only live output access")
 
 
-def private_outputs(path: Path, stack: ExitStack, *, names: tuple[str, ...] = _REPORT_NAMES):
+def private_output_directory(path: Path, stack: ExitStack) -> int:
     supplied = path.absolute()
     resolved = supplied.resolve()
     if supplied != resolved:
@@ -126,19 +126,24 @@ def private_outputs(path: Path, stack: ExitStack, *, names: tuple[str, ...] = _R
     finally:
         os.close(parent_fd)
     if not resolved.exists():
-        resolved.mkdir(mode=0o700)
+        resolved.mkdir(mode=0o700, exist_ok=True)
     directory_fd = os.open(resolved, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     stack.callback(os.close, directory_fd)
     info = os.fstat(directory_fd)
     if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise ValueError("live output directory must be owner-owned with mode 0700")
     require_no_extended_acl(directory_fd)
-    if any(os.path.lexists(resolved / name) for name in names):
+    return directory_fd
+
+
+def private_outputs(path: Path, stack: ExitStack):
+    directory_fd = private_output_directory(path, stack)
+    if any(os.path.lexists(path / name) for name in _REPORT_NAMES):
         raise ValueError("live report files already exist")
     outputs = []
     created = {}
     try:
-        for name in names:
+        for name in _REPORT_NAMES:
             fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
             stack.callback(os.close, fd)
             opened = os.fstat(fd)

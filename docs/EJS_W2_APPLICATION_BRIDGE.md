@@ -12,8 +12,9 @@ bilgisini belirtmemesi tek başına hazırlığı engellemez.
 Depo kökünden, Python paketinin kurulu olduğu ortamda çalıştırın.
 `PRIVATE_PARENT` sahibi tarafından kontrol edilen, Git deposu ve kuyruk
 dışında, sembolik bağ içermeyen mutlak bir dizin olmalıdır. Çıktı dizini
-`0700`, `preparation-report.json` dosyası `0600` izinleriyle açılır.
-Aynı hedefe ikinci yazım reddedilir.
+`0700`, rapor dosyası `0600` izinleriyle hazırlanır. Yazım tamamlanınca
+`preparation-report.json` atomik olarak yayımlanır. Mevcut rapor korunur.
+Yayım öncesindeki bir hata sonrasında aynı hedefe yeniden yazılabilir.
 
 ```sh
 PYTHONPATH=src python scripts/application_bridge.py "$W1_REPORT" "$PRIVATE_PARENT/phase-b"

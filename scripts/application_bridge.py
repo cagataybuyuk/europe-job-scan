@@ -3,11 +3,35 @@ import argparse
 from contextlib import ExitStack
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
+from uuid import uuid4
 
-from shadow_discovery import private_outputs
+from shadow_discovery import private_output_directory, require_no_extended_acl
 
 from ejs.services.application_bridge import prepare_application_report
+
+
+def publish_report(directory: Path, payload: bytes) -> None:
+    with ExitStack() as stack:
+        directory_fd = private_output_directory(directory, stack)
+        pending = f".preparation-{uuid4().hex}.tmp"
+        fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory_fd)
+        try:
+            with os.fdopen(fd, "wb") as output:
+                os.fchmod(output.fileno(), 0o600)
+                require_no_extended_acl(output.fileno())
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            try:
+                os.link(pending, "preparation-report.json", src_dir_fd=directory_fd,
+                        dst_dir_fd=directory_fd, follow_symlinks=False)
+            except FileExistsError as exc:
+                raise ValueError("preparation report files already exist") from exc
+        finally:
+            os.unlink(pending, dir_fd=directory_fd)
 
 
 def main() -> None:
@@ -32,9 +56,7 @@ def main() -> None:
     report["detail_mode"] = "synthetic_fixtures" if args.fixtures else "none"
     report["discovery_sha256"] = sha256(raw).hexdigest()
     payload = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2)
-    with ExitStack() as stack:
-        (output,) = private_outputs(args.output_directory, stack, names=("preparation-report.json",))
-        output.write(payload + "\n")
+    publish_report(args.output_directory, (payload + "\n").encode("utf-8"))
     print(json.dumps(report["readiness_counts"], sort_keys=True))
 
 
