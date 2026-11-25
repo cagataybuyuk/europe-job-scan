@@ -21,9 +21,11 @@ released automatically. This module performs no browser or network I/O.
 """
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import date, datetime, timedelta
 import hashlib
 import re
+import sqlite3
 from zoneinfo import ZoneInfo
 
 from ejs.contracts.submit import _key_part, submit_identity
@@ -70,6 +72,35 @@ def _require(condition: object) -> None:
 
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def requisition_hashes(requisition_id: str) -> set[str]:
+    raw = requisition_id.strip()
+    bare = re.sub(r"[^A-Za-z0-9]", "", raw)
+    return {_hash(item) for item in (raw, raw.upper(), raw.lower(), raw.casefold(),
+                                     bare, bare.upper(), bare.lower())}
+
+
+def read_consumed_requisitions(ledger: SqliteSubmissionLedger) -> set[str]:
+    """Read a consistent canonical snapshot without reserving or migrating."""
+    ledger._check_file()
+    with closing(sqlite3.connect(ledger.path.as_uri() + "?mode=ro", uri=True)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA trusted_schema=OFF")
+        connection.execute("BEGIN")
+        ledger._check_schema(connection)
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        hashes = set()
+        for table in ("first_application", "reviewed_scope_attempts", "policy_submissions"):
+            if table in tables:
+                where = " WHERE status != ?" if table == "policy_submissions" else ""
+                parameters = (RELEASED,) if table == "policy_submissions" else ()
+                hashes.update(row[0] for row in connection.execute(
+                    f"SELECT requisition_id_sha256 FROM {table}{where}", parameters))
+        if "reviewed_scope_grants" in tables:
+            hashes.update(row[0] for row in connection.execute(
+                "SELECT requisition_sha256 FROM reviewed_scope_grants"))
+        return hashes
 
 
 def _local_day(moment: datetime) -> str:
@@ -167,10 +198,7 @@ class PolicySubmissionLedger:
         compared under its common spellings and alone (fail closed: a rare
         cross-employer requisition collision blocks rather than duplicates).
         """
-        raw = requisition_id.strip()
-        bare = re.sub(r"[^A-Za-z0-9]", "", raw)
-        spellings = {raw, raw.upper(), raw.lower(), raw.casefold(), bare, bare.upper(), bare.lower()}
-        req_hashes = [_hash(item) for item in spellings]
+        req_hashes = requisition_hashes(requisition_id)
         marks = ",".join("?" for _ in req_hashes)
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for table in ("first_application", "reviewed_scope_attempts"):

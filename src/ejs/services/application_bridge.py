@@ -160,19 +160,12 @@ def prepare_application_report(report: dict, *, transport: DetailTransport | Non
             reason = "detail_budget_exhausted" if transport is not None else "detail_not_observed"
         else:
             attempts += 1
-            detail_url = f"https://api.smartrecruiters.com/v1/companies/{tenant}/postings/{posting}"
-            candidate["detail_source_url"] = detail_url
             try:
-                raw = transport(detail_url)
+                observe_posting_detail(candidate, transport)
             except (LookupError, OSError):
                 reason = "detail_unavailable"
             else:
-                try:
-                    candidate.update(_detail(raw, tenant, posting))
-                except (ValueError, RecursionError):
-                    reason = "detail_invalid_or_unbound"
-                else:
-                    status, reason = _classify_detail(candidate)
+                continue
         candidate.update(readiness=status, reason=reason)
 
     output = [candidate for _, candidate in candidates]
@@ -181,6 +174,21 @@ def prepare_application_report(report: dict, *, transport: DetailTransport | Non
                 duplicate_rows=len(rows) - len(output), detail_attempts=attempts,
                 readiness_counts=dict(Counter(c["readiness"] for c in output)),
                 manifest_requirements=list(_MANIFEST_REQUIREMENTS), candidates=output)
+
+
+def observe_posting_detail(candidate: dict, transport: DetailTransport) -> None:
+    """Enrich a bridge candidate with identity-checked posting evidence."""
+    tenant, posting = candidate["tenant"], candidate["posting_id"]
+    detail_url = f"https://api.smartrecruiters.com/v1/companies/{tenant}/postings/{posting}"
+    candidate["detail_source_url"] = detail_url
+    raw = transport(detail_url)
+    try:
+        candidate.update(_detail(raw, tenant, posting))
+    except (ValueError, RecursionError):
+        status, reason = "missing_evidence", "detail_invalid_or_unbound"
+    else:
+        status, reason = _classify_detail(candidate)
+    candidate.update(readiness=status, reason=reason)
 
 
 def _compatible_url(url: str, family: str, region: str, tenant: str, posting: str) -> bool:

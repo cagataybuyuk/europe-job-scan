@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 import shutil
+import sys
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -43,6 +45,22 @@ class BrowserRuntimeConfig:
             or shutil.which("google-chrome-stable")
             or ""
         )
+
+
+def installed_chrome(config: BrowserRuntimeConfig, chromium) -> str:
+    """Resolve existing executables without invoking an installer."""
+    if config.executable_path:
+        return config.executable_path if Path(config.executable_path).is_file() and os.access(config.executable_path, os.X_OK) else ""
+    managed = chromium.executable_path
+    if config.use_playwright_managed and Path(managed).is_file() and os.access(managed, os.X_OK):
+        return managed
+    candidates = [config.resolved_executable_path()]
+    if sys.platform == "darwin":
+        bundles = ("Google Chrome.app/Contents/MacOS/Google Chrome", "Chromium.app/Contents/MacOS/Chromium")
+        candidates.extend(str(root / bundle) for root in (Path("/Applications"), Path.home() / "Applications")
+                          for bundle in bundles)
+    candidates.append(managed)
+    return next((path for path in candidates if Path(path).is_file() and os.access(path, os.X_OK)), "")
 
 
 _CONTROL_EXTRACTOR = r"""

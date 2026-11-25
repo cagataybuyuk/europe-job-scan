@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from ejs.services.smartrecruiters_live_inspector import (
+    InspectionNetworkFence,
     LiveInspectionRequest,
     combine_shadow_reports,
     discovery_state,
@@ -244,6 +245,19 @@ class BoundedApplyEntryBrowserTests(unittest.TestCase):
     POSTING = "https://jobs.smartrecruiters.com/Acme/123-job"
     APPLY = "https://jobs.smartrecruiters.com/oneclick-ui/Acme/123"
 
+    def follow_fixture_entry(self, page, context):
+        fence = InspectionNetworkFence(self.POSTING, fetch_timeout_ms=5000)
+
+        def fixture_route(route):
+            request = route.request
+            if request.method not in {"GET", "HEAD"} or request.url not in {self.POSTING, self.APPLY}:
+                fence.route(route)
+            else:
+                route.fallback()
+
+        context.route("**/*", fixture_route)
+        return follow_one_read_only_apply_entry(page, self.POSTING, timeout_ms=5000, session_fence=fence)
+
     def test_verified_oneclick_get_navigation_reveals_form_without_mutating(self):
         from playwright.sync_api import sync_playwright
         from ejs.services.smartrecruiters_shadow import inspect_shadow_form
@@ -261,9 +275,7 @@ class BoundedApplyEntryBrowserTests(unittest.TestCase):
                 ))
                 page = context.new_page()
                 page.goto(self.POSTING)
-                result = follow_one_read_only_apply_entry(
-                    page, context, self.POSTING, timeout_ms=5000
-                )
+                result = self.follow_fixture_entry(page, context)
                 self.assertEqual(result["status"], "FOLLOWED")
                 self.assertTrue(result["url_changed"])
                 self.assertEqual(result["attempt_count"], 1)
@@ -295,9 +307,7 @@ class BoundedApplyEntryBrowserTests(unittest.TestCase):
                 ))
                 page = context.new_page()
                 page.goto(self.POSTING)
-                result = follow_one_read_only_apply_entry(
-                    page, context, self.POSTING, timeout_ms=5000
-                )
+                result = self.follow_fixture_entry(page, context)
                 self.assertEqual(result["status"], "FOLLOWED")
                 self.assertFalse(result["url_changed"])
                 self.assertEqual(page.locator('input').count(), 1)
@@ -317,9 +327,7 @@ class BoundedApplyEntryBrowserTests(unittest.TestCase):
                                  "<script>window.submitted=0;"
                                  "document.querySelector('form').onsubmit=e=>{"
                                  "e.preventDefault();window.submitted++}</script>")
-                result = follow_one_read_only_apply_entry(
-                    page, context, self.POSTING, timeout_ms=5000
-                )
+                result = self.follow_fixture_entry(page, context)
                 self.assertEqual(result["status"], "NO_APPROVED_CTA")
                 self.assertEqual(result["attempt_count"], 0)
                 self.assertEqual(page.evaluate("window.submitted"), 0)
@@ -341,9 +349,7 @@ class BoundedApplyEntryBrowserTests(unittest.TestCase):
                 ))
                 page = context.new_page()
                 page.goto(self.POSTING)
-                result = follow_one_read_only_apply_entry(
-                    page, context, self.POSTING, timeout_ms=5000
-                )
+                result = self.follow_fixture_entry(page, context)
                 self.assertEqual(result["status"], "NETWORK_FENCE_BLOCKED")
                 self.assertIn("NON_GET_REQUEST", result["blocked_request_types"])
                 self.assertEqual(result["attempt_count"], 1)
@@ -364,9 +370,7 @@ class BoundedApplyEntryBrowserTests(unittest.TestCase):
                 ))
                 page = context.new_page()
                 page.goto(self.POSTING)
-                result = follow_one_read_only_apply_entry(
-                    page, context, self.POSTING, timeout_ms=5000
-                )
+                result = self.follow_fixture_entry(page, context)
                 self.assertEqual(result["status"], "NETWORK_FENCE_BLOCKED")
                 self.assertIn("UNTRUSTED_NAVIGATION", result["blocked_request_types"])
                 # Chromium may display an internal error page after an aborted

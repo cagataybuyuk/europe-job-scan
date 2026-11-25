@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 from urllib.parse import urlparse
 
-from ejs.services.browser_worker import BrowserRuntimeConfig
+from ejs.services.browser_worker import BrowserRuntimeConfig, installed_chrome
 from ejs.services.smartrecruiters_shadow import inspect_shadow_form, summarize_shadow_form
 
 
@@ -20,6 +20,12 @@ from ejs.services.smartrecruiters_shadow import inspect_shadow_form, summarize_s
 # A narrowly scoped exception to passive inspection: one reviewed entry into
 # SmartRecruiters' application UI, never a form write/upload/submit.
 # Only the explicitly opt-in CLI/workflow mode uses this capability.
+_BLOCKING_DENIALS = {"NON_GET_REQUEST", "UNTRUSTED_NAVIGATION", "REDIRECT_UNREVIEWED",
+                     "INVALID_REQUEST_URL", "WEBSOCKET_UNSUPPORTED", "READ_BUDGET_EXHAUSTED",
+                     "HTTP_ACCESS_OR_RATE_BOUNDARY", "HTTP_RESPONSE_BOUNDARY", "READ_TIMEOUT",
+                     "READ_TRANSPORT_FAILED"}
+_CHALLENGE_MARKERS = ("verify you are human", "checking your browser",
+                      "complete the captcha", "captcha challenge")
 _APPLY_LABELS = frozenset({"i'm interested", "apply", "apply now", "apply for this job"})
 _APPLY_CTA_SCAN = r"""
 () => {
@@ -158,12 +164,86 @@ def summarize_blocked_request(method: str, resource_type: str, url: str, is_navi
     }
 
 
-def follow_one_read_only_apply_entry(page, context, posting_url: str, *, timeout_ms: int) -> dict:
-    """One CTA navigation only; deny non-GET traffic and untrusted navigations.
+class InspectionNetworkFence:
+    """Deny unsupported requests for the lifetime of the inspection context."""
 
-    A button may open a same-URL modal; navigation itself is not a permission
-    to enter facts, upload files, authenticate or submit a form.
-    """
+    def __init__(self, posting_url: str, *, fetch_timeout_ms: int):
+        self.origin = _origin(posting_url)
+        self.fetch_timeout_ms = fetch_timeout_ms
+        self.denials: set[str] = set()
+        self.samples: list[dict] = []
+        self.challenge_destination_denied = False
+        self.http_status = None
+        self.retry_after = None
+        self.reads = 0
+
+    def route(self, route):
+        request = route.request
+        method, resource, url = request.method, request.resource_type, request.url
+        navigation = request.is_navigation_request()
+        try:
+            origin = _origin(url)
+            parsed = urlparse(url)
+            same_surface = (origin == self.origin and not parsed.username and not parsed.password)
+        except ValueError:
+            self._deny(route, "INVALID_REQUEST_URL")
+            return
+        if method.upper() not in {"GET", "HEAD"}:
+            self._deny(route, "NON_GET_REQUEST")
+        elif not same_surface:
+            self.challenge_destination_denied |= navigation and is_known_captcha_origin(origin)
+            self._deny(route, "UNTRUSTED_NAVIGATION" if navigation else "UNSUPPORTED_EXTERNAL_RESOURCE")
+        elif self.http_status in {401, 403, 429}:
+            self._deny(route, "HTTP_ACCESS_OR_RATE_BOUNDARY")
+        elif self.reads >= 100:
+            self._deny(route, "READ_BUDGET_EXHAUSTED")
+        else:
+            self.reads += 1
+            # Playwright only guarantees routing the initial URL of a redirect.
+            # Fetch a single hop and stop on redirects instead of fulfilling one.
+            try:
+                response = route.fetch(max_redirects=0, max_retries=0, timeout=self.fetch_timeout_ms)
+            except Exception as exc:
+                self._deny(route, "READ_TIMEOUT" if type(exc).__name__ == "TimeoutError" else "READ_TRANSPORT_FAILED")
+                return
+            try:
+                status = response.status
+                if status in {401, 403, 429} or (navigation and status >= 400):
+                    if self.http_status not in {401, 403, 429} or status == 429:
+                        self.http_status = status
+                        self.retry_after = response.headers.get("retry-after")
+                if 300 <= status < 400:
+                    self._deny(route, "REDIRECT_UNREVIEWED")
+                elif status in {401, 403, 429} or (navigation and status >= 400):
+                    self._deny(route, "HTTP_RESPONSE_BOUNDARY")
+                else:
+                    route.fulfill(response=response)
+            finally:
+                response.dispose()
+
+    def _deny(self, route, code: str):
+        self.denials.add(code)
+        if len(self.samples) < 12 and code != "INVALID_REQUEST_URL":
+            req = route.request
+            sample = summarize_blocked_request(req.method, req.resource_type, req.url, req.is_navigation_request())
+            sample["deny_reason"] = code
+            self.samples.append(sample)
+        route.abort("blockedbyclient")
+
+    def deny_socket(self, socket):
+        socket.close()
+        self.denials.add("WEBSOCKET_UNSUPPORTED")
+
+    def report(self) -> dict:
+        return {"blocked_request_types": sorted(self.denials),
+                "blocked_request_samples": list(self.samples),
+                "blocked_sample_limit": 12,
+                "challenge_destination_denied": self.challenge_destination_denied}
+
+
+def follow_one_read_only_apply_entry(page, posting_url: str, *, timeout_ms: int,
+                                     session_fence: InspectionNetworkFence) -> dict:
+    """One CTA navigation with no field writes or submission."""
     try:
         entry = select_apply_entry(page.evaluate(_APPLY_CTA_SCAN), posting_url)
     except Exception as exc:
@@ -171,25 +251,6 @@ def follow_one_read_only_apply_entry(page, context, posting_url: str, *, timeout
     if entry["status"] != "APPROVED_CTA":
         return {**entry, "attempt_count": 0}
 
-    blocked = []
-    blocked_details = []
-    def fence(route):
-        request = route.request
-        if request.method.upper() not in ("GET", "HEAD"):
-            blocked.append("NON_GET_REQUEST")
-            if len(blocked_details) < 12:
-                blocked_details.append(summarize_blocked_request(request.method, request.resource_type, request.url, request.is_navigation_request()))
-            route.abort()
-            return
-        if request.is_navigation_request() and not _is_trusted_navigation_url(request.url):
-            blocked.append("UNTRUSTED_NAVIGATION")
-            if len(blocked_details) < 12:
-                blocked_details.append(summarize_blocked_request(request.method, request.resource_type, request.url, True))
-            route.abort()
-            return
-        route.fallback()
-
-    context.route("**/*", fence)
     try:
         if entry["kind"] == "link":
             page.goto(entry["href"], wait_until="domcontentloaded", timeout=timeout_ms)
@@ -200,11 +261,8 @@ def follow_one_read_only_apply_entry(page, context, posting_url: str, *, timeout
             # Only an exact, unique, visible non-submit application-entry button.
             locator.click(timeout=min(timeout_ms, 5000), no_wait_after=True)
         page.wait_for_timeout(1200)
-        if blocked:
-            return {"status": "NETWORK_FENCE_BLOCKED", "attempt_count": 1,
-                    "blocked_request_types": sorted(set(blocked)),
-                    "blocked_request_samples": blocked_details,
-                    "blocked_sample_limit": 12}
+        if _BLOCKING_DENIALS & session_fence.denials:
+            return {"status": "NETWORK_FENCE_BLOCKED", "attempt_count": 1, **session_fence.report()}
         if not _is_trusted_navigation_url(page.url):
             return {"status": "UNTRUSTED_FINAL_URL", "attempt_count": 1}
         return {"status": "FOLLOWED", "kind": entry["kind"],
@@ -213,8 +271,6 @@ def follow_one_read_only_apply_entry(page, context, posting_url: str, *, timeout
                 "url_changed": page.url != posting_url, "attempt_count": 1}
     except Exception as exc:
         return {"status": "ENTRY_NAVIGATION_FAILED", "attempt_count": 1, "error_type": type(exc).__name__}
-    finally:
-        context.unroute("**/*", fence)
 
 
 PAGE_STRUCTURE_DIAGNOSTICS = r"""
@@ -282,7 +338,7 @@ def validate_live_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.netloc:
         raise ValueError("LIVE_INSPECTION_REQUIRES_HTTPS")
-    if parsed.username or parsed.password:
+    if parsed.username or parsed.password or parsed.port not in (None, 443):
         raise ValueError("LIVE_INSPECTION_REJECTS_EMBEDDED_CREDENTIALS")
     if parsed.hostname != "jobs.smartrecruiters.com" and not (parsed.hostname or "").endswith(".smartrecruiters.com"):
         raise ValueError("LIVE_INSPECTION_REQUIRES_SMARTRECRUITERS")
@@ -455,24 +511,40 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
         raise ValueError("INVALID_RENDER_WAIT_TIMEOUT")
     try:
         from playwright.sync_api import sync_playwright
-    except Exception as exc:
-        return {"runtime_state": "unsupported", "error_code": "PLAYWRIGHT_UNAVAILABLE", "error_message": str(exc), "inspection_only": True}
+    except ImportError:
+        return {"runtime_state": "unsupported", "error_code": "PLAYWRIGHT_UNAVAILABLE", "inspection_only": True}
     cfg = config or BrowserRuntimeConfig(navigation_timeout_ms=request.timeout_ms, settle_timeout_ms=2_000)
-    executable = cfg.resolved_executable_path()
-    if not executable and not cfg.use_playwright_managed:
-        return {"runtime_state": "unsupported", "error_code": "CHROMIUM_NOT_FOUND", "inspection_only": True}
     with sync_playwright() as p:
-        launch = {"headless": cfg.headless, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
-        if executable:
-            launch["executable_path"] = executable
-        browser = p.chromium.launch(**launch)
+        executable = installed_chrome(cfg, p.chromium)
+        if not executable:
+            return {"runtime_state": "unsupported", "error_code": "CHROMIUM_NOT_FOUND", "inspection_only": True}
+        try:
+            browser = p.chromium.launch(headless=cfg.headless, executable_path=executable,
+                                        args=["--disable-dev-shm-usage"])
+        except Exception:
+            return {"runtime_state": "unsupported", "error_code": "BROWSER_LAUNCH_FAILED",
+                    "inspection_only": True}
         context = None
         try:
-            context = browser.new_context(ignore_https_errors=cfg.ignore_https_errors, accept_downloads=False)
+            context = browser.new_context(accept_downloads=False, service_workers="block")
+            if not callable(getattr(context, "route_web_socket", None)):
+                return {"runtime_state": "unsupported", "error_code": "WEBSOCKET_FENCE_UNAVAILABLE",
+                        "inspection_only": True}
+            fence = InspectionNetworkFence(request.application_url, fetch_timeout_ms=request.timeout_ms)
+            context.route("**/*", fence.route)
+            context.route_web_socket("**/*", fence.deny_socket)
             page = context.new_page()
             page.set_default_timeout(request.timeout_ms)
             page.set_default_navigation_timeout(request.timeout_ms)
-            page.goto(request.application_url, wait_until="domcontentloaded", timeout=request.timeout_ms)
+            try:
+                page.goto(request.application_url, wait_until="domcontentloaded", timeout=request.timeout_ms)
+            except Exception:
+                code = ("KNOWN_CHALLENGE_DESTINATION_DENIED" if fence.challenge_destination_denied
+                        else "NETWORK_FENCE_BLOCKED" if "REDIRECT_UNREVIEWED" in fence.denials
+                        else "POSTING_NAVIGATION_FAILED")
+                return {"runtime_state": "navigation_failed", "error_code": code,
+                        "network_fence": fence.report(), "http_status": fence.http_status,
+                        "retry_after": fence.retry_after, "inspection_only": True}
 
             try:
                 page.wait_for_load_state("networkidle", timeout=min(5_000, request.render_wait_ms))
@@ -488,13 +560,14 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
                 pre_form = inspect_shadow_form(page)
                 pre_state, _ = discovery_state(pre_form)
                 pre_body = (page.locator("body").inner_text(timeout=request.timeout_ms) or "").casefold()
-                challenged = any(x in pre_body for x in ("captcha", "verify you are human", "checking your browser"))
+                challenged = any(x in pre_body for x in _CHALLENGE_MARKERS)
                 expired = any(x in pre_body for x in ("sorry, this job has expired", "this job has expired"))
-                if pre_state == "form_structure_not_discovered" and not challenged and not expired:
+                if (pre_state == "form_structure_not_discovered" and not challenged and not expired
+                        and not (_BLOCKING_DENIALS & fence.denials) and fence.http_status is None):
                     apply_navigation = follow_one_read_only_apply_entry(
-                        page, context, request.application_url, timeout_ms=request.timeout_ms
+                        page, request.application_url, timeout_ms=request.timeout_ms, session_fence=fence
                     )
-                    if apply_navigation["status"] == "FOLLOWED":
+                    if apply_navigation["status"] == "FOLLOWED" and fence.http_status is None:
                         main_diag, render_wait = _wait_for_render_structure(page, budget_ms=request.render_wait_ms)
                 else:
                     apply_navigation = {"status": "ALREADY_FORM_OR_BOUNDARY", "attempt_count": 0}
@@ -538,7 +611,7 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
 
             form = combine_shadow_reports(reports)
             body = (page.locator("body").inner_text(timeout=request.timeout_ms) or "").lower()
-            body_captcha = any(x in body for x in ("captcha", "verify you are human", "checking your browser"))
+            body_captcha = any(x in body for x in _CHALLENGE_MARKERS)
             captcha = body_captcha or bool(challenge_frame_origins)
             state, error_code = discovery_state(form)
             if captcha:
@@ -546,12 +619,18 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
             elif same_origin_frame_observation_failed:
                 # A partial same-origin frame read cannot certify complete form discovery.
                 state, error_code = "form_structure_not_discovered", "FRAME_OBSERVATION_INCOMPLETE"
+            elif fence.challenge_destination_denied:
+                state, error_code = "challenge_destination_denied", "KNOWN_CHALLENGE_DESTINATION_DENIED"
+            elif _BLOCKING_DENIALS & fence.denials or fence.http_status is not None:
+                state, error_code = "network_boundary", "NETWORK_FENCE_BLOCKED"
+            elif apply_navigation["status"] == "ENTRY_NAVIGATION_FAILED":
+                state, error_code = "navigation_failed", "ENTRY_NAVIGATION_FAILED"
             # A blocked/failed navigation must not promote partially rendered
             # controls to a manifest-review candidate.
             if not captcha and apply_navigation["status"] in {
                 "NETWORK_FENCE_BLOCKED", "UNTRUSTED_FINAL_URL", "ENTRY_NAVIGATION_FAILED",
                 "CTA_SCAN_FAILED", "CTA_LOCATOR_CHANGED",
-            }:
+            } and state == "inspected":
                 state, error_code = "form_structure_not_discovered", "FORM_STRUCTURE_NOT_DISCOVERED"
 
             captcha_evidence = []
@@ -581,6 +660,9 @@ def inspect_live_page(request: LiveInspectionRequest, *, config: BrowserRuntimeC
                 "resume_requires_new_read_only_inspection": state == "captcha_boundary",
             }
             return {
+                "network_fence": fence.report(),
+                "http_status": fence.http_status,
+                "retry_after": fence.retry_after,
                 "human_handoff": human_handoff,
                 "step_boundary": summarize_step_boundary(form),
                 "runtime_state": state,
