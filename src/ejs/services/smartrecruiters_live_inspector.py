@@ -9,8 +9,9 @@ from dataclasses import dataclass
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from ejs.services.browser_worker import BrowserRuntimeConfig, installed_chrome
 from ejs.services.smartrecruiters_shadow import inspect_shadow_form, summarize_shadow_form
@@ -143,11 +144,272 @@ def classify_blocked_request_purpose(method: str, resource_type: str, url: str, 
     return "asset_or_other_unverified"
 
 
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_REDIRECT_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OTHER"})
+_REDIRECT_RESOURCE_TYPES = frozenset({
+    "document", "script", "stylesheet", "image", "font", "xhr", "fetch", "other",
+})
+_REDIRECT_TRUST_CLASSES = frozenset({
+    "trusted_https_host", "untrusted_or_external", "invalid_or_missing",
+})
+_REDIRECT_PATH_CATEGORIES = frozenset({
+    "posting_detail", "oneclick_application", "api", "auth_or_account", "asset",
+    "company_page", "root", "other_same_origin", "external", "invalid_or_missing",
+})
+_REDIRECT_SCHEME_TRANSITIONS = frozenset({
+    "https_to_https", "https_to_http", "http_to_https", "http_to_http",
+    "non_http", "unknown",
+})
+_REDIRECT_CLASSIFICATIONS = frozenset({
+    "normal_ats_navigation_candidate", "same_origin_navigation_unreviewed",
+    "cross_origin_redirect", "subresource_redirect", "malformed_redirect",
+    "non_redirect_3xx",
+})
+_REDIRECT_DENY_REASONS = frozenset({
+    "REDIRECT_LOCATION_MISSING", "REDIRECT_LOCATION_INVALID",
+    "REDIRECT_CREDENTIALS_REJECTED", "REDIRECT_SCHEME_UNSUPPORTED",
+    "REDIRECT_CROSS_ORIGIN", "REDIRECT_SUBRESOURCE_UNREVIEWED",
+    "REDIRECT_SAME_ORIGIN_UNREVIEWED", "REDIRECT_STATUS_UNSUPPORTED",
+    "REDIRECT_SAME_URL",
+})
+_EVIDENCE_HOSTS = frozenset({"jobs.smartrecruiters.com", "api.smartrecruiters.com", "careers.smartrecruiters.com"})
+_REDIRECT_DOCUMENT_CATEGORIES = frozenset({"posting_detail", "oneclick_application"})
+_REDIRECT_DIAGNOSTIC_FIELDS = (
+    "status", "method", "resource_type", "navigation", "source_host",
+    "location_present", "destination_valid", "destination_host",
+    "destination_trust_class", "same_origin", "destination_path_category",
+    "scheme_transition", "classification", "deny_reason", "policy_candidate",
+    "permission_granted", "access_restriction_evidence", "review_status",
+)
+_REDIRECT_DIAGNOSTIC_FIELD_SET = frozenset(_REDIRECT_DIAGNOSTIC_FIELDS)
+REDIRECT_DIAGNOSTIC_LIMIT = 12
+
+
+def _parse_url(url: str):
+    try:
+        return urlparse(url)
+    except (TypeError, ValueError):
+        return None
+
+
+def _evidence_host(url: str) -> tuple[str, str]:
+    """Return a host safe to persist plus its trust class; never a path or query."""
+    parsed = _parse_url(url)
+    if parsed is None:
+        return "", "invalid_or_missing"
+    try:
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return "", "invalid_or_missing"
+    if (parsed.scheme == "https" and host and not parsed.username and not parsed.password
+            and port in (None, 443)
+            and host in _EVIDENCE_HOSTS):
+        return host, "trusted_https_host"
+    if host:
+        return "external_redacted", "untrusted_or_external"
+    return "", "invalid_or_missing"
+
+
+def _redirect_path_category(path: str) -> str:
+    """Map a path to a fixed category without retaining the path itself."""
+    path = path or "/"
+    segments = [segment for segment in path.split("/") if segment]
+    if not segments:
+        return "root"
+    first = segments[0].casefold()
+    if first == "oneclick-ui":
+        return "oneclick_application"
+    if first in {"api", "v1"}:
+        return "api"
+    if first in {"login", "signin", "sign-in", "auth", "oauth", "account", "accounts"}:
+        return "auth_or_account"
+    extension = path.rsplit("/", 1)[-1].rsplit(".", 1)[-1].casefold()
+    if first in {"assets", "static", "fonts", "images", "css", "js"} or extension in {
+        "js", "css", "png", "jpg", "jpeg", "gif", "svg", "ico", "woff", "woff2", "ttf",
+    }:
+        return "asset"
+    if len(segments) >= 2 and re.fullmatch(r"\d{6,20}(?:-[A-Za-z0-9_-]+)?", segments[1]):
+        return "posting_detail"
+    if len(segments) == 1:
+        return "company_page"
+    return "other_same_origin"
+
+
+def _scheme_transition(source_scheme: str, destination_scheme: str) -> str:
+    if source_scheme not in {"http", "https"} or destination_scheme not in {"http", "https"}:
+        return "non_http"
+    return f"{source_scheme}_to_{destination_scheme}"
+
+
+def summarize_redirect(*, status: int, method: str, resource_type: str, source_url: str,
+                       location: str | None, is_navigation: bool) -> dict:
+    """Bounded, sanitized evidence for one intercepted 3xx response.
+
+    The raw Location header, path, query, fragment and credentials are never
+    retained. ``policy_candidate`` only marks a same-origin document redirect
+    that could be reviewed for a future narrow policy; it never grants
+    permission and never changes the network boundary.
+    """
+    if type(status) is not int or not 300 <= status <= 399:
+        raise ValueError("REDIRECT_STATUS_INVALID")
+    if location is not None and not isinstance(location, str):
+        raise ValueError("REDIRECT_LOCATION_TYPE")
+    method_value = (method.upper() if isinstance(method, str) else "OTHER")
+    if method_value not in _REDIRECT_METHODS:
+        method_value = "OTHER"
+    resource_value = resource_type if resource_type in _REDIRECT_RESOURCE_TYPES else "other"
+    source_parsed = _parse_url(source_url)
+    source_host, _ = _evidence_host(source_url)
+    location_present = isinstance(location, str) and bool(location.strip())
+    destination_valid = False
+    destination_host = ""
+    destination_trust = "invalid_or_missing"
+    same_origin = False
+    path_category = "invalid_or_missing"
+    transition = "unknown"
+    deny_reason = "REDIRECT_LOCATION_MISSING"
+    if location_present:
+        if any(ord(character) < 0x20 or ord(character) == 0x7f for character in location):
+            deny_reason = "REDIRECT_LOCATION_INVALID"
+        else:
+            try:
+                stripped = location.strip()
+                raw_destination = _parse_url(stripped)
+                if raw_destination is not None and raw_destination.scheme:
+                    # Never let urljoin repair a malformed absolute Location
+                    # (for example "https://" or "https:///host") into the
+                    # source URL.
+                    absolute = stripped
+                    destination = raw_destination
+                else:
+                    absolute = urljoin(source_url, stripped)
+                    destination = _parse_url(absolute)
+                if destination is not None:
+                    _ = destination.port
+                    if "\\" in stripped:
+                        destination = None
+            except (TypeError, ValueError):
+                destination = None
+            if destination is not None and destination.scheme and destination.scheme not in {"http", "https"}:
+                deny_reason = "REDIRECT_SCHEME_UNSUPPORTED"
+            elif destination is None or not destination.scheme or not destination.hostname:
+                deny_reason = "REDIRECT_LOCATION_INVALID"
+            elif destination.username or destination.password:
+                deny_reason = "REDIRECT_CREDENTIALS_REJECTED"
+            elif absolute.split("#", 1)[0] == source_url.split("#", 1)[0]:
+                deny_reason = "REDIRECT_SAME_URL"
+            else:
+                destination_valid = True
+                destination_host, destination_trust = _evidence_host(absolute)
+                source_origin = _origin(source_url) if source_parsed else ""
+                destination_origin = _origin(absolute)
+                same_origin = bool(source_origin) and source_origin == destination_origin
+                path_category = (_redirect_path_category(destination.path)
+                                 if destination_trust == "trusted_https_host" else "external")
+                transition = _scheme_transition(
+                    source_parsed.scheme if source_parsed else "", destination.scheme
+                )
+    policy_candidate = False
+    if status not in _REDIRECT_STATUSES:
+        classification = "non_redirect_3xx"
+        deny_reason = "REDIRECT_STATUS_UNSUPPORTED"
+    elif not destination_valid:
+        classification = "malformed_redirect"
+    elif not same_origin:
+        classification = "cross_origin_redirect"
+        deny_reason = "REDIRECT_CROSS_ORIGIN"
+    elif not is_navigation:
+        classification = "subresource_redirect"
+        deny_reason = "REDIRECT_SUBRESOURCE_UNREVIEWED"
+    elif (resource_value == "document" and method_value in {"GET", "HEAD"} and transition == "https_to_https"
+          and destination_trust == "trusted_https_host"
+          and path_category in _REDIRECT_DOCUMENT_CATEGORIES):
+        classification = "normal_ats_navigation_candidate"
+        deny_reason = "REDIRECT_SAME_ORIGIN_UNREVIEWED"
+        policy_candidate = True
+    else:
+        classification = "same_origin_navigation_unreviewed"
+        deny_reason = "REDIRECT_SAME_ORIGIN_UNREVIEWED"
+    return {
+        "status": status,
+        "method": method_value,
+        "resource_type": resource_value,
+        "navigation": bool(is_navigation),
+        "source_host": source_host,
+        "location_present": location_present,
+        "destination_valid": destination_valid,
+        "destination_host": destination_host,
+        "destination_trust_class": destination_trust,
+        "same_origin": same_origin,
+        "destination_path_category": path_category,
+        "scheme_transition": transition,
+        "classification": classification,
+        "deny_reason": deny_reason,
+        "policy_candidate": policy_candidate,
+        "permission_granted": False,
+        "access_restriction_evidence": False,
+        "review_status": "unreviewed",
+    }
+
+
+def sanitize_redirect_diagnostics(value) -> list[dict]:
+    """Strictly rebuild redirect evidence for persistence; reject unknown fields."""
+    if isinstance(value, tuple):
+        value = list(value)
+    if not isinstance(value, list) or len(value) > REDIRECT_DIAGNOSTIC_LIMIT:
+        raise ValueError("REDIRECT_DIAGNOSTICS_INVALID")
+    cleaned = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != _REDIRECT_DIAGNOSTIC_FIELD_SET:
+            raise ValueError("REDIRECT_DIAGNOSTIC_FIELDS")
+        if type(item["status"]) is not int or not 300 <= item["status"] <= 399:
+            raise ValueError("REDIRECT_DIAGNOSTIC_STATUS")
+        if item["method"] not in _REDIRECT_METHODS:
+            raise ValueError("REDIRECT_DIAGNOSTIC_METHOD")
+        if item["resource_type"] not in _REDIRECT_RESOURCE_TYPES:
+            raise ValueError("REDIRECT_DIAGNOSTIC_RESOURCE")
+        for key in ("navigation", "location_present", "destination_valid", "same_origin",
+                    "policy_candidate", "permission_granted", "access_restriction_evidence"):
+            if type(item[key]) is not bool:
+                raise ValueError("REDIRECT_DIAGNOSTIC_BOOLEAN")
+        for key in ("source_host", "destination_host"):
+            host = item[key]
+            if not isinstance(host, str) or not (
+                    host in {"", "external_redacted"} or host in _EVIDENCE_HOSTS):
+                raise ValueError("REDIRECT_DIAGNOSTIC_HOST")
+        if item["destination_trust_class"] not in _REDIRECT_TRUST_CLASSES:
+            raise ValueError("REDIRECT_DIAGNOSTIC_TRUST")
+        if item["destination_path_category"] not in _REDIRECT_PATH_CATEGORIES:
+            raise ValueError("REDIRECT_DIAGNOSTIC_PATH")
+        if item["scheme_transition"] not in _REDIRECT_SCHEME_TRANSITIONS:
+            raise ValueError("REDIRECT_DIAGNOSTIC_SCHEME")
+        if item["classification"] not in _REDIRECT_CLASSIFICATIONS:
+            raise ValueError("REDIRECT_DIAGNOSTIC_CLASSIFICATION")
+        if item["deny_reason"] not in _REDIRECT_DENY_REASONS:
+            raise ValueError("REDIRECT_DIAGNOSTIC_REASON")
+        if item["permission_granted"] is not False:
+            raise ValueError("REDIRECT_DIAGNOSTIC_PERMISSION")
+        if item["access_restriction_evidence"] is not False:
+            raise ValueError("REDIRECT_DIAGNOSTIC_ACCESS_EVIDENCE")
+        if item["review_status"] != "unreviewed":
+            raise ValueError("REDIRECT_DIAGNOSTIC_REVIEW")
+        if item["destination_valid"] and not item["location_present"]:
+            raise ValueError("REDIRECT_DIAGNOSTIC_CONSISTENCY")
+        if item["destination_valid"] and item["destination_trust_class"] == "invalid_or_missing":
+            raise ValueError("REDIRECT_DIAGNOSTIC_CONSISTENCY")
+        if item["same_origin"] and not item["destination_valid"]:
+            raise ValueError("REDIRECT_DIAGNOSTIC_CONSISTENCY")
+        if item["policy_candidate"] != (item["classification"] == "normal_ats_navigation_candidate"):
+            raise ValueError("REDIRECT_DIAGNOSTIC_CONSISTENCY")
+        cleaned.append({key: item[key] for key in _REDIRECT_DIAGNOSTIC_FIELDS})
+    return cleaned
+
+
 def summarize_blocked_request(method: str, resource_type: str, url: str, is_navigation: bool) -> dict:
     """Bounded, non-identifying network-fence evidence; never retain URLs or query strings."""
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    trusted_host = (host == "jobs.smartrecruiters.com" or host.endswith(".smartrecruiters.com")) and parsed.scheme == "https" and not parsed.username and not parsed.password and parsed.port in (None, 443)
+    host, trust_class = _evidence_host(url)
+    trusted_host = trust_class == "trusted_https_host"
     if not trusted_host:
         host = "external_redacted"
     return {
@@ -172,6 +434,8 @@ class InspectionNetworkFence:
         self.fetch_timeout_ms = fetch_timeout_ms
         self.denials: set[str] = set()
         self.samples: list[dict] = []
+        self.redirects: list[dict] = []
+        self.redirect_count = 0
         self.challenge_destination_denied = False
         self.http_status = None
         self.retry_after = None
@@ -213,6 +477,7 @@ class InspectionNetworkFence:
                         self.http_status = status
                         self.retry_after = response.headers.get("retry-after")
                 if 300 <= status < 400:
+                    self._record_redirect(response, request)
                     self._deny(route, "REDIRECT_UNREVIEWED")
                 elif status in {401, 403, 429} or (navigation and status >= 400):
                     self._deny(route, "HTTP_RESPONSE_BOUNDARY")
@@ -220,6 +485,32 @@ class InspectionNetworkFence:
                     route.fulfill(response=response)
             finally:
                 response.dispose()
+
+    def _record_redirect(self, response, request) -> None:
+        """Retain bounded, sanitized evidence for a denied 3xx response."""
+        self.redirect_count += 1
+        if len(self.redirects) >= REDIRECT_DIAGNOSTIC_LIMIT:
+            return
+        headers = getattr(response, "headers", None) or {}
+        try:
+            location = headers.get("location")
+            if location is None:
+                location = headers.get("Location")
+        except Exception:
+            location = None
+        try:
+            diagnostic = summarize_redirect(
+                status=response.status,
+                method=request.method,
+                resource_type=request.resource_type,
+                source_url=request.url,
+                location=location,
+                is_navigation=request.is_navigation_request(),
+            )
+        except Exception:
+            # Diagnostics must never weaken or crash the fail-closed fence.
+            return
+        self.redirects.append(diagnostic)
 
     def _deny(self, route, code: str):
         self.denials.add(code)
@@ -238,6 +529,9 @@ class InspectionNetworkFence:
         return {"blocked_request_types": sorted(self.denials),
                 "blocked_request_samples": list(self.samples),
                 "blocked_sample_limit": 12,
+                "redirect_diagnostics": list(self.redirects),
+                "redirect_diagnostic_limit": REDIRECT_DIAGNOSTIC_LIMIT,
+                "redirect_count": self.redirect_count,
                 "challenge_destination_denied": self.challenge_destination_denied}
 
 

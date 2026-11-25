@@ -11,7 +11,7 @@ from ejs.services.application_bridge import (
     MAX_DETAIL_REQUESTS, observe_posting_detail, prepare_application_report,
 )
 from ejs.services.execution_manifest import CONTROLS, MAX_OBSERVATION_AGE, POLICY_VERSION
-from ejs.services.smartrecruiters_live_inspector import LiveInspectionRequest
+from ejs.services.smartrecruiters_live_inspector import LiveInspectionRequest, sanitize_redirect_diagnostics
 from ejs.services.smartrecruiters_live_route import route_live_inspection
 
 SCHEMA = "EJS-APPLICATION-BATCH-1"
@@ -62,6 +62,8 @@ def _validate_state(state: dict) -> None:
             _observation_expiry(entry)
             if not isinstance(entry.get("requisition_id"), str) or not entry["requisition_id"]:
                 raise ValueError("batch_requisition_state")
+        if "redirect_diagnostics" in entry:
+            sanitize_redirect_diagnostics(entry["redirect_diagnostics"])
     for key, value in state["cooldowns"].items():
         stamp = datetime.fromisoformat(value)
         if key not in {"detail", "inspect"} or stamp.tzinfo is None or stamp.utcoffset() != timedelta(0):
@@ -107,7 +109,7 @@ def _pending(until: str | None, now: datetime) -> bool:
 
 def _event(candidate: dict, now: datetime, attempt: int, stage: str, code: str, *,
            technical_reason: str | None = None, denial_types=(), challenge_destination_denied=False,
-           retry_at: datetime | None = None, outcome="failure") -> dict:
+           retry_at: datetime | None = None, outcome="failure", redirect_diagnostics=()) -> dict:
     return {
         "ats": candidate["ats_kind"], "employer": candidate["company"], "tenant": candidate["tenant"],
         "posting_id": candidate["posting_id"], "requisition_id": candidate["requisition_id"],
@@ -115,6 +117,7 @@ def _event(candidate: dict, now: datetime, attempt: int, stage: str, code: str, 
         "timestamp": now.isoformat(), "attempt_count": attempt, "outcome": outcome,
         "retry_eligible": retry_at is not None, "next_eligible_run": retry_at.isoformat() if retry_at else None,
         "network_denial_types": sorted(_DENIALS.intersection(denial_types)),
+        "redirect_diagnostics": sanitize_redirect_diagnostics(redirect_diagnostics),
         "known_challenge_destination_denied": challenge_destination_denied,
     }
 
@@ -231,6 +234,7 @@ def run_application_batch(discovery: dict, state: dict, *, budget: int, detail, 
         status = None
         retry_after = None
         fence = {}
+        redirect_diagnostics = []
         duplicate_until = None
         try:
             observe_posting_detail(target, detail)
@@ -293,12 +297,15 @@ def run_application_batch(discovery: dict, state: dict, *, budget: int, detail, 
                                 or any(not isinstance(item, str) for item in candidate_fence.get("blocked_request_types", []))):
                             raise ValueError("inspection_fence")
                         fence = candidate_fence
+                        redirect_diagnostics = sanitize_redirect_diagnostics(
+                            fence.get("redirect_diagnostics", []))
                         code = inspection.get("error_code")
                         if _positive_observation(target, inspection, fence):
                             now = clock()
                             result = _event(target, now, attempt, stage, "", outcome="form_observed",
                                             technical_reason="visible_form_structure_observed",
-                                            denial_types=fence.get("blocked_request_types", ()))
+                                            denial_types=fence.get("blocked_request_types", ()),
+                                            redirect_diagnostics=redirect_diagnostics)
                             result["manifest_inputs"] = _manifest_inputs(target, inspection, now)
                         elif inspection.get("captcha_observed") is True:
                             code = "CAPTCHA_BOUNDARY"
@@ -354,6 +361,7 @@ def run_application_batch(discovery: dict, state: dict, *, budget: int, detail, 
         result = _event(target, now, attempt, stage, code,
                         technical_reason=f"HTTP_{status}" if type(status) is int else None,
                         denial_types=denials, retry_at=retry_at,
+                        redirect_diagnostics=redirect_diagnostics,
                         challenge_destination_denied=fence.get("challenge_destination_denied") is True)
         results[key] = result
         checkpoint(state)
