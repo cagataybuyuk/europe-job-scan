@@ -796,3 +796,17 @@ def test_missing_later_fixture_is_partial_instead_of_reusing_first_page(tmp_path
     log = json.loads((out / "request_log.json").read_text())
     assert log[-1]["status"] == "missing_fixture"
     assert "offset=2" in log[-1]["url"]
+
+
+@pytest.mark.parametrize(("board", "payload"), [
+    (PILOT[3][2], {**smart_page(0, 4, [101, 102, 102, 103]), "limit": 4}),
+    (PILOT[1][2], [{"id": str(i), "text": "Analyst"} for i in (101, 102, 102, 103)]),
+    (PILOT[0][2], {"jobs": [{"id": i, "title": "Analyst"} for i in (101, 102, 102, 103)],
+                   "meta": {"total": 4}}),
+])
+def test_duplicate_ids_within_one_page_are_partial(board, payload):
+    report = run_one(board, lambda _: payload)
+    employer = report["employers"][0]
+    assert (employer["status"], employer["error_kind"]) == ("partial", "duplicate_id_in_page")
+    assert [item["posting_id"] for item in report["vacancies"]] == ["101", "102", "103"]
+    assert report["listings_duplicate"] == 1

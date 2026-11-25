@@ -349,10 +349,14 @@ def discover_pages(row: WatchlistRow, fetch: Fetch | None) -> EmployerDiscovery:
                 break
 
             page = _parse_page(data, row, cls, identified=True)
-            posting_ids = {item["posting_id"] for item in page if item["posting_id"]}
+            page_posting_ids = [item["posting_id"] for item in page if item["posting_id"]]
+            posting_ids = set(page_posting_ids)
             for item in page:
                 item["discovered_via"] = url
             listings.extend(page)
+            if len(posting_ids) != len(page_posting_ids):
+                error = "duplicate_id_in_page"
+                break
             if seen_posting_ids.intersection(posting_ids):
                 error = "overlapping_page"
                 break
