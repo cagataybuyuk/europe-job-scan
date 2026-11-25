@@ -131,6 +131,7 @@ jobs:
           tests/test_execution_manifest.py
           tests/test_application_bridge.py
           tests/test_application_batch.py
+          tests/test_w3_2_1_redirect_diagnostics.py
           tests/test_policy_submission_ledger.py
           tests/test_policy_application_runtime.py
           tests/test_engine_queue.py
