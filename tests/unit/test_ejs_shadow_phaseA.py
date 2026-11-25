@@ -3,6 +3,7 @@ import ast
 import importlib.util
 import json
 import socket
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -889,3 +890,88 @@ def test_live_output_is_reserved_privately_before_first_request(tmp_path, monkey
     monkeypatch.setattr(cli.time, "monotonic", clock.now)
     monkeypatch.setattr(cli.time, "sleep", clock.sleep)
     assert cli.main([*args, "--live"]) == 0
+
+
+@pytest.mark.parametrize("bad_id", ["\ud800", "../private", 123, " 102 ", None])
+def test_smartrecruiters_invalid_id_keeps_other_postings(bad_id):
+    page = smart_page(0, 2, [101, 102])
+    page["content"][1]["id"] = bad_id
+    report = run_one(PILOT[3][2], lambda _: page)
+    employer = report["employers"][0]
+    assert (employer["status"], employer["error_kind"]) == ("partial", "invalid_smartrecruiters_posting_id")
+    assert [record["posting_id"] for record in report["vacancies"]] == ["101"]
+
+
+def test_unverifiable_acl_stops_before_transport(tmp_path, monkeypatch):
+    _, _, args = pilot_cli_args(tmp_path)
+    cli = load_script()
+
+    def cannot_verify(fd):
+        raise OSError("ACL unavailable")
+
+    monkeypatch.setattr(cli, "require_no_extended_acl", cannot_verify)
+    monkeypatch.setattr(cli, "urllib_transport", lambda *args: pytest.fail("unexpected transport"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main([*args, "--live"])
+    assert exc.value.code == 2
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires Darwin extended ACLs")
+def test_inherited_macos_acl_stops_before_transport(tmp_path, monkeypatch):
+    import subprocess
+
+    _, out, args = pilot_cli_args(tmp_path)
+    cli = load_script()
+    subprocess.run(["/bin/chmod", "+a", "everyone allow list,search,file_inherit,directory_inherit",
+                    str(tmp_path)], check=True)
+    try:
+        out.mkdir(mode=0o700)
+    finally:
+        subprocess.run(["/bin/chmod", "-N", str(tmp_path)], check=True)
+    monkeypatch.setattr(cli, "urllib_transport", lambda *args: pytest.fail("unexpected transport"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main([*args, "--live"])
+    assert exc.value.code == 2
+    assert not list(out.iterdir())
+
+
+def existing_reports(out):
+    out.mkdir()
+    previous = {"report.json": b"old json", "report.md": b"old markdown", "request_log.json": b"old requests"}
+    for name, content in previous.items():
+        (out / name).write_bytes(content)
+    return previous
+
+
+def test_failed_fixture_run_preserves_existing_reports(tmp_path):
+    _, out, args = pilot_cli_args(tmp_path)
+    previous = existing_reports(out)
+    assert load_script().main([*args, "--fixture-dir", str(tmp_path / "missing")]) == 1
+    assert {path.name: path.read_bytes() for path in out.iterdir()} == previous
+
+
+def test_failed_serialization_preserves_existing_offline_reports(tmp_path, monkeypatch):
+    _, out, args = pilot_cli_args(tmp_path)
+    previous = existing_reports(out)
+    cli = load_script()
+    monkeypatch.setattr(cli, "render_markdown", lambda report: "\ud800")
+    with pytest.raises(UnicodeEncodeError):
+        cli.main(args)
+    assert {path.name: path.read_bytes() for path in out.iterdir()} == previous
+
+
+def test_failed_offline_replacement_restores_existing_reports(tmp_path, monkeypatch):
+    _, out, _ = pilot_cli_args(tmp_path)
+    previous = existing_reports(out)
+    cli = load_script()
+    replace = cli.os.replace
+
+    def fail_second(source, destination):
+        if source.name == "report.md":
+            raise OSError("simulated replacement failure")
+        return replace(source, destination)
+
+    monkeypatch.setattr(cli.os, "replace", fail_second)
+    with pytest.raises(OSError, match="simulated replacement failure"):
+        cli.publish_offline(out, (b"new json", b"new markdown", b"new log"), success=True)
+    assert {path.name: path.read_bytes() for path in out.iterdir()} == previous

@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import ctypes
+import errno
 import json
 import os
 import re
 import stat
 import sys
+import tempfile
 import time
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -74,6 +77,34 @@ def fixture_transport(fixture_dir: Path):
 _REPORT_NAMES = ("report.json", "report.md", "request_log.json")
 
 
+def require_no_extended_acl(fd: int) -> None:
+    if sys.platform == "darwin":
+        # Darwin acl_get_fd_np returns ENOENT when the extended ACL is absent.
+        libc = ctypes.CDLL(None, use_errno=True)
+        get_acl = libc.acl_get_fd_np
+        get_acl.argtypes = (ctypes.c_int, ctypes.c_int)
+        get_acl.restype = ctypes.c_void_p
+        release_acl = libc.acl_free
+        release_acl.argtypes = (ctypes.c_void_p,)
+        release_acl.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        acl = get_acl(fd, 0x100)  # ACL_TYPE_EXTENDED
+        if acl:
+            release_acl(acl)
+            raise ValueError("live output must have no extended ACL")
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+    elif sys.platform.startswith("linux"):
+        try:
+            os.getxattr(fd, "system.posix_acl_access")
+        except OSError as exc:
+            if exc.errno == errno.ENODATA:
+                return
+        else:
+            raise ValueError("live output must have no extended ACL")
+    raise ValueError("cannot verify effective owner-only live output access")
+
+
 def private_outputs(path: Path, stack: ExitStack):
     supplied = path.absolute()
     resolved = supplied.resolve()
@@ -89,6 +120,11 @@ def private_outputs(path: Path, stack: ExitStack):
     parent = resolved.parent.stat()
     if parent.st_uid != os.geteuid() or stat.S_IMODE(parent.st_mode) & 0o022:
         raise ValueError("live output parent must be owner-controlled")
+    parent_fd = os.open(resolved.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        require_no_extended_acl(parent_fd)
+    finally:
+        os.close(parent_fd)
     if not resolved.exists():
         resolved.mkdir(mode=0o700)
     directory_fd = os.open(resolved, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -96,6 +132,7 @@ def private_outputs(path: Path, stack: ExitStack):
     info = os.fstat(directory_fd)
     if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise ValueError("live output directory must be owner-owned with mode 0700")
+    require_no_extended_acl(directory_fd)
     if any(os.path.lexists(resolved / name) for name in _REPORT_NAMES):
         raise ValueError("live report files already exist")
     outputs = []
@@ -103,8 +140,42 @@ def private_outputs(path: Path, stack: ExitStack):
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
         output = stack.enter_context(os.fdopen(fd, "w", encoding="utf-8"))
         os.fchmod(output.fileno(), 0o600)
+        require_no_extended_acl(output.fileno())
         outputs.append(output)
     return outputs
+
+
+def publish_offline(out: Path, payloads: tuple[bytes, ...], *, success: bool) -> None:
+    destinations = [out / name for name in _REPORT_NAMES]
+    if not success and any(os.path.lexists(path) for path in destinations):
+        print("Offline discovery failed. Existing reports were preserved.", file=sys.stderr)
+        return
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".w1-report-", dir=out) as stage:
+        pending = Path(stage)
+        backups = {}
+        for path, payload in zip(destinations, payloads):
+            staged = pending / path.name
+            staged.write_bytes(payload)
+            staged.chmod(0o600)
+            if os.path.lexists(path):
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError(f"unsafe offline report path: {path.name}")
+                backup = pending / f"{path.name}.previous"
+                os.link(path, backup)
+                backups[path] = backup
+        published = []
+        try:
+            for path in destinations:
+                os.replace(pending / path.name, path)
+                published.append(path)
+        except OSError:
+            for path in reversed(published):
+                if path in backups:
+                    os.replace(backups[path], path)
+                else:
+                    path.unlink()
+            raise
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -140,28 +211,33 @@ def main(argv: list[str] | None = None) -> int:
         if a.live:
             try:
                 outputs = private_outputs(out, stack)
-            except (OSError, ValueError, RuntimeError) as exc:
+            except (AttributeError, OSError, ValueError, RuntimeError) as exc:
                 ap.error(f"unsafe live output: {exc}")
-        else:
-            out.mkdir(parents=True, exist_ok=True)
-            outputs = [stack.enter_context((out / name).open("w", encoding="utf-8")) for name in _REPORT_NAMES]
         started = datetime.now(timezone.utc).isoformat() if a.live else None
         rep = run_shadow(rows, criteria, fetch=carrier, begin_employer=carrier.begin_employer,
                          request_counts=lambda: carrier.per_employer, sheet_labels=labels)
         rep["transport_mode"] = "live" if a.live else "fixture" if a.fixture_dir else "disabled"
         if started:
             rep["observed_between_utc"] = [started, datetime.now(timezone.utc).isoformat()]
-        outputs[0].write(json.dumps(rep, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
-        outputs[1].write(render_markdown(rep))
-        outputs[2].write(json.dumps(carrier.log, indent=2, sort_keys=True) + "\n")
+        failed = bool(a.live and rep["listings_unkeyed"]) or bool(
+            (a.live or a.fixture_dir)
+            and (not rep["employers_supported"]
+                 or any(e["status"] in {"partial", "error"} for e in rep["employers"]))
+        )
+        payloads = tuple(text.encode("utf-8", errors="strict") for text in (
+            json.dumps(rep, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n",
+            render_markdown(rep),
+            json.dumps(carrier.log, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        ))
+        if a.live:
+            for output, payload in zip(outputs, payloads):
+                output.write(payload.decode("utf-8"))
+        else:
+            publish_offline(out, payloads, success=not failed)
+
     print(f"employers={rep['employers_total']} supported={rep['employers_supported']} "
           f"pending={rep['employers_pending_adapter']} listings={rep['listings_parsed']} requests={carrier.total}")
-    if a.live and rep["listings_unkeyed"]:
-        return 1
-    if a.live or a.fixture_dir:
-        if not rep["employers_supported"] or any(e["status"] in {"partial", "error"} for e in rep["employers"]):
-            return 1
-    return 0
+    return int(failed)
 
 
 if __name__ == "__main__":

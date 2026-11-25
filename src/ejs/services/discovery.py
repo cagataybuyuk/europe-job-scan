@@ -239,7 +239,8 @@ def parse_smartrecruiters(payload: Any, company: str, slug: str, *, identity: At
         if not isinstance(j, dict):
             continue
         loc = j.get("location") if isinstance(j.get("location"), dict) else {}
-        title, jid = _s(j.get("name")), _s(j.get("id"))
+        title, raw_id = _s(j.get("name")), j.get("id")
+        jid = raw_id if isinstance(raw_id, str) and _IDENTIFIER.fullmatch(raw_id) else ""
         publisher = j.get("company")
         if identity and isinstance(publisher, dict):
             identifier = _s(publisher.get("identifier"))
@@ -247,7 +248,7 @@ def parse_smartrecruiters(payload: Any, company: str, slug: str, *, identity: At
                 raise BadPayloadError("tenant_mismatch")
         if title and (jid or identity is not None):
             place = ", ".join(x for x in (_s(loc.get("city")), _s(loc.get("country")).upper()) if x)
-            url = f"https://jobs.smartrecruiters.com/{quote(slug, safe='')}/{quote(jid, safe='')}" if jid else ""
+            url = f"https://jobs.smartrecruiters.com/{quote(slug, safe='')}/{jid}" if jid and identity is None else ""
             out.append(_with_identity(_row(company, title, place, url, "smartrecruiters"), jid, identity))
     if items and not out:
         raise BadPayloadError("no_valid_entries")
@@ -360,6 +361,10 @@ def discover_pages(row: WatchlistRow, fetch: Fetch | None) -> EmployerDiscovery:
             if len(valid_page) != len(page):
                 error = "invalid_vacancy_unicode"
             page = valid_page
+            if cls.kind == "smartrecruiters":
+                page = [item for item in page if item["posting_id"]]
+                if len(page) != len(valid_page):
+                    error = error or "invalid_smartrecruiters_posting_id"
             page_posting_ids = [item["posting_id"] for item in page if item["posting_id"]]
             posting_ids = set(page_posting_ids)
             for item in page:
