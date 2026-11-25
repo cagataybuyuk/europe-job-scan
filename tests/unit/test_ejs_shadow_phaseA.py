@@ -975,3 +975,37 @@ def test_failed_offline_replacement_restores_existing_reports(tmp_path, monkeypa
     with pytest.raises(OSError, match="simulated replacement failure"):
         cli.publish_offline(out, (b"new json", b"new markdown", b"new log"), success=True)
     assert {path.name: path.read_bytes() for path in out.iterdir()} == previous
+
+
+@pytest.mark.parametrize("failure", ["acl", "collision"])
+def test_live_preflight_cleans_only_current_run_files(tmp_path, monkeypatch, failure):
+    import stat
+
+    _, out, args = pilot_cli_args(tmp_path)
+    out.mkdir(mode=0o700)
+    (out / "keep.txt").write_bytes(b"existing unrelated file")
+    cli = load_script()
+    verify_acl = cli.require_no_extended_acl
+    verified_reports = []
+
+    def verify(fd):
+        import os
+
+        verify_acl(fd)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return
+        verified_reports.append(fd)
+        if failure == "acl" and len(verified_reports) == 2:
+            raise ValueError("simulated inherited ACL on second report")
+        if failure == "collision" and len(verified_reports) == 1:
+            (out / "report.md").write_bytes(b"other writer")
+
+    monkeypatch.setattr(cli, "require_no_extended_acl", verify)
+    monkeypatch.setattr(cli, "urllib_transport", lambda *args: pytest.fail("unexpected transport"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main([*args, "--live"])
+    assert exc.value.code == 2
+    expected = {"keep.txt": b"existing unrelated file"}
+    if failure == "collision":
+        expected["report.md"] = b"other writer"
+    assert {path.name: path.read_bytes() for path in out.iterdir()} == expected

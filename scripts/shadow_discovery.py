@@ -136,12 +136,28 @@ def private_outputs(path: Path, stack: ExitStack):
     if any(os.path.lexists(resolved / name) for name in _REPORT_NAMES):
         raise ValueError("live report files already exist")
     outputs = []
-    for name in _REPORT_NAMES:
-        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
-        output = stack.enter_context(os.fdopen(fd, "w", encoding="utf-8"))
-        os.fchmod(output.fileno(), 0o600)
-        require_no_extended_acl(output.fileno())
-        outputs.append(output)
+    created = {}
+    try:
+        for name in _REPORT_NAMES:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+            stack.callback(os.close, fd)
+            opened = os.fstat(fd)
+            created[name] = (opened.st_dev, opened.st_ino)
+            output = stack.enter_context(os.fdopen(fd, "w", encoding="utf-8", closefd=False))
+            os.fchmod(fd, 0o600)
+            require_no_extended_acl(fd)
+            outputs.append(output)
+    except BaseException:
+        for name, identity in created.items():
+            try:
+                current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == identity:
+                    os.unlink(name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print(f"Could not clean up newly created live report {name}: {exc}", file=sys.stderr)
+        raise
     return outputs
 
 
