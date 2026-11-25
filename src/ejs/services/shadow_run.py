@@ -44,15 +44,22 @@ def read_watchlist(path: str | Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     in_table = False
     with open(path, newline="", encoding="utf-8") as fh:
-        for r in csv.reader(fh):
+        reader = csv.reader(fh, strict=True)
+        for r in reader:
             cells = [c.strip() for c in r] + ["", "", ""]
             if not in_table:
                 if cells[0] == "Employer" and cells[1] == "Primary Market" and cells[2].startswith("Reference"):
                     in_table = True
                 continue
-            if not cells[0] or not cells[1] or not cells[2]:
+            if not any(cells):
                 break
+            if not all(cells[:3]):
+                raise ValueError(f"watchlist row {reader.line_num}: employer, market and reference URL are required")
+            if classify_url(cells[2]).kind == "invalid":
+                raise ValueError(f"watchlist row {reader.line_num}: a valid HTTPS reference URL is required")
             rows.append({"employer": cells[0], "market": cells[1], "url": cells[2]})
+    if not in_table:
+        raise ValueError("watchlist header is missing")
     return rows
 
 

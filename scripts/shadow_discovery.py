@@ -10,10 +10,14 @@ Without --live and without --fixture-dir the carrier is OFF: supported employers
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import os
 import re
+import stat
 import sys
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -67,6 +71,42 @@ def fixture_transport(fixture_dir: Path):
     return transport
 
 
+_REPORT_NAMES = ("report.json", "report.md", "request_log.json")
+
+
+def private_outputs(path: Path, stack: ExitStack):
+    supplied = path.absolute()
+    resolved = supplied.resolve()
+    if supplied != resolved:
+        raise ValueError("live output must use a canonical path without symlinks")
+    for directory in (resolved, *resolved.parents):
+        if (os.path.lexists(directory / ".git")
+                or ((directory / "HEAD").is_file() and (directory / "objects").is_dir()
+                    and (directory / "refs").is_dir())
+                or ((directory / "HEAD").is_file() and (directory / "commondir").is_file())):
+            raise ValueError("live output must be outside Git repositories and worktrees")
+
+    parent = resolved.parent.stat()
+    if parent.st_uid != os.geteuid() or stat.S_IMODE(parent.st_mode) & 0o022:
+        raise ValueError("live output parent must be owner-controlled")
+    if not resolved.exists():
+        resolved.mkdir(mode=0o700)
+    directory_fd = os.open(resolved, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    stack.callback(os.close, directory_fd)
+    info = os.fstat(directory_fd)
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError("live output directory must be owner-owned with mode 0700")
+    if any(os.path.lexists(resolved / name) for name in _REPORT_NAMES):
+        raise ValueError("live report files already exist")
+    outputs = []
+    for name in _REPORT_NAMES:
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+        output = stack.enter_context(os.fdopen(fd, "w", encoding="utf-8"))
+        os.fchmod(output.fileno(), 0o600)
+        outputs.append(output)
+    return outputs
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--watchlist", required=True)
@@ -79,7 +119,10 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
 
     criteria = load_criteria(a.criteria)
-    rows = read_watchlist(a.watchlist)
+    try:
+        rows = read_watchlist(a.watchlist)
+    except (ValueError, OSError, csv.Error) as exc:
+        ap.error(f"invalid watchlist: {exc}")
     if a.live:
         if a.sheet_labels:
             ap.error("--sheet-labels is available only for offline comparison")
@@ -92,17 +135,25 @@ def main(argv: list[str] | None = None) -> int:
     else:
         carrier = HttpCarrier()
     labels = json.loads(Path(a.sheet_labels).read_text(encoding="utf-8")) if a.sheet_labels else None
-    started = datetime.now(timezone.utc).isoformat() if a.live else None
-    rep = run_shadow(rows, criteria, fetch=carrier, begin_employer=carrier.begin_employer,
-                     request_counts=lambda: carrier.per_employer, sheet_labels=labels)
-    rep["transport_mode"] = "live" if a.live else "fixture" if a.fixture_dir else "disabled"
-    if started:
-        rep["observed_between_utc"] = [started, datetime.now(timezone.utc).isoformat()]
     out = Path(a.out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "report.json").write_text(json.dumps(rep, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
-    (out / "report.md").write_text(render_markdown(rep), encoding="utf-8")
-    (out / "request_log.json").write_text(json.dumps(carrier.log, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with ExitStack() as stack:
+        if a.live:
+            try:
+                outputs = private_outputs(out, stack)
+            except (OSError, ValueError, RuntimeError) as exc:
+                ap.error(f"unsafe live output: {exc}")
+        else:
+            out.mkdir(parents=True, exist_ok=True)
+            outputs = [stack.enter_context((out / name).open("w", encoding="utf-8")) for name in _REPORT_NAMES]
+        started = datetime.now(timezone.utc).isoformat() if a.live else None
+        rep = run_shadow(rows, criteria, fetch=carrier, begin_employer=carrier.begin_employer,
+                         request_counts=lambda: carrier.per_employer, sheet_labels=labels)
+        rep["transport_mode"] = "live" if a.live else "fixture" if a.fixture_dir else "disabled"
+        if started:
+            rep["observed_between_utc"] = [started, datetime.now(timezone.utc).isoformat()]
+        outputs[0].write(json.dumps(rep, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+        outputs[1].write(render_markdown(rep))
+        outputs[2].write(json.dumps(carrier.log, indent=2, sort_keys=True) + "\n")
     print(f"employers={rep['employers_total']} supported={rep['employers_supported']} "
           f"pending={rep['employers_pending_adapter']} listings={rep['listings_parsed']} requests={carrier.total}")
     if a.live and rep["listings_unkeyed"]:

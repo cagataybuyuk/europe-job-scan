@@ -810,3 +810,82 @@ def test_duplicate_ids_within_one_page_are_partial(board, payload):
     assert (employer["status"], employer["error_kind"]) == ("partial", "duplicate_id_in_page")
     assert [item["posting_id"] for item in report["vacancies"]] == ["101", "102", "103"]
     assert report["listings_duplicate"] == 1
+
+
+def test_watchlist_rejects_incomplete_row_and_keeps_blank_separator(tmp_path):
+    watchlist = tmp_path / "watchlist.csv"
+    header = "Employer,Primary Market,Reference URL\n"
+    valid = "Acme,Netherlands,https://jobs.lever.co/acme\n"
+    watchlist.write_text(header + valid + "Broken,,https://jobs.lever.co/broken\n" + valid, encoding="utf-8")
+    with pytest.raises(ValueError, match="watchlist row 3"):
+        shadow_run.read_watchlist(watchlist)
+    watchlist.write_text(header + valid + ",,\nOther table,not a watchlist\n", encoding="utf-8")
+    assert len(shadow_run.read_watchlist(watchlist)) == 1
+
+
+def test_invalid_unicode_keeps_valid_records_and_request_log(tmp_path):
+    _, out, args = pilot_cli_args(tmp_path)
+    fx = tmp_path / "fixture"
+    write_pilot_fixtures(fx)
+    write_fixture(fx, "api.lever.co", "cartrawler", 0,
+                  [{"id": "bad", "text": "Broken\ud800"}, {"id": "good", "text": "Valid"}])
+    assert load_script().main([*args, "--fixture-dir", str(fx)]) == 1
+    report = json.loads((out / "report.json").read_text())
+    assert report["employers"][1]["error_kind"] == "invalid_vacancy_unicode"
+    assert report["employers"][1]["status"] == "partial"
+    assert report["employers"][0]["status"] == "complete"
+    assert {record["posting_id"] for record in report["vacancies"]} >= {"good", "9"}
+    assert len(json.loads((out / "request_log.json").read_text())) == 4
+
+
+@pytest.mark.parametrize("unsafe", ["worktree", "bare", "symlink", "mode", "file", "owner"])
+def test_live_output_rejects_unsafe_destination_before_network(tmp_path, monkeypatch, unsafe):
+    import os
+
+    _, out, args = pilot_cli_args(tmp_path)
+    cli = load_script()
+    if unsafe == "worktree":
+        (tmp_path / ".git").write_text("gitdir: somewhere", encoding="utf-8")
+    elif unsafe == "bare":
+        (tmp_path / "HEAD").touch()
+        (tmp_path / "objects").mkdir()
+        (tmp_path / "refs").mkdir()
+    elif unsafe == "symlink":
+        target = tmp_path / "target"
+        target.mkdir(mode=0o700)
+        out.symlink_to(target, target_is_directory=True)
+    elif unsafe == "mode":
+        out.mkdir(mode=0o755)
+    elif unsafe == "file":
+        out.mkdir(mode=0o700)
+        (out / "report.json").symlink_to(tmp_path / "missing")
+    else:
+        monkeypatch.setattr(cli.os, "geteuid", lambda uid=os.geteuid(): uid + 1)
+
+    def unexpected(*args):
+        pytest.fail("unsafe destination reached network transport")
+
+    monkeypatch.setattr(cli, "urllib_transport", unexpected)
+    with pytest.raises(SystemExit) as exc:
+        cli.main([*args, "--live"])
+    assert exc.value.code == 2
+
+
+def test_live_output_is_reserved_privately_before_first_request(tmp_path, monkeypatch):
+    import stat
+
+    _, out, args = pilot_cli_args(tmp_path)
+    cli = load_script()
+    clock = Clock()
+    transport = transport_for({**BODIES, "veepee": []})
+
+    def fetch(*args):
+        assert stat.S_IMODE(out.stat().st_mode) == 0o700
+        assert {stat.S_IMODE(path.stat().st_mode) for path in out.iterdir()} == {0o600}
+        assert len(list(out.iterdir())) == 3
+        return transport(*args)
+
+    monkeypatch.setattr(cli, "urllib_transport", fetch)
+    monkeypatch.setattr(cli.time, "monotonic", clock.now)
+    monkeypatch.setattr(cli.time, "sleep", clock.sleep)
+    assert cli.main([*args, "--live"]) == 0

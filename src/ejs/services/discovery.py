@@ -349,11 +349,24 @@ def discover_pages(row: WatchlistRow, fetch: Fetch | None) -> EmployerDiscovery:
                 break
 
             page = _parse_page(data, row, cls, identified=True)
+            valid_page = []
+            for item in page:
+                try:
+                    for value in item.values():
+                        value.encode("utf-8", errors="strict")
+                except UnicodeEncodeError:
+                    continue
+                valid_page.append(item)
+            if len(valid_page) != len(page):
+                error = "invalid_vacancy_unicode"
+            page = valid_page
             page_posting_ids = [item["posting_id"] for item in page if item["posting_id"]]
             posting_ids = set(page_posting_ids)
             for item in page:
                 item["discovered_via"] = url
             listings.extend(page)
+            if error:
+                break
             if len(posting_ids) != len(page_posting_ids):
                 error = "duplicate_id_in_page"
                 break
