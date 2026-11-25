@@ -111,6 +111,10 @@ class HttpCarrier:
         started = self._clock()
         try:
             status, body = self._transport(url, dict(REQUEST_HEADERS), self._timeout)
+        except DiscoveryError as exc:
+            self._stopped.add(emp)
+            self._log(url, exc.kind, 0, started)
+            raise
         except Exception as e:
             self._stopped.add(emp)
             self._log(url, "error", 0, started)

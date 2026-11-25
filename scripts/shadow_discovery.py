@@ -5,7 +5,7 @@
       --out-dir <dir> [--sheet-labels <json>] [--fixture-dir <dir> | --live]
 
 Without --live and without --fixture-dir the carrier is OFF: supported employers report ``no_carrier``.
---fixture-dir replays ``<dir>/<slug>.json`` for the first page and ``<dir>/<slug>__<offset>.json`` thereafter.
+--fixture-dir replays ``<dir>/<api-host>/<tenant>/<offset>.json``. The first page has offset 0.
 """
 from __future__ import annotations
 
@@ -19,12 +19,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from ejs.services.criteria_loader import load_criteria
-from ejs.services.discovery import classify_url
+from ejs.services.discovery import DiscoveryError, classify_url
 from ejs.services.http_carrier import HttpCarrier, ReplayCarrier, urllib_transport
 from ejs.services.shadow_run import read_watchlist, render_markdown, run_shadow
 
 
-_SLUG = re.compile(r"/(?:boards|postings|companies)/([^/?]+)")
+_SLUG = re.compile(r"/(?:boards|postings|companies)/([A-Za-z0-9_-]+)(?:/|$)")
 
 _PILOT_TARGETS = {
     "HSO International": ("greenhouse", "eu", "hsogroupbv"),
@@ -42,18 +42,28 @@ def pilot_targets_match(rows: list[dict[str, str]]) -> bool:
     return len(rows) == len(_PILOT_TARGETS) and targets == _PILOT_TARGETS
 
 
+class MissingFixtureError(DiscoveryError):
+    kind = "missing_fixture"
+
+
 def fixture_transport(fixture_dir: Path):
+    fixture_dir = fixture_dir.resolve()
+
     def transport(url: str, headers: dict, timeout: float):
         parsed = urlparse(url)
         match = _SLUG.search(parsed.path)
-        if not match:
-            return 404, b""
+        if match is None or parsed.hostname is None:
+            raise MissingFixtureError()
         query = parse_qs(parsed.query)
         offset = int((query.get("offset") or query.get("skip") or ["0"])[0])
-        slug = match.group(1)
-        suffix = f"__{offset}" if offset else ""
-        fixture = fixture_dir / f"{slug}{suffix}.json"
-        return (200, fixture.read_bytes()) if fixture.is_file() else (404, b"")
+        fixture = fixture_dir / parsed.hostname / match.group(1) / f"{offset}.json"
+        if fixture.resolve() != fixture or not fixture.is_file():
+            raise MissingFixtureError()
+        try:
+            return 200, fixture.read_bytes()
+        except FileNotFoundError:
+            raise MissingFixtureError() from None
+
     return transport
 
 
@@ -78,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         carrier = HttpCarrier(enabled=True, transport=urllib_transport, clock=time.monotonic, sleep=time.sleep,
                               max_requests=20)
     elif a.fixture_dir:
-        carrier = ReplayCarrier(transport=fixture_transport(Path(a.fixture_dir)), clock=time.monotonic)
+        carrier = ReplayCarrier(transport=fixture_transport(Path(a.fixture_dir)), clock=lambda: 0.0)
     else:
         carrier = HttpCarrier()
     labels = json.loads(Path(a.sheet_labels).read_text(encoding="utf-8")) if a.sheet_labels else None

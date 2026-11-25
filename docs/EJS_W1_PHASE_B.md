@@ -60,3 +60,8 @@ describe the feed formats. Greenhouse's EU API route on
 `boards.eu.greenhouse.io` was verified using a nonexistent synthetic board
 token. The endpoint returned a JSON 404 and `x-farm-id: eu`. The HSO board
 itself remains to be verified in the pilot.
+
+Offline fixture replay reads `<fixture-dir>/<api-host>/<tenant>/<offset>.json`.
+Use offset `0` for the first page. A missing host, tenant or offset fixture is
+reported as `missing_fixture`. Replay uses a fixed clock for deterministic
+reports and request logs.

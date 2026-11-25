@@ -234,6 +234,19 @@ BODIES = {
 }
 
 
+def write_fixture(root, host, tenant, offset, body):
+    fixture = root / host / tenant / f"{offset}.json"
+    fixture.parent.mkdir(parents=True, exist_ok=True)
+    fixture.write_text(json.dumps(body), encoding="utf-8")
+
+
+def write_pilot_fixtures(root):
+    write_fixture(root, "boards.eu.greenhouse.io", "hsogroupbv", 0, BODIES["hsogroupbv"])
+    write_fixture(root, "api.lever.co", "cartrawler", 0, BODIES["cartrawler"])
+    write_fixture(root, "api.lever.co", "veepee", 0, BODIES["veepee"])
+    write_fixture(root, "api.smartrecruiters.com", "Rituals1", 0, BODIES["Rituals1"])
+
+
 def write_watchlist(path):
     lines = ["Employer Watchlist v1,,", "Operating Rule,\"x\",", "Watchlist Employers,37,", "",
              "Employer,Primary Market,Reference Vacancy / Careers URL"]
@@ -384,9 +397,7 @@ def test_cli_offline_default_and_fixture_replay(tmp_path, capsys):
     wl, crit, fx = tmp_path / "wl.csv", tmp_path / "c.yaml", tmp_path / "fx"
     write_watchlist(wl)
     crit.write_text(CRITERIA_YAML, encoding="utf-8")
-    fx.mkdir()
-    for slug, body in BODIES.items():
-        (fx / f"{slug}.json").write_text(json.dumps(body), encoding="utf-8")
+    write_pilot_fixtures(fx)
     cli = load_script()
     outs = []
     for name, extra in (("off", []), ("r1", ["--fixture-dir", str(fx)]), ("r2", ["--fixture-dir", str(fx)])):
@@ -395,7 +406,8 @@ def test_cli_offline_default_and_fixture_replay(tmp_path, capsys):
         outs.append(out)
     off = json.loads((outs[0] / "report.json").read_text())
     assert {e["error_kind"] for e in off["employers"] if e["status"] == "error"} == {"no_carrier"}
-    assert (outs[1] / "report.json").read_bytes() == (outs[2] / "report.json").read_bytes()
+    for name in ("report.json", "report.md", "request_log.json"):
+        assert (outs[1] / name).read_bytes() == (outs[2] / name).read_bytes()
     assert json.loads((outs[1] / "report.json").read_text())["listings_parsed"] == 5
     assert "requests=4" in capsys.readouterr().out
 
@@ -490,7 +502,7 @@ def test_rituals_incomplete_pagination_keeps_evidence(second, error):
 def test_smartrecruiters_repeated_page_is_partial_even_with_valid_pagination():
     pages = iter([smart_page(0, 4, [101, 102]), smart_page(2, 4, [101, 102])])
     report = run_one(PILOT[3][2], lambda _: next(pages))
-    assert report["employers"][0]["error_kind"] == "repeated_page"
+    assert report["employers"][0]["error_kind"] == "overlapping_page"
     assert report["employers"][0]["status"] == "partial"
     assert len(report["vacancies"]) == 2
 
@@ -704,11 +716,83 @@ def test_pilot_exit_distinguishes_verified_empty_and_unknown_identity(tmp_path, 
 def test_fixture_replays_smartrecruiters_second_page(tmp_path):
     _, out, args = pilot_cli_args(tmp_path)
     fx = tmp_path / "fixture"
-    fx.mkdir()
-    pages = {**BODIES, "Rituals1": smart_page(0, 3, [101, 102]), "Rituals1__2": smart_page(2, 3, [103])}
-    for name, body in pages.items():
-        (fx / f"{name}.json").write_text(json.dumps(body), encoding="utf-8")
+    write_pilot_fixtures(fx)
+    write_fixture(fx, "api.smartrecruiters.com", "Rituals1", 0, smart_page(0, 3, [101, 102]))
+    write_fixture(fx, "api.smartrecruiters.com", "Rituals1", 2, smart_page(2, 3, [103]))
     assert load_script().main([*args, "--fixture-dir", str(fx)]) == 0
     report = json.loads((out / "report.json").read_text())
     assert report["transport_mode"] == "fixture"
     assert [v["posting_id"] for v in report["vacancies"] if v["tenant"] == "Rituals1"] == ["101", "102", "103"]
+
+
+def test_live_pilot_fails_smartrecruiters_overlap_and_keeps_three_unique_vacancies(tmp_path, monkeypatch):
+    _, out, args = pilot_cli_args(tmp_path)
+    cli = load_script()
+    clock = Clock()
+    base_transport = transport_for({**BODIES, "Rituals1": smart_page(0, 4, [101, 102])})
+
+    def fetch(url, headers, timeout):
+        if "Rituals1" in url and "offset=2" in url:
+            return 200, json.dumps(smart_page(2, 4, [102, 103])).encode()
+        return base_transport(url, headers, timeout)
+
+    monkeypatch.setattr(cli, "urllib_transport", fetch)
+    monkeypatch.setattr(cli.time, "monotonic", clock.now)
+    monkeypatch.setattr(cli.time, "sleep", clock.sleep)
+    assert cli.main([*args, "--live"]) == 1
+    report = json.loads((out / "report.json").read_text())
+    rituals = next(entry for entry in report["employers"] if entry["tenant"] == "Rituals1")
+    assert (rituals["status"], rituals["error_kind"], rituals["requests"]) == ("partial", "overlapping_page", 2)
+    assert [item["posting_id"] for item in report["vacancies"] if item["tenant"] == "Rituals1"] == [
+        "101", "102", "103",
+    ]
+
+
+@pytest.mark.parametrize("host", ["jobs.lever.co", "jobs.eu.lever.co"])
+def test_lever_short_final_page_with_overlap_is_partial(host):
+    first = [{"id": f"p-{i}", "text": "Analyst"} for i in range(100)]
+    second = [{"id": "p-99", "text": "Analyst"}, {"id": "p-100", "text": "Analyst"}]
+    pages = iter([first, second])
+    report = run_one(f"https://{host}/employer", lambda _: next(pages))
+    entry = report["employers"][0]
+    assert (entry["status"], entry["error_kind"]) == ("partial", "overlapping_page")
+    assert report["listings_duplicate"] == 1
+    assert len(report["vacancies"]) == 101
+    assert report["vacancies"][-1]["posting_id"] == "p-100"
+
+
+@pytest.mark.parametrize("write_eu_fixture", [True, False])
+def test_fixture_replay_isolates_regional_lever_tenants(tmp_path, write_eu_fixture):
+    watchlist, out, args = pilot_cli_args(tmp_path)
+    watchlist.write_text(
+        "Employer,Primary Market,Reference URL\n"
+        "Global,Netherlands,https://jobs.lever.co/acme\n"
+        "EU,Netherlands,https://jobs.eu.lever.co/acme\n",
+        encoding="utf-8",
+    )
+    fx = tmp_path / "fixture"
+    write_fixture(fx, "api.lever.co", "acme", 0, [{"id": "global", "text": "Global Analyst"}])
+    if write_eu_fixture:
+        write_fixture(fx, "api.eu.lever.co", "acme", 0, [{"id": "eu", "text": "EU Analyst"}])
+    else:
+        (fx / "acme.json").write_text('[{"id":"legacy","text":"Legacy Analyst"}]', encoding="utf-8")
+
+    assert load_script().main([*args, "--fixture-dir", str(fx)]) == (0 if write_eu_fixture else 1)
+    report = json.loads((out / "report.json").read_text())
+    assert [item["posting_id"] for item in report["vacancies"]] == (["global", "eu"] if write_eu_fixture else ["global"])
+    eu = report["employers"][1]
+    assert (eu["status"], eu["error_kind"]) == (("complete", None) if write_eu_fixture else ("error", "missing_fixture"))
+
+
+def test_missing_later_fixture_is_partial_instead_of_reusing_first_page(tmp_path):
+    _, out, args = pilot_cli_args(tmp_path)
+    fx = tmp_path / "fixture"
+    write_pilot_fixtures(fx)
+    write_fixture(fx, "api.smartrecruiters.com", "Rituals1", 0, smart_page(0, 3, [101, 102]))
+    assert load_script().main([*args, "--fixture-dir", str(fx)]) == 1
+    report = json.loads((out / "report.json").read_text())
+    rituals = next(entry for entry in report["employers"] if entry["tenant"] == "Rituals1")
+    assert (rituals["status"], rituals["error_kind"], rituals["requests"]) == ("partial", "missing_fixture", 2)
+    log = json.loads((out / "request_log.json").read_text())
+    assert log[-1]["status"] == "missing_fixture"
+    assert "offset=2" in log[-1]["url"]

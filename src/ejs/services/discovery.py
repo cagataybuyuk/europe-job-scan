@@ -315,7 +315,7 @@ def discover_pages(row: WatchlistRow, fetch: Fetch | None) -> EmployerDiscovery:
     """Read a bounded public feed, retaining normalized records from incomplete results."""
     cls = classify_url(row.careers_url)
     listings: list[dict[str, str]] = []
-    page_ids: set[tuple[str, ...]] = set()
+    seen_posting_ids: set[str] = set()
     offset = 0
     expected_total = None
     error = None
@@ -349,15 +349,14 @@ def discover_pages(row: WatchlistRow, fetch: Fetch | None) -> EmployerDiscovery:
                 break
 
             page = _parse_page(data, row, cls, identified=True)
-            posting_ids = tuple(sorted(item["posting_id"] for item in page if item["posting_id"]))
-            if posting_ids and len(posting_ids) == len(page):
-                if posting_ids in page_ids:
-                    error = "repeated_page"
-                    break
-                page_ids.add(posting_ids)
+            posting_ids = {item["posting_id"] for item in page if item["posting_id"]}
             for item in page:
                 item["discovered_via"] = url
             listings.extend(page)
+            if seen_posting_ids.intersection(posting_ids):
+                error = "overlapping_page"
+                break
+            seen_posting_ids.update(posting_ids)
             if size != len(page):
                 error = "invalid_posting"
                 break
