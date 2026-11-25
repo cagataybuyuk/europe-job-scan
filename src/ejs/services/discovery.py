@@ -11,6 +11,7 @@ knowledge, NOT verified against the live services.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import parse_qs, quote, urlparse
@@ -19,6 +20,23 @@ Fetch = Callable[[str], "bytes | dict | list"]
 
 _AGGREGATORS = ("linkedin.com", "indeed.com", "glassdoor.com")
 _SUPPORTED = ("greenhouse", "lever", "smartrecruiters")
+PAGE_SIZE = 100
+MAX_PAGES_PER_EMPLOYER = 5
+_IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,128}")
+API_HOSTS = {
+    ("greenhouse", "global"): "boards-api.greenhouse.io",
+    ("greenhouse", "eu"): "boards.eu.greenhouse.io",
+    ("lever", "global"): "api.lever.co",
+    ("lever", "eu"): "api.eu.lever.co",
+    ("smartrecruiters", "global"): "api.smartrecruiters.com",
+}
+_PUBLIC_HOSTS = {
+    ("greenhouse", "global"): "job-boards.greenhouse.io",
+    ("greenhouse", "eu"): "job-boards.eu.greenhouse.io",
+    ("lever", "global"): "jobs.lever.co",
+    ("lever", "eu"): "jobs.eu.lever.co",
+    ("smartrecruiters", "global"): "jobs.smartrecruiters.com",
+}
 
 
 class DiscoveryError(Exception):
@@ -87,12 +105,15 @@ def _on(host: str, suffix: str) -> bool:
 class AtsClass:
     kind: str            # greenhouse|lever|smartrecruiters|workday|workable|custom|blocked_aggregator|invalid
     slug: str | None = None
+    region: str = "global"
 
 
 def classify_url(url: str) -> AtsClass:
     try:
         p = urlparse((url or "").strip())
         host = _host(p.hostname)
+        if p.username is not None or p.password is not None or p.port not in (None, 443):
+            return AtsClass("invalid")
     except ValueError:
         return AtsClass("invalid")
     if p.scheme != "https" or not host:
@@ -101,11 +122,11 @@ def classify_url(url: str) -> AtsClass:
         return AtsClass("blocked_aggregator")
     segs = [s for s in p.path.split("/") if s]
     first = segs[0] if segs else None
-    if host in ("boards.greenhouse.io", "job-boards.greenhouse.io", "job-boards.eu.greenhouse.io"):
+    if host in ("boards.greenhouse.io", "job-boards.greenhouse.io", "job-boards.eu.greenhouse.io", "boards.eu.greenhouse.io"):
         slug = first if first and first != "embed" else (parse_qs(p.query).get("for") or [None])[0]
-        return AtsClass("greenhouse", slug)
+        return AtsClass("greenhouse", slug, "eu" if ".eu." in host else "global")
     if host in ("jobs.lever.co", "jobs.eu.lever.co"):
-        return AtsClass("lever", first)
+        return AtsClass("lever", first, "eu" if host == "jobs.eu.lever.co" else "global")
     if host in ("jobs.smartrecruiters.com", "careers.smartrecruiters.com"):
         return AtsClass("smartrecruiters", first)
     if _on(host, "myworkdayjobs.com"):
@@ -118,12 +139,18 @@ def classify_url(url: str) -> AtsClass:
 def list_api_url(cls: AtsClass) -> str:
     if cls.kind not in _SUPPORTED:
         raise UnsupportedAtsError(cls.kind)
-    if not cls.slug:
-        raise UnsupportedAtsError(f"{cls.kind}:no_slug")
-    s = quote(cls.slug, safe="")
-    return {"greenhouse": f"https://boards-api.greenhouse.io/v1/boards/{s}/jobs",
-            "lever": f"https://api.lever.co/v0/postings/{s}?mode=json",
-            "smartrecruiters": f"https://api.smartrecruiters.com/v1/companies/{s}/postings"}[cls.kind]
+    if not cls.slug or not _IDENTIFIER.fullmatch(cls.slug):
+        raise UnsupportedAtsError(f"{cls.kind}:invalid_slug")
+    host = API_HOSTS.get((cls.kind, cls.region))
+    if host is None:
+        raise UnsupportedAtsError(f"{cls.kind}:invalid_region")
+    slug = quote(cls.slug, safe="")
+    path = {
+        "greenhouse": f"/v1/boards/{slug}/jobs",
+        "lever": f"/v0/postings/{slug}?mode=json",
+        "smartrecruiters": f"/v1/companies/{slug}/postings",
+    }[cls.kind]
+    return f"https://{host}{path}"
 
 
 def _load(payload: Any) -> Any:
@@ -132,7 +159,7 @@ def _load(payload: Any) -> Any:
             raise BadPayloadError("empty")
         try:
             return json.loads(bytes(payload).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError) as e:
+        except (ValueError, RecursionError) as e:
             raise BadPayloadError("invalid_json") from e
     if isinstance(payload, (dict, list)):
         return payload
@@ -148,6 +175,24 @@ def _row(company: str, role: str, location: str, url: str, kind: str) -> dict[st
             "ats_kind": kind, "source": f"company_watchlist:{kind}"}
 
 
+def _with_identity(row: dict[str, str], raw_id: Any, cls: AtsClass | None) -> dict[str, str]:
+    if cls is None:
+        return row
+    posting_id = str(raw_id) if type(raw_id) is int and raw_id > 0 else _s(raw_id)
+    if not _IDENTIFIER.fullmatch(posting_id) or (cls.kind == "greenhouse" and not posting_id.isdecimal()):
+        posting_id = ""
+    # Use the regional provider URL template. Never persist opaque paths, query strings or fragments.
+    host = _PUBLIC_HOSTS[cls.kind, cls.region]
+    suffix = f"jobs/{posting_id}" if cls.kind == "greenhouse" else posting_id
+    row.update(
+        tenant=cls.slug or "",
+        region=cls.region,
+        posting_id=posting_id,
+        url=f"https://{host}/{cls.slug}/{suffix}" if posting_id else "",
+    )
+    return row
+
+
 def _items(data: Any, key: str | None) -> list:
     items = data.get(key) if key and isinstance(data, dict) else (data if key is None else None)
     if not isinstance(items, list):
@@ -155,7 +200,7 @@ def _items(data: Any, key: str | None) -> list:
     return items
 
 
-def parse_greenhouse(payload: Any, company: str) -> list[dict[str, str]]:
+def parse_greenhouse(payload: Any, company: str, *, identity: AtsClass | None = None) -> list[dict[str, str]]:
     items = _items(_load(payload), "jobs")
     out = []
     for j in items:
@@ -163,14 +208,15 @@ def parse_greenhouse(payload: Any, company: str) -> list[dict[str, str]]:
             continue
         loc = j.get("location")
         title, url = _s(j.get("title")), _s(j.get("absolute_url"))
-        if title and url:
-            out.append(_row(company, title, _s(loc.get("name")) if isinstance(loc, dict) else _s(loc), url, "greenhouse"))
+        if title and (url or identity is not None):
+            row = _row(company, title, _s(loc.get("name")) if isinstance(loc, dict) else _s(loc), url, "greenhouse")
+            out.append(_with_identity(row, j.get("id"), identity))
     if items and not out:
         raise BadPayloadError("no_valid_entries")
     return out
 
 
-def parse_lever(payload: Any, company: str) -> list[dict[str, str]]:
+def parse_lever(payload: Any, company: str, *, identity: AtsClass | None = None) -> list[dict[str, str]]:
     items = _items(_load(payload), None)
     out = []
     for j in items:
@@ -178,24 +224,32 @@ def parse_lever(payload: Any, company: str) -> list[dict[str, str]]:
             continue
         cats = j.get("categories")
         title, url = _s(j.get("text")), _s(j.get("hostedUrl"))
-        if title and url:
-            out.append(_row(company, title, _s(cats.get("location")) if isinstance(cats, dict) else "", url, "lever"))
+        if title and (url or identity is not None):
+            row = _row(company, title, _s(cats.get("location")) if isinstance(cats, dict) else "", url, "lever")
+            out.append(_with_identity(row, j.get("id"), identity))
     if items and not out:
         raise BadPayloadError("no_valid_entries")
     return out
 
 
-def parse_smartrecruiters(payload: Any, company: str, slug: str) -> list[dict[str, str]]:
+def parse_smartrecruiters(payload: Any, company: str, slug: str, *, identity: AtsClass | None = None) -> list[dict[str, str]]:
     items = _items(_load(payload), "content")
     out = []
     for j in items:
         if not isinstance(j, dict):
             continue
         loc = j.get("location") if isinstance(j.get("location"), dict) else {}
-        title, jid = _s(j.get("name")), _s(j.get("id"))
-        if title and jid:
+        title, raw_id = _s(j.get("name")), j.get("id")
+        jid = raw_id if isinstance(raw_id, str) and _IDENTIFIER.fullmatch(raw_id) else ""
+        publisher = j.get("company")
+        if identity and isinstance(publisher, dict):
+            identifier = _s(publisher.get("identifier"))
+            if identifier and identifier.casefold() != slug.casefold():
+                raise BadPayloadError("tenant_mismatch")
+        if title and (jid or identity is not None):
             place = ", ".join(x for x in (_s(loc.get("city")), _s(loc.get("country")).upper()) if x)
-            out.append(_row(company, title, place, f"https://jobs.smartrecruiters.com/{quote(slug, safe='')}/{quote(jid, safe='')}", "smartrecruiters"))
+            url = f"https://jobs.smartrecruiters.com/{quote(slug, safe='')}/{jid}" if jid and identity is None else ""
+            out.append(_with_identity(_row(company, title, place, url, "smartrecruiters"), jid, identity))
     if items and not out:
         raise BadPayloadError("no_valid_entries")
     return out
@@ -226,17 +280,121 @@ def discover_company(row: WatchlistRow, fetch: Fetch | None, limiter: RateLimite
         raise NoCarrierError(row.company)
     if limiter is not None:
         limiter.wait()
+    return _parse_page(_fetch(fetch, api), row, cls)
+
+
+def _fetch(fetch: Fetch, url: str) -> Any:
     try:
-        payload = fetch(api)
+        return fetch(url)
     except DiscoveryError:
         raise
     except Exception as e:
         raise FetchFailedError(type(e).__name__) from e
+
+
+def _parse_page(payload: Any, row: WatchlistRow, cls: AtsClass, *, identified: bool = False) -> list[dict[str, str]]:
+    identity = cls if identified else None
     if cls.kind == "greenhouse":
-        return parse_greenhouse(payload, row.company)
+        return parse_greenhouse(payload, row.company, identity=identity)
     if cls.kind == "lever":
-        return parse_lever(payload, row.company)
-    return parse_smartrecruiters(payload, row.company, cls.slug or "")
+        return parse_lever(payload, row.company, identity=identity)
+    return parse_smartrecruiters(payload, row.company, cls.slug or "", identity=identity)
+
+
+def _natural_number(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+@dataclass(frozen=True)
+class EmployerDiscovery:
+    listings: list[dict[str, str]]
+    status: str
+    error_kind: str | None = None
+
+
+def discover_pages(row: WatchlistRow, fetch: Fetch | None) -> EmployerDiscovery:
+    """Read a bounded public feed, retaining normalized records from incomplete results."""
+    cls = classify_url(row.careers_url)
+    listings: list[dict[str, str]] = []
+    seen_posting_ids: set[str] = set()
+    offset = 0
+    expected_total = None
+    error = None
+    try:
+        base = list_api_url(cls)
+        if fetch is None:
+            raise NoCarrierError(row.company)
+        for _ in range(MAX_PAGES_PER_EMPLOYER):
+            url = base
+            if cls.kind == "lever":
+                url += f"&skip={offset}&limit={PAGE_SIZE}"
+            elif cls.kind == "smartrecruiters":
+                url += f"?offset={offset}&limit={PAGE_SIZE}"
+            data = _load(_fetch(fetch, url))
+            item_key = {"greenhouse": "jobs", "lever": None, "smartrecruiters": "content"}[cls.kind]
+            size = len(_items(data, item_key))
+            if cls.kind == "smartrecruiters":
+                total, start, limit = (data.get(key) for key in ("totalFound", "offset", "limit"))
+                if (not all(_natural_number(n) for n in (total, start, limit))
+                        or start != offset or not 0 < limit <= PAGE_SIZE or size > limit
+                        or offset + size > total
+                        or (expected_total is not None and total != expected_total)):
+                    error = "invalid_pagination"
+                    break
+                expected_total = total
+                if size == 0 and offset < total:
+                    error = "pagination_no_progress"
+                    break
+            elif cls.kind == "lever" and size > PAGE_SIZE:
+                error = "invalid_pagination"
+                break
+
+            page = _parse_page(data, row, cls, identified=True)
+            valid_page = []
+            for item in page:
+                try:
+                    for value in item.values():
+                        value.encode("utf-8", errors="strict")
+                except UnicodeEncodeError:
+                    continue
+                valid_page.append(item)
+            if len(valid_page) != len(page):
+                error = "invalid_vacancy_unicode"
+            page = valid_page
+            if cls.kind == "smartrecruiters":
+                page = [item for item in page if item["posting_id"]]
+                if len(page) != len(valid_page):
+                    error = error or "invalid_smartrecruiters_posting_id"
+            page_posting_ids = [item["posting_id"] for item in page if item["posting_id"]]
+            posting_ids = set(page_posting_ids)
+            for item in page:
+                item["discovered_via"] = url
+            listings.extend(page)
+            if error:
+                break
+            if len(posting_ids) != len(page_posting_ids):
+                error = "duplicate_id_in_page"
+                break
+            if seen_posting_ids.intersection(posting_ids):
+                error = "overlapping_page"
+                break
+            seen_posting_ids.update(posting_ids)
+            if size != len(page):
+                error = "invalid_posting"
+                break
+            if cls.kind == "greenhouse":
+                meta = data.get("meta")
+                total = meta.get("total") if isinstance(meta, dict) else None
+                if not _natural_number(total) or total != size:
+                    error = "greenhouse_total_mismatch"
+                    break
+            if (cls.kind == "greenhouse" or (cls.kind == "lever" and size < PAGE_SIZE)
+                    or (cls.kind == "smartrecruiters" and offset + size == expected_total)):
+                return EmployerDiscovery(listings, "complete" if listings else "empty")
+            offset += size
+    except DiscoveryError as exc:
+        error = exc.kind
+    return EmployerDiscovery(listings, "partial" if listings else "error", error or "page_limit_exceeded")
 
 
 @dataclass(frozen=True)
