@@ -264,7 +264,8 @@ def _strict_int(value: object, low: int, high: int) -> int:
     return value  # type: ignore[return-value]
 
 
-def _apply_url(value: object, family: str, posting_id: str) -> str:
+def validate_apply_url(value: object, family: str, posting_id: str) -> str:
+    """Validate the canonical posting URL used as the manifest apply URL."""
     _require(isinstance(value, str) and len(value) <= 2048 and value.isascii()
              and value.isprintable() and not any(ch.isspace() for ch in value)
              and "%" not in value and "\\" not in value)
@@ -451,7 +452,7 @@ def load_execution_manifest(raw: bytes, *, now: datetime,
     for name in ("posting_id", "requisition_id"):
         _require(isinstance(target[name], str) and _SEGMENT.fullmatch(target[name]))
     _require(_opaque(target["opportunity_key"]))
-    apply_url = _apply_url(target["apply_url"], family, target["posting_id"])
+    apply_url = validate_apply_url(target["apply_url"], family, target["posting_id"])
     expected_key = (f"submit:{target['opportunity_key']}:{target['requisition_id']}:"
                     f"{top['candidate_profile_version']}")
     _require(top["submit_key"] == expected_key)

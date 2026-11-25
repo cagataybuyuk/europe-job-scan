@@ -1,0 +1,10 @@
+{
+  "https://api.smartrecruiters.com/v1/companies/ExampleCo/postings/744000000000001": {
+    "id": "744000000000001",
+    "uuid": "b63d797f-08e4-4f6c-b5c9-fa8d31669a61",
+    "refNumber": "REF001",
+    "company": {"identifier": "ExampleCo"},
+    "active": true,
+    "jobAd": {"sections": {"qualifications": {"text": "<p>Experience with synthetic data.</p>"}}}
+  }
+}
