@@ -1,5 +1,13 @@
 # Progress
 
+## 2026-11-25 — EJS-W2 Discovery to Application Bridge
+
+Phase B girdisindeki 414 benzersiz ilan özel hazırlık raporuna alındı.
+164 SmartRecruiters ilanı ayrıntı kanıtı bekliyor. 250 ilan destek kapsamı
+dışında. Sınırlı ayrıntı zenginleştirmesi ve mevcut manifest doğrulayıcısına
+hedef bağlama sentetik verilerle çevrimdışı sınandı. Kullanım ve ilk adayın
+doğrulama adımı [EJS-W2 köprü belgesinde](EJS_W2_APPLICATION_BRIDGE.md).
+
 ## 2026-11-25 — Employer Watchlist Coverage
 
 Added an offline Markdown coverage CLI for the owner-maintained watchlist CSV.
