@@ -1,5 +1,15 @@
 # Progress
 
+## 2026-11-26 — FUNCTION-04 aday–ilan uygunluğu
+
+Function 02 çıktısı artık çevrimdışı, açıklanabilir ve deterministik biçimde
+önceliklendiriliyor. Mevcut OPPORTUNITY-1.0 ve AUTOREVIEW motoru değişmedi;
+yeni katman ilan başlığı/ülke kanıtını (ön öncelik) ilan ayrıntısı kanıtından
+(doğrulanmış uygunluk) ayırıyor, bilinmeyeni bilinmeyen bırakıyor ve hiçbir
+yetki vermiyor. Gerçek 198 ilan ve onaylı kriterler bu oturumda erişilemediği
+için gerçek dağılım yok; kalan sahip kararları
+[FUNCTION_04_SUITABILITY.md](FUNCTION_04_SUITABILITY.md) içinde.
+
 ## 2026-11-26 — W3.5 çevrimdışı gölge keşif entegrasyonu
 
 Gölge keşif CLI'ı, PR #126 üzerindeki ülke kapsamlı replay ve özel
