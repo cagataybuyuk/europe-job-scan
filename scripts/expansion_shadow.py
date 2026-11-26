@@ -129,9 +129,13 @@ def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser, *,
     accounting = report.get("request_accounting")
     print(f"coverage={coverage_status} {'live' if live else 'fixture'}_pages={result.pages} "
           f"new_listings={len(result.listings)} requests={accounting['spent'] if live else 0}"
-          + (f" remaining={accounting['remaining']}" if live else ""))
+          + (f" remaining={accounting['remaining']} "
+             f"acceptance={'ready' if report['acceptance']['ready'] else 'not_ready'}" if live else ""))
     # Drift is sticky in the durable evidence: a resume can never turn it into success.
     if live and any(c["status"] in ("drift", "unreadable")
                     for c in report["snapshot_consistency"]["first_page_rechecks"]):
         return 1
-    return {"completed": 0, "failed": 1, "incomplete": 3}[coverage_status]
+    code = {"completed": 0, "failed": 1, "incomplete": 3}[coverage_status]
+    if live and code == 0 and not report["acceptance"]["ready"]:
+        return 4          # collection complete, but a required stable recheck is missing: not accepted
+    return code

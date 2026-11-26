@@ -489,6 +489,8 @@ def test_pilot_scope_reads_two_pages_and_one_recheck_and_is_complete_for_its_sco
     assert [c["status"] for c in report["snapshot_consistency"]["first_page_rechecks"]] == ["stable"]
     assert report["snapshot_consistency"]["atomic_snapshot"] is False
     assert report["listings_kept"] == 150 and report["coverage"]["status"] == "completed"
+    assert report["acceptance"] == {"measured_over": "approved_scope", "collection_complete": True,
+                                    "verification_complete": True, "unverified_pairs": [], "ready": True}
     assert report["coverage"]["research_scope"]["not_approved_pairs"] == 242
     assert report["coverage"]["research_scope"]["research_coverage_complete"] is False
     assert project_for_application_bridge(report)["listings_kept"] == 150
@@ -552,25 +554,25 @@ def test_bundle_budget_is_cumulative_across_invocations_and_fails_closed(cli_inp
     first, second, third = Feed(pages), Feed(pages), Feed(pages)
     assert run_cli(cli_inputs, out, first, init=True) == 3        # 4 pages (reserve 1 for a recheck), pair pending
     assert len(first.urls) == 4 and report_of(out)["request_accounting"]["remaining"] == 1
-    assert run_cli(cli_inputs, out, second) == 0                  # last page completes the pair; no budget to recheck
+    assert run_cli(cli_inputs, out, second) == 4                  # collection complete, recheck unaffordable: not accepted
     assert len(second.urls) == 1
     report = report_of(out)
     assert report["network_requests"] == 5 and report["request_accounting"]["remaining"] == 0
     assert [c["status"] for c in report["snapshot_consistency"]["first_page_rechecks"]] == ["not_checked"]
-    assert run_cli(cli_inputs, out, third) == 0
-    assert third.urls == []                                       # budget spent: nothing more, no error
+    assert run_cli(cli_inputs, out, third) == 4                   # still not accepted, and still no error
+    assert third.urls == []                                       # budget spent: nothing more
     assert project_for_application_bridge(report_of(out))["excluded_rows"]["count"] == 450   # unverified, excluded
 
 
 def test_unchecked_pair_is_rechecked_by_a_later_invocation_without_losing_history(cli_inputs, pilot):
     out = cli_inputs[2] / "later"
     pages = {(KPMG, "nl", 0): feed("NL", total=2, ids=("a", "b"))}
-    assert run_cli(cli_inputs, out, Feed(pages), init=True, max_pages=1) == 0
+    assert run_cli(cli_inputs, out, Feed(pages), init=True, max_pages=1) == 4
     first = report_of(out)
     assert [c["status"] for c in first["snapshot_consistency"]["first_page_rechecks"]] == ["not_checked"]
     assert project_for_application_bridge(first)["listings_kept"] == 0
     second = Feed(pages)
-    assert run_cli(cli_inputs, out, second) == 0
+    assert run_cli(cli_inputs, out, second) == 0                    # the recheck makes it acceptance-ready
     assert [urlparse(u).query for u in second.urls] == ["country=nl&offset=0&limit=100"]   # only the recheck
     report = report_of(out)
     assert [c["status"] for c in report["snapshot_consistency"]["first_page_rechecks"]] == ["stable"]
@@ -660,7 +662,7 @@ def test_drift_between_pages_stops_the_pair_and_the_run_exits_nonzero(cli_inputs
 
 def test_restart_after_interruption_equals_uninterrupted_run(cli_inputs, approved):
     full = cli_inputs[2] / "full"
-    assert run_cli(cli_inputs, full, Feed(DAY1), init=True) == 0         # approved scope complete
+    assert run_cli(cli_inputs, full, Feed(DAY1), init=True) == 4         # collected, but DEVO IE never rechecked
     interrupted = cli_inputs[2] / "interrupted"
     assert run_cli(cli_inputs, interrupted, Feed({**DAY1, (DEVO, "nl", 0): 500}), init=True) == 1
     report = report_of(interrupted)
@@ -703,3 +705,96 @@ def test_daily_runs_use_separate_snapshots_and_never_touch_earlier_days(cli_inpu
     assert ids(day2) - ids(day1) == {"z"}
     with pytest.raises(SystemExit):             # re-initializing an existing day is refused
         run_cli(cli_inputs, day1, Feed(DAY1), init=True)
+
+
+# --- acceptance status: collection complete is not acceptance ready -----------------------------
+
+def test_completed_pagination_without_a_stable_recheck_is_not_accepted(cli_inputs, pilot):
+    out = cli_inputs[2] / "unverified"
+    pages = {(KPMG, "nl", 0): feed("NL", total=2, ids=("a", "b"))}
+    assert run_cli(cli_inputs, out, Feed(pages), init=True, max_pages=1) == 4   # not 0, not "incomplete" (3)
+    report = report_of(out)
+    assert report["coverage"]["status"] == "completed"                            # collection finished ...
+    assert report["acceptance"] == {                                              # ... acceptance did not
+        "measured_over": "approved_scope", "collection_complete": True, "verification_complete": False,
+        "unverified_pairs": [{"tenant": KPMG, "country": "NL", "recheck": "not_checked"}], "ready": False}
+    assert project_for_application_bridge(report)["listings_kept"] == 0
+
+
+@pytest.mark.parametrize("rechecks, state", [
+    ([], "missing"),
+    ([{**STABLE_KPMG_NL, "status": "not_checked"}], "not_checked"),
+    ([{**STABLE_KPMG_NL, "status": "drift"}], "drift"),
+    ([{**STABLE_KPMG_NL, "status": "unreadable"}], "unreadable"),
+])
+def test_acceptance_requires_a_stable_recheck_for_every_completed_nonempty_pair(tmp_path, rechecks, state):
+    pages = {(KPMG, "nl", 0): feed("NL", total=1, ids=("a",))}
+    acceptance = live_report(tmp_path, pages, {(KPMG, "NL")}, rechecks=rechecks)["acceptance"]
+    assert acceptance["ready"] is False and acceptance["collection_complete"] is True
+    assert acceptance["unverified_pairs"] == [{"tenant": KPMG, "country": "NL", "recheck": state}]
+
+
+def test_empty_completed_pairs_need_no_recheck_and_pending_pairs_are_not_ready(tmp_path):
+    empty = live_report(tmp_path, {(KPMG, "nl", 0): feed("NL", total=0)}, {(KPMG, "NL")})["acceptance"]
+    assert empty["ready"] is True and empty["unverified_pairs"] == []
+    pending = live_report(tmp_path, {(KPMG, "nl", 0): feed("NL", total=150, ids=[f"k{n}" for n in range(100)])},
+                          {(KPMG, "NL")}, max_pages=1, rechecks=[STABLE_KPMG_NL])["acceptance"]
+    assert pending["collection_complete"] is False and pending["ready"] is False
+
+
+def test_synthetic_reports_carry_no_acceptance_section():
+    criteria = load_criteria(_write_tmp(CRITERIA_YAML))
+    assert "acceptance" not in build_expansion_report(initial_checkpoint(), [], MARKETS, criteria)
+
+
+# --- acceptance check script (offline, read-only) -----------------------------------------------
+
+import scripts.function02_acceptance_check as acceptance_check
+
+
+def accepted_bundle(cli_inputs, pilot_scope=None):
+    """The exact bounded sequence: cap 2, resume with cap 3, then a zero-request resume."""
+    out = cli_inputs[2] / "acceptance"
+    first, second, third = Feed(two_pages()), Feed(two_pages()), Feed({})
+    assert run_cli(cli_inputs, out, first, init=True, max_pages=2) == 3          # page 1 only, pair pending
+    assert run_cli(cli_inputs, out, second, max_pages=3) == 0                    # page 2 + recheck: accepted
+    assert run_cli(cli_inputs, out, third, max_pages=3) == 0                     # zero-request resume
+    assert (len(first.urls), len(second.urls), len(third.urls)) == (1, 2, 0)
+    return out
+
+
+def test_bounded_acceptance_sequence_passes_the_offline_check(cli_inputs, pilot, capsys):
+    out = accepted_bundle(cli_inputs)
+    report = report_of(out)
+    assert report["network_requests"] == 3 <= 5 and report["request_accounting"]["remaining"] == 2
+    assert [i["requests"] for i in report["request_accounting"]["invocations"]] == [1, 2]
+    capsys.readouterr()
+    assert acceptance_check.main(["--bundle-dir", str(out), "--expect-invocations", "2"]) == 0
+    printed = capsys.readouterr().out
+    assert "FAIL" not in printed and '"requests": 3' in printed and '"listings": 150' in printed
+    assert "k000" not in printed                                                  # counts only, no listing content
+
+
+@pytest.mark.parametrize("tamper", [
+    lambda r, b: r["request_log"][0].update(url=r["request_log"][0]["url"].replace("country=nl", "country=de")),
+    lambda r, b: r["request_log"][0].update(status=429),
+    lambda r, b: r["acceptance"].update(ready=False),
+    lambda r, b: r["snapshot_consistency"].update(first_page_rechecks=[]),
+    lambda r, b: r.update(execution_authorized=True),
+    lambda r, b: r["coverage"]["pairs"][9].update(status="incomplete"),             # a second pair in scope
+    lambda r, b: b["evidence"]["invocations"][0].update(status="interrupted_unverified", requests=[]),
+])
+def test_acceptance_check_fails_closed_on_inconsistent_evidence(cli_inputs, pilot, capsys, tamper):
+    out = accepted_bundle(cli_inputs)
+    report, bundle = report_of(out), bundle_of(out)
+    tamper(report, bundle)
+    (out / store.REPORT_NAMES[0]).write_bytes(json.dumps(report).encode())
+    (out / store.BUNDLE_NAME).write_bytes(json.dumps(bundle).encode())
+    capsys.readouterr()
+    assert acceptance_check.main(["--bundle-dir", str(out), "--expect-invocations", "2"]) in (1, 2)
+
+
+def test_acceptance_check_rejects_a_wrong_invocation_count_and_missing_input(cli_inputs, pilot, tmp_path, capsys):
+    out = accepted_bundle(cli_inputs)
+    assert acceptance_check.main(["--bundle-dir", str(out), "--expect-invocations", "1"]) == 1
+    assert acceptance_check.main(["--bundle-dir", str(tmp_path / "missing")]) == 2

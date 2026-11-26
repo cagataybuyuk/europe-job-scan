@@ -131,6 +131,15 @@ def build_expansion_report(checkpoint: Checkpoint, listings: list[dict[str, str]
             "research_coverage_complete": completed == len(checkpoint.cursors)}
     if live:
         recheck_state = effective_rechecks(evidence)
+        # Collection finished is not acceptance: every completed non-empty pair also needs a stable recheck.
+        unverified = [{"tenant": p["tenant"], "country": p["country"],
+                       "recheck": recheck_state.get((p["tenant"], p["country"]), {"status": "missing"})["status"]}
+                      for p in pairs if p["status"] == "completed" and p["accepted_listings"]
+                      and recheck_state.get((p["tenant"], p["country"]), {}).get("status") != "stable"]
+        report["acceptance"] = {
+            "measured_over": "approved_scope", "collection_complete": coverage["status"] == "completed",
+            "verification_complete": not unverified, "unverified_pairs": unverified,
+            "ready": coverage["status"] == "completed" and not unverified}
         report["request_log"] = log
         report["request_accounting"] = accounting
         report["snapshot_consistency"] = {

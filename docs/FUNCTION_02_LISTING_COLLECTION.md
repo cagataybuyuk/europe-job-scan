@@ -98,8 +98,10 @@ has its own bundle and its own 5-attempt budget. After an interruption rerun the
   (`interrupted_unverified`), keeps all validated progress and uses only what is left of the budget.
 * A kill or failure after a commit resumes from the saved cursors. Completed pairs are not requested again.
 * A failed tenant stays blocked for the day. Other tenants continue.
-* Exit codes: `1` a failed pair or standing drift, `3` approved scope incomplete, `0` approved scope complete.
-  `0` says nothing about the 242 unapproved pairs.
+* Exit codes: `1` a failed pair or standing drift, `3` approved scope incomplete, `4` approved scope collected but
+  acceptance not ready (a completed non-empty pair has no stable first-page recheck, for example because the budget
+  ran out), `0` approved scope collected and verified. `0` says nothing about the 242 unapproved pairs.
+  The report's `acceptance` section states `collection_complete`, `verification_complete`, `unverified_pairs` and `ready`.
 * The next day uses a new directory. Compare `vacancies[].posting_id` across the two reports to find new listings.
 
 Request counts in a report are cumulative for the bundle; per-invocation counts are in `request_accounting.invocations`.
@@ -112,6 +114,54 @@ Request counts in a report are cumulative for the bundle; per-invocation counts 
 4. **Same-total drift.** Only the first page is re-read. Drift deeper in the feed is not observable inside the request budget, so no atomic or full-snapshot completeness is ever claimed.
 5. **Vacancy freshness and suitability.** Whether a listing is still open, and eligibility, belong to later function gates.
 6. **Release.** Merge into `main` needs release approval. Exact-head CI is tracked on PR #133.
+
+## Final bounded live acceptance (needs separate owner authorization; not executed)
+
+Scope: `KPMGNederland` / `NL` only, one new private bundle, **at most 5 GET attempts in total across all
+invocations** (the bundle budget; the sequence below needs 3 for a feed of about 200 listings), 1 s minimum interval,
+no redirects, no authentication, no internal postings, no deliberate failures. Run from this worktree at the head
+of PR #133. Use one controlled output directory; a new directory starts a new budget, so do not create another
+one to continue. The historical pilot bundle is incompatible with the current format by design and is retained.
+
+```sh
+cd ~/Local/Projeler/EJS/ejs-function-02-listing-collection
+git fetch -q origin && git status -sb && git rev-parse HEAD      # must equal the head of PR #133
+PY=/Users/cagataybuyuk/europe-job-scan/.venv/bin/python
+export IN="$HOME/Local/Projeler/EJS/.ejs-local/f02-acceptance-inputs"
+export OUT="$HOME/Local/Projeler/EJS/.ejs-local/f02-acceptance-$(date +%Y%m%d)"   # must not exist yet
+
+# 0. Offline: private inputs (public tenant names and synthetic criteria only)
+mkdir -m 700 "$IN" && PYTHONPATH=src:. $PY - <<'PYEOF'
+import os
+from pathlib import Path
+from ejs.services.expansion_replay import RESEARCH
+from tests.unit.phase1a_support import CRITERIA_YAML
+d = Path(os.environ["IN"])
+(d / "scope.csv").write_text("Employer,Primary Market,Reference URL\n" + "".join(
+    f"{n},Public research scope,https://jobs.smartrecruiters.com/{t}\n" for n, t, _, _ in RESEARCH), encoding="utf-8")
+(d / "criteria.yaml").write_text(CRITERIA_YAML, encoding="utf-8")
+PYEOF
+
+RUN="PYTHONPATH=src $PY scripts/shadow_discovery.py --watchlist $IN/scope.csv --criteria $IN/criteria.yaml --out-dir $OUT --expansion-live"
+
+# 1. First invocation, cap 2 (one page; the pair stays pending). Expected exit 3.
+eval "$RUN --expansion-init --expansion-max-pages 2"; echo "exit=$?"
+# 2. Resume, cap 3 (second page and the first-page recheck). Expected exit 0 and acceptance=ready.
+eval "$RUN --expansion-max-pages 3"; echo "exit=$?"
+# 3. Zero-request resume. Expected exit 0, requests unchanged, no new invocation.
+eval "$RUN --expansion-max-pages 3"; echo "exit=$?"
+# 4. Offline read-only verification of the durable evidence and the W2 projection. Expected exit 0.
+PYTHONPATH=src $PY scripts/function02_acceptance_check.py --bundle-dir "$OUT" --expect-invocations 2; echo "exit=$?"
+```
+
+Expected evidence: 3 requests, all HTTP 200 on `country=nl` URLs, two invocations plus no third, stable recheck,
+`acceptance.ready: true`, every listing unique and equal to the declared total, projection excludes no row, W2
+candidates `missing_evidence` and non-executable. The check prints counts and status codes only.
+
+Stop and report, without retrying, when: any exit code differs from the expected one; any request is not HTTP 200;
+exit `1` (failed pair or drift); exit `4` after step 2; the feed total needs more pages than the budget allows
+(exit `3` after step 2); the check script prints any `FAIL`. Do not start a second bundle to finish the work. A true
+multi-day acceptance needs a next-day run and is not claimed by this test.
 
 ## Validation
 
