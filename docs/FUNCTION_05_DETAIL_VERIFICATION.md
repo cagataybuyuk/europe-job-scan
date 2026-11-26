@@ -77,6 +77,29 @@ reviewed priority. A test (`test_priority_order_wins_over_the_w2_score_sort`) pi
    `evidence_origin`: `live_employer_response` (real, `function06_eligible: true`) or `offline_replay_synthetic` (never
    real evidence, `function06_eligible: false`, next step says so).
 
+### Geographic scope and versioned evidence (SUITABILITY-1.2)
+
+For new live runs, `prepare` must receive explicit `--pilot-country ISO2` arguments
+(repeat for each approved country, e.g. `--pilot-country NL --pilot-country IE`).
+Only uppercase codes supported by F04's country canonicalizer are accepted; a
+country must also be configured in the approved criteria to qualify a listing.
+The complete nonempty provenance country set must be inside the selected scope.
+Unknown, mixed outside-scope and unconfigured provenance are skipped for this
+pilot, not removed from the F04 report. Filtering precedes high/medium window
+selection; scoped counts describe the filtered window population. The sorted
+scope and exclusion count are part of the allowlist digest. New live CLI runs
+refuse missing scope even with an owner-quoted digest. Unscoped preparation is
+offline-only.
+
+F04 policy 1.2 changes title normalization and F05 now checks complete report
+reproduction. Historical policy 1.1 reports and approvals remain tied to their
+original exact code, source bytes, criteria and allowlist. Do not edit their
+policy version, recalculate their approval, overwrite evidence or reissue a live
+request to migrate them. To reproduce historical reassessments, use the
+original pinned compatible code in a separate offline worktree; preserve the
+original inputs and use a separate output directory. A fresh 1.2 evaluation
+requires new lineage and review, not reuse of an earlier approval.
+
 ### Single-use budget, input lineage and attempt evidence (pre-live review fixes)
 
 * **Budget.** `--live` needs `--budget-dir` (a persistent owner-only directory, separate from `--out-dir`). Before any
@@ -150,7 +173,7 @@ for that file at the Function 02 handoff (not a value computed now from the file
 F02_REPORT="$HOME/Local/Projeler/EJS/.ejs-local/function02-acceptance-20261126/<file passed to function04 --report>"
 F02_SHA="<recorded SHA-256 of that file>"
 cd ~/Local/Projeler/EJS/ejs-function-05-detail-verification && PYTHONPATH=src /Users/cagataybuyuk/europe-job-scan/.venv/bin/python \
-  scripts/function05_detail_verification.py prepare \
+  scripts/function05_detail_verification.py prepare --pilot-country NL \
   --f04-report "$HOME/Local/Projeler/EJS/.ejs-local/f04-suitability-20261126-125406/suitability-report.json" \
   --criteria "$HOME/Local/Projeler/EJS/.ejs-local/w1-pilot/criteria.approved.yaml" \
   --expected-criteria-sha256 57faeefb94441abe9f659f8ce636b35c42cbe1b2411e67035ef296d485191f73 \
@@ -250,7 +273,7 @@ classification, never in `candidates`, never application authority).
 
 ### Offline reassessment of previously collected live evidence (no request)
 
-`reassess` re-reads the saved bodies of a finished live run, checks every body's SHA-256 against the fsynced journal and the
+Use the exact code version compatible with the original F04 report and allowlist (see versioned evidence above). `reassess` re-reads the saved bodies of a finished live run, checks every body's SHA-256 against the fsynced journal and the
 evidence manifest, and applies the current extraction and policy. It has no carrier, makes no request, never touches the
 budget, and only reads the original directory; its output must go to a different directory. Output files
 (`reassessed-verification-report.json`, `reassessed-f06-handoff.json`) are labelled
@@ -284,7 +307,7 @@ Employer-confirmed autonomous applications remain 0.
 
 The original high-priority selection and its digest are unchanged when no offset is provided.
 To preview a later bounded medium-priority group from the same original F04 report, use
-`prepare --medium-offset 0` with the original pinned inputs and a new owner-only output directory.
+`prepare --medium-offset 0 --pilot-country NL` (substitute the actual approved scope) with the original pinned inputs and a new owner-only output directory.
 The offset is zero-based within `preliminary_medium` rows in F04 priority order. Each window contains
 at most five rows; an unbindable row is reported and is not replaced outside the window.
 The chosen offset and targets are included in the approval digest. Do not relabel or edit F04 rows.

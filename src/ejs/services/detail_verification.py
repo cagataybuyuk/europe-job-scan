@@ -40,7 +40,7 @@ from ejs.services.discovery import DiscoveryError
 from ejs.services.execution_manifest import validate_apply_url
 from ejs.services.http_carrier import HttpCarrier
 from ejs.services.suitability import (AUTHORITY as F04_AUTHORITY, ROW_FIELDS, SCHEMA as F04_SCHEMA, evaluate_report,
-                                      canonical_sha256)
+                                      canon_country, canonical_sha256)
 from ejs.services import language_policy as lp
 from ejs.services.suitability_evidence import (VacancyDetail, detail_from_smartrecruiters, extract_detail_evidence,
                                                html_to_text)
@@ -185,7 +185,7 @@ def build_allowlist(f04_report: Any, *, f04_report_sha256: str, lineage: Mapping
     if pilot_countries is not None:
         if (not isinstance(pilot_countries, list) or not pilot_countries
                 or any(not isinstance(code, str) or not re.fullmatch(r"[A-Z]{2}", code)
-                       for code in pilot_countries)
+                       or canon_country(code) != code for code in pilot_countries)
                 or len(set(pilot_countries)) != len(pilot_countries)):
             raise DetailVerificationError("PILOT_COUNTRIES_INVALID")
         pilot_countries = sorted(pilot_countries)

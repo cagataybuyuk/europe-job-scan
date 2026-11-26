@@ -1523,7 +1523,7 @@ def test_scoped_medium_window_and_canonical_scope_order():
     assert allow == build_allowlist(f04, pilot_countries=["IE", "NL"], **kwargs)
 
 
-@pytest.mark.parametrize("scope", [[], ["nl"], ["NL", "NL"], ["Netherlands"], "NL", [None]])
+@pytest.mark.parametrize("scope", [[], ["nl"], ["NL", "NL"], ["Netherlands"], "NL", [None], ["ZZ"], ["NL", "ZZ"]])
 def test_invalid_pilot_scope_fails_closed(scope):
     f04, _ = world()
     with pytest.raises(DetailVerificationError, match="PILOT_COUNTRIES_INVALID"):
