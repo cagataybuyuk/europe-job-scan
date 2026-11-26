@@ -31,6 +31,9 @@ RULE = criteria().rule_version
 F04_SHA = "b" * 64
 F02_FILE_SHA = "a" * 64
 NOW = datetime(2026, 11, 26, 12, 0, 0, tzinfo=timezone.utc)
+EN_DESCRIPTION = ("<p>In this role you will work with our clients and the delivery team to define the scope of the project, "
+                  "and you will be responsible for the quality of the results that we deliver to them.</p>"
+                  "<ul><li>Run workshops.</li><li>Write specifications.</li></ul>")
 APPLY_TEXT = ("<p>Visa sponsorship is available.</p><p>Working language is English.</p>"
               "<p>Salary: €4,500 per month net.</p>")
 
@@ -84,10 +87,10 @@ def world(highs: int = 5, *, extra: list[dict] | None = None) -> tuple[dict, dic
 
 
 def sr(i: int, *, active=True, ref="REQ-1", text=APPLY_TEXT, tenant=TENANT, posting=None, posting_url="default",
-       qualifications="<ul><li>You must have 3 years of ERP experience.</li><li>Dutch is a plus.</li></ul>") -> bytes:
+       description=EN_DESCRIPTION, qualifications="<ul><li>You must have 3 years of ERP experience.</li><li>Dutch is a plus.</li></ul>") -> bytes:
     p = posting or pid(i)
     data = {"id": p, "company": {"identifier": tenant}, "active": active,
-            "jobAd": {"sections": {"jobDescription": {"text": "<ul><li>Run workshops.</li><li>Write specifications.</li></ul>"},
+            "jobAd": {"sections": {"jobDescription": {"text": description},
                                    "qualifications": {"text": qualifications},
                                    "additionalInformation": {"text": text}}}}
     if ref is not None:
@@ -332,7 +335,7 @@ def test_responsibilities_and_mandatory_qualifications_are_employer_wording_only
     f04, allow = world(highs=1)
     _, _, _, ver, _ = run(f04, allow, {url_of(1): ok(sr(1))})
     s = ver["candidates"][0]["sections"]
-    assert s["job_description_lines"] == ["Run workshops.", "Write specifications."]
+    assert s["job_description_lines"][-2:] == ["Run workshops.", "Write specifications."]
     assert s["qualification_lines"] == ["You must have 3 years of ERP experience.", "Dutch is a plus."]
     assert s["mandatory_qualification_lines"] == ["You must have 3 years of ERP experience."]    # "plus" stays optional
     assert s["truncated"] is False
@@ -1008,3 +1011,365 @@ def test_replay_output_is_labelled_synthetic_and_never_function_06_eligible(tmp_
     assert manifest["evidence_origin"] == "offline_replay_synthetic"
     assert all(c["evidence_origin"] == "offline_replay_synthetic" for c in hand["candidates"])
     assert not (base / "budget").exists()                                            # replay never touches a budget
+
+
+# ======================================================================================================
+# Real-evidence extraction and language/sponsorship policy (owner-approved 2026-11-26)
+# ======================================================================================================
+from ejs.services import language_policy as lp                                   # noqa: E402
+from ejs.services.suitability_evidence import VacancyDetail, extract_detail_evidence  # noqa: E402
+
+NL_DESCRIPTION = ("<p>Als consultant ga je aan de slag met onze klanten en het team om de scope van het project te "
+                  "bepalen. Je bent verantwoordelijk voor de kwaliteit van de resultaten die wij aan hen leveren en "
+                  "je werkt samen met het hele team aan een mooie oplossing voor de klant.</p>")
+NL_QUALIFICATIONS = ("<ul><li>Je hebt een afgeronde WO master (MSc) in bedrijfskunde of informatica.</li>"
+                     "<li>Je hebt minimaal 3 jaar relevante werkervaring.</li>"
+                     "<li>Je spreekt vloeiend Nederlands en minimaal C1 Engels.</li>"
+                     "<li>Ervaring met Dynamics 365 is een pré.</li></ul>")
+NL_INFO = "<p>Bruto salaris: € 4.500 - € 6.000 per maand op basis van 40 uur.</p>"
+NL_SPONSOR_YES = "<p>Wij bieden visumsponsoring voor kennismigranten.</p>"
+NL_SPONSOR_NO = "<p>Wij bieden geen visumsponsoring.</p>"
+EN_INFO = "<p>Working language is English.</p>"
+
+
+def nl(i: int, info: str = NL_INFO, *, qualifications: str = NL_QUALIFICATIONS) -> bytes:
+    return sr(i, text=info, description=NL_DESCRIPTION, qualifications=qualifications)
+
+
+def en(i: int, info: str = EN_INFO) -> bytes:
+    return sr(i, text=info, qualifications="<ul><li>You must have 3 years of experience.</li></ul>")
+
+
+def decide_for(raw: bytes, *, highs: int = 1):
+    f04, allow = world(highs=highs)
+    responses = {url_of(i): ok(raw if i == 1 else en(i)) for i in range(1, highs + 1)}
+    _, _, _, verification, _ = run(f04, allow, responses)
+    return by_posting(verification)[pid(1)], verification
+
+
+def ev(text: str):
+    return extract_detail_evidence(VacancyDetail("Acme", "1", True, text, "d" * 64))
+
+
+# ---- A. Dutch evidence extraction ----------------------------------------------------------------------
+def test_dutch_gross_monthly_salary_range_and_number_formatting_are_extracted_with_quote():
+    c = ev("Bruto salaris: € 4.500 - € 6.000 per maand op basis van 40 uur.").compensation
+    assert (c["currency"], c["monthly_min"], c["monthly_max"], c["basis"]) == ("EUR", 4500.0, 6000.0, "gross")
+    assert "4.500" in c["quote"]
+    c = ev("Salaris tussen €4.200,- en €5.600,- bruto per maand.").compensation
+    assert (c["monthly_min"], c["monthly_max"], c["basis"]) == (4200.0, 5600.0, "gross")
+    c = ev("Jaarsalaris € 60.000 bruto per jaar.").compensation
+    assert (c["monthly_min"], c["monthly_max"], c["period_stated"]) == (5000.0, 5000.0, "year")
+
+
+def test_dutch_salary_never_infers_net_and_ignores_allowances_or_missing_period():
+    assert ev("Salaris € 4.500 per maand.").compensation["basis"] == "unspecified"      # gross is not assumed either
+    assert ev("Netto salaris € 3.200 per maand.").compensation["basis"] == "net"
+    assert ev("Reiskostenvergoeding € 150 per maand.").compensation is None
+    assert ev("Salaris € 4.500.").compensation is None                                  # no period: Unknown
+
+
+def test_dutch_language_requirements_with_cefr_level_and_original_quote():
+    e = ev("Je spreekt vloeiend Nederlands en minimaal C1 Engels.")
+    assert e.mandatory_languages == ("dutch", "english") and e.language_levels == {"english": "C1"}
+    assert "vloeiend Nederlands" in e.quotes["mandatory_language:dutch"]
+    assert ev("Engels op C1-niveau is vereist.").language_levels == {"english": "C1"}
+
+
+def test_dutch_language_preference_negation_and_alternatives_stay_unknown():
+    for text in ("Nederlands is een pré.", "Nederlands is niet vereist.", "Nederlands of Engels is vereist.",
+                 "Bij voorkeur spreek je vloeiend Nederlands."):
+        e = ev(text)
+        assert e.mandatory_languages == (), text                       # never promoted to a mandatory language
+    assert ev("Je spreekt vloeiend Nederlands; Engels is een pré.").mandatory_languages == ("dutch",)
+
+
+def test_experience_and_education_requirements_distinguish_mandatory_from_preferred():
+    e = ev("Je hebt een afgeronde WO master (MSc) in bedrijfskunde.\nJe hebt minimaal 3 jaar relevante werkervaring.")
+    assert [(x["min_years"], x["kind"]) for x in e.experience_requirements] == [(3, "mandatory")]
+    assert [(x["level"], x["kind"], x["completed_stated"]) for x in e.education_requirements] == \
+        [("wo_master", "mandatory", True)]
+    assert "minimaal 3 jaar" in e.experience_requirements[0]["quote"]
+    e = ev("Bij voorkeur 5 jaar ervaring met Dynamics. Een afgeronde HBO opleiding is een pré.")
+    assert [(x["min_years"], x["kind"]) for x in e.experience_requirements] == [(5, "preferred")]
+    assert e.education_requirements[0]["kind"] == "preferred"
+    e = ev("A completed master's degree is required. At least 5 years of relevant experience.")
+    assert e.education_requirements[0]["level"] == "master"        # WO / MSc is claimed only when the posting says so
+    assert e.experience_requirements[0]["min_years"] == 5
+    assert ev("We are 5 years old and our office has 3 floors.").experience_requirements == ()
+
+
+def test_dutch_sponsorship_is_explicit_only_hedged_or_contradictory_is_unknown_or_contradiction():
+    assert ev("Wij bieden visumsponsoring voor kennismigranten.").explicit_sponsorship_offered
+    assert ev("Wij bieden geen visumsponsoring.").explicit_no_sponsorship
+    hedged = ev("Visumsponsoring is mogelijk, tenzij de functie kritisch is.")
+    assert not hedged.explicit_sponsorship_offered and "sponsorship" in hedged.hedged
+    both = ev("Wij bieden visumsponsoring. Wij bieden geen visumsponsoring.")
+    assert lp.sponsorship_status(both) == "contradictory"
+    assert lp.sponsorship_status(ev("Wij zoeken een collega.")) == "unknown"
+
+
+# ---- B. advertisement language is read from the body, never the title ----------------------------------
+def test_advertisement_language_detection_uses_the_body_and_never_calls_mixed_text_non_english():
+    en_text = ("In this role you will work with the team and our clients to define the scope of the project and you "
+               "will be responsible for the quality of the results that we deliver to them.")
+    nl_text = ("Als consultant ga je aan de slag met onze klanten en het team om de scope van het project te bepalen "
+               "en je bent verantwoordelijk voor de kwaliteit van de resultaten die wij aan hen leveren.")
+    assert lp.detect_ad_language(en_text)["status"] == "english"
+    assert lp.detect_ad_language(nl_text)["status"] == "non_english"
+    assert lp.detect_ad_language(nl_text)["dominant_non_english"] == "dutch"
+    assert lp.detect_ad_language(en_text + " " + nl_text)["status"] == "multilingual_including_english"
+    assert lp.detect_ad_language("Consultant")["status"] == "undetermined"          # thin evidence, e.g. a title
+    assert lp.detect_ad_language(nl_text[:60] + " the team")["status"] == "undetermined"   # mixed but thin
+
+
+# ---- C. the owner-approved matrix ---------------------------------------------------------------------
+def test_matrix_covers_every_cell_exactly_as_approved():
+    expected = {("english", "offered"): "evaluate", ("english", "unknown"): "evaluate",
+                ("english", "unavailable"): "exclude_existing_k2",
+                ("non_english", "offered"): "watchlist", ("non_english", "unknown"): "policy_exclusion",
+                ("non_english", "unavailable"): "exclude_existing_k2",
+                ("multilingual_including_english", "offered"): "evaluate",
+                ("multilingual_including_english", "unknown"): "evaluate",
+                ("multilingual_including_english", "unavailable"): "exclude_existing_k2",
+                ("undetermined", "offered"): "review", ("undetermined", "unknown"): "review",
+                ("undetermined", "unavailable"): "exclude_existing_k2"}
+    assert {k: v[0] for k, v in lp.MATRIX.items()} == expected
+    assert lp.decide("english", "unknown")["policy_version"] == lp.POLICY_VERSION == "EJS-LANG-SPONSOR-POLICY-1.0"
+
+
+def test_english_advertisement_with_unknown_sponsorship_is_evaluated_not_policy_excluded():
+    c, _ = decide_for(en(1))
+    assert c["language_policy"]["action"] == "evaluate" and c["verdict"]["status"] != "policy_excluded"
+    assert c["posting_evidence"]["advertisement_language"]["status"] == "english"
+
+
+def test_non_english_with_unknown_sponsorship_is_a_policy_exclusion_distinct_from_incompatibility():
+    c, v = decide_for(sr(1, text="<p>Salaris wordt besproken.</p>", description=NL_DESCRIPTION,
+                         qualifications="<ul><li>Je hebt minimaal 3 jaar werkervaring.</li></ul>"))
+    assert c["language_policy"]["action"] == "policy_exclusion"
+    assert c["verdict"]["status"] == "policy_excluded"
+    assert c["verdict"]["reasons"] == ["language_policy:non_english_advertisement_sponsorship_unknown"]
+    assert v["verdict_counts"]["confirmed_incompatible"] == 0 and v["verdict_counts"]["policy_excluded"] == 1
+    kinds = [h["kind"] for h in v["history_records"]]
+    assert kinds == ["policy_exclusion"]                                   # retained, never a candidate incompatibility
+
+
+def test_non_english_with_explicit_sponsorship_goes_to_the_watchlist_with_full_record():
+    c, v = decide_for(nl(1, NL_SPONSOR_YES + NL_INFO))
+    assert c["verdict"]["status"] == lp.WATCHLIST == "foreign_language_sponsorship_watchlist"
+    assert v["verdict_counts"][lp.WATCHLIST] == 1
+    (rec,) = v["watchlist_records"]
+    assert rec["identity"] == f"smartrecruiters:global:{TENANT}:{pid(1)}"
+    assert rec["employer"] == "Acme" and rec["position"] == "Senior Business Analyst" and rec["country"] == ["NL"]
+    assert rec["advertisement_language"]["status"] == "non_english"
+    assert rec["mandatory_working_languages"] == ["dutch", "english"]            # separate from the advertisement language
+    assert rec["sponsorship_evidence"]["status"] == "offered" and "visumsponsoring" in rec["sponsorship_evidence"]["quote"]
+    assert rec["source_url"] == f"https://jobs.smartrecruiters.com/{TENANT}/{pid(1)}"
+    assert rec["observed_at"] and rec["policy_version"] == lp.POLICY_VERSION
+
+
+def test_non_english_with_explicit_no_sponsorship_is_excluded_under_the_existing_policy():
+    c, v = decide_for(nl(1, NL_SPONSOR_NO + NL_INFO))
+    assert c["language_policy"]["action"] == "exclude_existing_k2"
+    assert c["verdict"]["status"] == "confirmed_incompatible"
+    assert not v["watchlist_records"]
+
+
+def test_multilingual_advertisement_including_english_is_evaluated():
+    both = sr(1, text=EN_INFO, description=EN_DESCRIPTION + NL_DESCRIPTION)
+    c, _ = decide_for(both)
+    assert c["posting_evidence"]["advertisement_language"]["status"] == "multilingual_including_english"
+    assert c["language_policy"]["action"] == "evaluate" and c["verdict"]["status"] != "policy_excluded"
+    assert c["verdict"]["status"] != lp.WATCHLIST
+
+
+def test_undetermined_language_is_reviewed_never_excluded_or_confirmed_non_english():
+    thin = sr(1, text="<p>Consultant.</p>", description="<p>Consultant Amsterdam.</p>", qualifications="<p>Ja.</p>")
+    c, _ = decide_for(thin)
+    assert c["posting_evidence"]["advertisement_language"]["status"] == "undetermined"
+    assert c["language_policy"]["action"] == "review"
+    assert c["verdict"]["status"] == "incomplete_evidence"
+    assert "language_policy:advertisement_language_undetermined" in c["verdict"]["reasons"]
+
+
+def test_contradictory_sponsorship_is_never_an_explicit_refusal():
+    both = "<p>Wij bieden visumsponsoring.</p><p>Wij bieden geen visumsponsoring.</p>"
+    c, v = decide_for(nl(1, both))
+    assert c["posting_evidence"]["sponsorship"]["status"] == "contradictory"
+    assert c["language_policy"]["action"] == "review"
+    assert c["verdict"]["status"] != "confirmed_incompatible" or not any("sponsorship" in r for r in c["verdict"]["reasons"])
+    assert not v["watchlist_records"]
+    assert lp.decide("english", "contradictory")["action"] == "evaluate"             # F04 contradiction rule asks for review
+
+
+def test_the_title_alone_never_decides_the_advertisement_language():
+    f04 = f04_report([row(1, "Senior Business Analyst Bedrijfsprocessen en Digitalisering")])
+    allow = build_allowlist(f04, f04_report_sha256=F04_SHA, lineage=lineage_of(f04))
+    _, _, _, v, _ = run(f04, allow, {url_of(1): ok(en(1))})
+    assert by_posting(v)[pid(1)]["posting_evidence"]["advertisement_language"]["status"] == "english"
+
+
+# ---- D. watchlist: dedup, first/last seen, reporting suppression, no authority --------------------------
+def _watch_record(day: str, **extra):
+    return {"identity": f"smartrecruiters:global:{TENANT}:{pid(1)}", "employer": "Acme", "position": "BA",
+            "source_url": "https://jobs.smartrecruiters.com/Acme/1", "observed_at": day, "evidence_sha256": "e" * 64,
+            "country": ["NL"], "advertisement_language": {"status": "non_english"}, "policy_version": lp.POLICY_VERSION,
+            "mandatory_working_languages": ["dutch"], "sponsorship_evidence": {"status": "offered"}, **extra}
+
+
+def test_watchlist_deduplicates_by_canonical_identity_and_tracks_first_and_last_seen():
+    first = lp.merge_watchlist(None, [_watch_record("2026-11-26T10:00:00Z")])
+    again = lp.merge_watchlist(first, [_watch_record("2026-11-28T10:00:00Z"), _watch_record("2026-11-27T10:00:00Z")])
+    (entry,) = again["entries"].values()
+    assert len(again["entries"]) == 1
+    assert (entry["first_seen"], entry["last_seen"]) == ("2026-11-26T10:00:00Z", "2026-11-28T10:00:00Z")
+    other = _watch_record("2026-11-28T10:00:00Z") | {"identity": f"smartrecruiters:global:{TENANT}:{pid(2)}"}
+    assert len(lp.merge_watchlist(again, [other])["entries"]) == 2
+    with pytest.raises(ValueError):
+        lp.merge_watchlist({"schema": "x", "entries": {}}, [])
+
+
+def test_empty_watchlist_suppresses_the_reporting_section_and_count():
+    assert lp.reporting_section(lp.merge_watchlist(None, [])) == {}
+    f04, allow = world(highs=1)
+    _, carrier, _, v, _ = run(f04, allow, {url_of(1): ok(en(1))})
+    report_doc = build_report(allow, v, carrier, criteria_sha256=SHA, allowlist_sha256=dv.allowlist_digest(allow),
+                              mode="offline_replay", started_at="2026-11-26T12:00:00Z")
+    assert lp.WATCHLIST not in report_doc and "foreign_language_sponsorship_watchlist" not in json.dumps(
+        build_handoff(report_doc))
+
+
+def test_nonempty_watchlist_section_has_count_and_no_application_authority():
+    f04, allow = world(highs=1)
+    _, carrier, _, v, _ = run(f04, allow, {url_of(1): ok(nl(1, NL_SPONSOR_YES + NL_INFO))})
+    doc = build_report(allow, v, carrier, criteria_sha256=SHA, allowlist_sha256=dv.allowlist_digest(allow),
+                       mode="offline_replay", started_at="2026-11-26T12:00:00Z")
+    section = doc[lp.WATCHLIST]
+    assert section["count"] == 1 and section["application_queue_authority"] is False
+    handoff = build_handoff(doc)
+    assert handoff[lp.WATCHLIST]["count"] == 1
+    assert handoff["candidates"] == [] and handoff["first_candidate_for_review"] is None      # never in the queue
+    assert handoff["executable"] is False and all(v is False for k, v in handoff["authority"].items()
+                                                  if k != "label_is_not_authority")
+
+
+def test_policy_exclusion_history_keeps_every_reason_and_never_shrinks():
+    rec = {"identity": "i", "employer": "Acme", "position": "P", "source_url": "u", "observed_at": "2026-11-26T10:00:00Z",
+           "evidence_sha256": "e" * 64, "kind": "policy_exclusion", "reasons": ["a"], "country": [],
+           "policy_version": lp.POLICY_VERSION, "advertisement_language_status": "non_english"}
+    one = lp.merge_history(None, [rec])
+    two = lp.merge_history(one, [rec | {"observed_at": "2026-11-27T10:00:00Z", "evidence_sha256": "f" * 64, "reasons": ["a", "b"]}])
+    again = lp.merge_history(two, [rec])
+    (entry,) = again["entries"].values()
+    assert len(entry["history"]) == 2 and entry["first_seen"] < entry["last_seen"]
+    assert again == lp.merge_history(again, [rec])                                    # idempotent
+
+
+# ---- E. Dutch evidence reaches the report; scoring inputs, criteria and weights are untouched -----------
+def test_dutch_posting_evidence_is_reported_with_quotes_and_scoring_is_unchanged():
+    c, _ = decide_for(nl(1, NL_SPONSOR_YES + NL_INFO))
+    pe = c["posting_evidence"]
+    assert pe["compensation"]["monthly_min"] == 4500.0 and pe["compensation"]["basis"] == "gross"
+    assert pe["mandatory_working_languages"] == ["dutch", "english"] and pe["language_levels"] == {"english": "C1"}
+    assert [(e["min_years"], e["kind"]) for e in pe["experience_requirements"]] == [(3, "mandatory")]
+    assert pe["education_requirements"][0]["level"] == "wo_master"
+    assert "mandatory_language:dutch" in pe["language_quotes"]
+    approved = criteria()
+    assert approved.rule_version == RULE and sha256(criteria_text().encode()).hexdigest() == SHA   # artifact unchanged
+
+
+def test_policy_module_is_not_a_scoring_or_application_module():
+    imports = [line for line in Path(lp.__file__).read_text().splitlines() if line.startswith(("import ", "from "))]
+    assert imports == ["from __future__ import annotations", "import re", "from collections.abc import Mapping",
+                       "from typing import Any"]                       # pure: no scoring, carrier, network or file access
+
+
+# ---- F. offline reassessment of previously collected live evidence --------------------------------------
+def _live_run(cli, base, common, capsys, bodies: dict):
+    allow_path, digest = approved_live(cli, base, common, capsys)
+    net = Net({url_of(i): ok(raw) for i, raw in bodies.items()})
+    out = base / "live-out"
+    assert cli.main(live_argv(common, allow_path, digest, base / "budget", out), **kwargs(net)) == 0
+    capsys.readouterr()
+    return allow_path, out, net
+
+
+def _tree_digest(root: Path) -> dict:
+    return {str(p.relative_to(root)): sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_offline_reassessment_rereads_saved_bodies_without_any_request_or_budget_change(tmp_path, files, capsys):
+    base, common, _ = files
+    cli = load_cli()
+    bodies = {1: nl(1, NL_SPONSOR_YES + NL_INFO), 2: nl(2, "<p>Salaris wordt besproken.</p>", qualifications="<ul><li>Je hebt minimaal 3 jaar werkervaring.</li></ul>"), 3: nl(3, NL_SPONSOR_NO),
+              4: en(4), 5: sr(5, text="<p>Consultant.</p>", description="<p>Consultant.</p>", qualifications="<p>Ja.</p>")}
+    allow_path, out, net = _live_run(cli, base, common, capsys, bodies)
+    before_out, before_budget = _tree_digest(out), _tree_digest(base / "budget")
+    calls_before = len(net.calls)
+    history, redo = base / "history", base / "reassessed"
+    argv = ["reassess", *common, "--allowlist", str(allow_path), "--evidence-dir", str(out),
+            "--history-dir", str(history), "--out-dir", str(redo)]
+    assert cli.main(argv, **kwargs(Net({}))) == 0                          # empty transport: any GET would KeyError/fail
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["mode"] == "derived_offline_reassessment" and summary["new_requests"] == 0
+    assert summary["evidence_origin"] == "derived_offline_analysis_of_live_evidence"
+    assert len(net.calls) == calls_before
+    assert _tree_digest(out) == before_out and _tree_digest(base / "budget") == before_budget   # originals preserved
+    by = {c["posting_id"]: c for c in summary["candidates"]}
+    assert by[pid(1)]["advertisement_language"] == "non_english" and by[pid(1)]["status"] == lp.WATCHLIST
+    assert by[pid(1)]["compensation"] and by[pid(1)]["experience"] == [[3, "mandatory"]]
+    assert by[pid(1)]["education"] == [["wo_master", "mandatory"]]
+    assert by[pid(2)]["status"] == "policy_excluded" and by[pid(3)]["sponsorship"] == "unavailable"
+    assert by[pid(4)]["advertisement_language"] == "english"
+    assert by[pid(5)]["advertisement_language"] == "undetermined"
+    assert summary["foreign_language_sponsorship_watchlist_count"] == 1 and summary["policy_exclusions"] >= 1
+    report_doc = json.loads((redo / "reassessed-verification-report.json").read_text())
+    assert report_doc["evidence_origin"] == "derived_offline_analysis_of_live_evidence"
+    assert report_doc["derived_from"]["new_requests"] == 0 and report_doc["derived_from"]["budget_touched"] is False
+    assert "derived offline analysis of previously collected live evidence" in report_doc["derived_from"]["note"]
+    assert report_doc["requests"]["attempted"] == 0 and report_doc["requests"]["log"] == []
+    assert json.loads((history / "foreign-language-sponsorship-watchlist.json").read_text())["entries"]
+    assert (history / "policy-exclusion-history.json").is_file()
+    # running it again neither duplicates the watchlist nor refuses to merge history
+    assert cli.main([*argv[:-1], str(base / "reassessed2")], **kwargs(Net({}))) == 0
+    capsys.readouterr()
+    assert len(json.loads((history / "foreign-language-sponsorship-watchlist.json").read_text())["entries"]) == 1
+    assert stat.S_IMODE(os.stat(redo / "reassessed-verification-report.json").st_mode) == 0o600
+
+
+def test_reassessment_refuses_tampered_bodies_synthetic_sources_and_unsafe_output(tmp_path, files, capsys):
+    base, common, _ = files
+    cli = load_cli()
+    allow_path, out, _ = _live_run(cli, base, common, capsys, {i: en(i) for i in range(1, 6)})
+    args = lambda evidence, dest: ["reassess", *common, "--allowlist", str(allow_path), "--evidence-dir", str(evidence),
+                                   "--history-dir", str(base / "h"), "--out-dir", str(dest)]
+    assert cli.main(args(out, out / "inside"), **kwargs(Net({}))) == 2                  # output must be separate
+    victim = next((out / "raw").iterdir())
+    victim.write_bytes(victim.read_bytes() + b" ")
+    assert cli.main(args(out, base / "r1"), **kwargs(Net({}))) == 2                    # SHA-256 no longer matches
+    assert not (base / "h").exists() or not any((base / "h").iterdir())
+    synthetic = base / "synthetic"
+    replay = base / "replay"
+    replay.mkdir()
+    for i in range(1, 6):
+        (replay / f"{TENANT}__{pid(i)}.json").write_bytes(en(i))
+    assert cli.main(["verify", *common, "--allowlist", str(allow_path), "--replay-dir", str(replay),
+                     "--out-dir", str(synthetic)], now=fake_now, clock=Clock(), sleep=lambda s: None) == 0
+    assert cli.main(args(synthetic, base / "r2"), **kwargs(Net({}))) == 2              # synthetic is not live evidence
+    assert cli.main(["verify", *common, "--allowlist", str(allow_path), "--replay-dir", str(replay),
+                     "--history-dir", str(base / "h2"), "--out-dir", str(base / "r3")], now=fake_now,
+                    clock=Clock(), sleep=lambda s: None) == 2                          # synthetic never feeds history
+
+
+def test_nothing_in_the_language_policy_path_grants_application_authority(tmp_path, files, capsys):
+    base, common, _ = files
+    cli = load_cli()
+    allow_path, out, _ = _live_run(cli, base, common, capsys, {i: nl(i, NL_SPONSOR_YES + NL_INFO) for i in range(1, 6)})
+    assert cli.main(["reassess", *common, "--allowlist", str(allow_path), "--evidence-dir", str(out),
+                     "--history-dir", str(base / "h"), "--out-dir", str(base / "r")], **kwargs(Net({}))) == 0
+    capsys.readouterr()
+    handoff = json.loads((base / "r" / "reassessed-f06-handoff.json").read_text())
+    assert handoff["candidates"] == [] and handoff["first_candidate_for_review"] is None
+    assert handoff[lp.WATCHLIST]["count"] == 5 and handoff[lp.WATCHLIST]["application_queue_authority"] is False
+    assert handoff["executable"] is False and handoff["submit_authorized"] is False

@@ -15,6 +15,12 @@ digest and per detail URL, created before any request, never released automatica
 attempt stays consumed and is never retried). Every attempt is journaled (fsync) before and after the request.
 Replay output is labelled synthetic and is never Function 06 eligible.
 
+``reassess``  Offline. Re-analyses the response bodies a live run already collected (bodies are hash-checked against the
+             fsynced journal and manifest), with the current extraction and the versioned language/sponsorship policy.
+             No request, no carrier, no budget; the original directory is only read. Output is labelled
+             ``derived_offline_analysis_of_live_evidence``. Watchlist and exclusion history are merged into
+             ``--history-dir`` (deduplicated by canonical opportunity identity, never shrinking).
+
 Output stays outside the repository (0700 directory, 0600 files, no overwrite). Exit codes: 0 written, 2 refused.
 """
 from __future__ import annotations
@@ -31,9 +37,11 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from ejs.services.criteria_loader import CriteriaError, parse_criteria_text
-from ejs.services.detail_verification import (DETAIL_HOST, DetailVerificationError, allowlist_digest, build_allowlist,
-                                               build_handoff, build_report, check_lineage, request_details,
-                                               reserve_budget, verify_allowlist, verify_details)
+from ejs.services import language_policy as lp
+from ejs.services.detail_verification import (DETAIL_HOST, DetailVerificationError, NoRequests, allowlist_digest,
+                                               build_allowlist, build_handoff, build_report, check_lineage,
+                                               observations_from_saved, request_details, reserve_budget,
+                                               verify_allowlist, verify_details)
 from ejs.services.expansion_shadow import SCHEMA as EXPANSION_SCHEMA, project_for_application_bridge
 from ejs.services.http_carrier import HttpCarrier, ReplayCarrier, urllib_transport
 from ejs.services.owner_only_files import OutputDirError, prepare_output_dir, write_private_file
@@ -43,6 +51,9 @@ REPORT_NAME = "detail-verification-report.json"
 HANDOFF_NAME = "f06-handoff.json"
 EVIDENCE_NAME = "evidence-manifest.json"
 JOURNAL_NAME = "attempt-journal.jsonl"
+WATCHLIST_NAME = "foreign-language-sponsorship-watchlist.json"
+HISTORY_NAME = "policy-exclusion-history.json"
+REASSESS_NAMES = ("reassessed-verification-report.json", "reassessed-f06-handoff.json")
 
 
 def _dump(value) -> bytes:
@@ -129,6 +140,81 @@ def _evidence_manifest(observations: list[dict], origin: str) -> bytes:
     return _dump({"schema": "EJS-DETAIL-EVIDENCE-1", "evidence_origin": origin, "entries": entries})
 
 
+def _update_history(history_dir: Path, verification: dict) -> dict:
+    """Merge this run into the owner-only watchlist and exclusion history; returns the accumulated watchlist."""
+    directory = prepare_output_dir(history_dir)
+    stores = {}
+    for name, merge, records in ((WATCHLIST_NAME, lp.merge_watchlist, verification["watchlist_records"]),
+                                 (HISTORY_NAME, lp.merge_history, verification["history_records"])):
+        path = directory / name
+        existing = json.loads(path.read_bytes()) if path.is_file() and not path.is_symlink() else None
+        stores[name] = merge(existing, records)
+        write_private_file(directory, name, _dump(stores[name]))
+    return stores[WATCHLIST_NAME]
+
+
+def _read_regular(directory: Path, relative: str) -> bytes:
+    path = directory / relative
+    if Path(relative).is_absolute() or ".." in Path(relative).parts or not path.is_file() or path.is_symlink():
+        raise DetailVerificationError("SAVED_EVIDENCE_PATH")
+    return path.read_bytes()
+
+
+def _reassess(args, *, now) -> int:
+    criteria, criteria_sha, f04, f04_sha, projection, lineage = _load_inputs(args)
+    doc = json.loads(args.allowlist.read_bytes())
+    verify_allowlist(doc, f04, f04_report_sha256=f04_sha, lineage=lineage)
+    digest = allowlist_digest(doc)
+    evidence_dir = args.evidence_dir.resolve()
+    out_dir = prepare_output_dir(args.out_dir)
+    if out_dir == evidence_dir or evidence_dir in out_dir.parents or out_dir in evidence_dir.parents:
+        raise DetailVerificationError("OUT_DIR_MUST_BE_SEPARATE_FROM_EVIDENCE_DIR")
+    if any((out_dir / n).exists() for n in REASSESS_NAMES):
+        raise OutputDirError("OUTPUT_EXISTS")
+    sources = {n: (evidence_dir / n).read_bytes() for n in (EVIDENCE_NAME, JOURNAL_NAME, REPORT_NAME)}
+    manifest = json.loads(sources[EVIDENCE_NAME])
+    if manifest.get("evidence_origin") != "live_employer_response":
+        raise DetailVerificationError("SOURCE_EVIDENCE_IS_NOT_A_LIVE_RUN")
+    journal = [json.loads(line) for line in sources[JOURNAL_NAME].decode().splitlines() if line.strip()]
+    if not any(e.get("event") == "run_started" and e.get("allowlist_sha256") == digest for e in journal):
+        raise DetailVerificationError("SOURCE_RUN_NOT_BOUND_TO_THIS_ALLOWLIST")
+    finished = {e["detail_url"]: e for e in journal if e.get("event") == "attempt_finished"}
+    for entry in manifest["entries"]:                       # manifest and journal must agree on every body
+        if (finished.get(entry["detail_url"]) or {}).get("response_sha256") != entry["sha256"]:
+            raise DetailVerificationError("MANIFEST_JOURNAL_MISMATCH")
+    observations = observations_from_saved(doc, journal, lambda rel: _read_regular(evidence_dir, rel))
+    verification = verify_details(projection, observations, criteria, criteria_sha256=criteria_sha,
+                                  expected_criteria_sha256=args.expected_criteria_sha256,
+                                  expected_rule_version=args.expected_rule_version)
+    watch = _update_history(args.history_dir, verification)
+    stamp = now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    derived = {"source_evidence_manifest_sha256": sha256(sources[EVIDENCE_NAME]).hexdigest(),
+               "source_journal_sha256": sha256(sources[JOURNAL_NAME]).hexdigest(),
+               "source_report_sha256": sha256(sources[REPORT_NAME]).hexdigest(),
+               "new_requests": 0, "budget_touched": False, "note": "derived offline analysis of previously collected live evidence"}
+    report = build_report(doc, verification, NoRequests(), criteria_sha256=criteria_sha, allowlist_sha256=digest,
+                          mode="derived_offline_reassessment", started_at=stamp, watchlist_store=watch, derived_from=derived)
+    handoff = build_handoff(report)
+    write_private_file(out_dir, REASSESS_NAMES[0], _dump(report))
+    write_private_file(out_dir, REASSESS_NAMES[1], _dump(handoff))
+    summary = {"mode": "derived_offline_reassessment", "evidence_origin": report["evidence_origin"], "new_requests": 0,
+               "verdicts": report["verdict_counts"],
+               "candidates": [{"posting_id": c["posting_id"], "status": c["verdict"]["status"],
+                               "advertisement_language": (c["posting_evidence"] or {}).get("advertisement_language", {}).get("status"),
+                               "sponsorship": (c["posting_evidence"] or {}).get("sponsorship", {}).get("status"),
+                               "mandatory_working_languages": (c["posting_evidence"] or {}).get("mandatory_working_languages"),
+                               "compensation": ((c["posting_evidence"] or {}).get("compensation") or {}).get("quote"),
+                               "experience": [(e["min_years"], e["kind"]) for e in (c["posting_evidence"] or {}).get("experience_requirements", [])],
+                               "education": [(e["level"], e["kind"]) for e in (c["posting_evidence"] or {}).get("education_requirements", [])],
+                               "score": (c["reevaluation"] or {}).get("score")} for c in report["candidates"]],
+               "policy_exclusions": len(report["policy_exclusions"]),
+               "next_step": handoff["next_step"]}
+    if lp.WATCHLIST in report:
+        summary["foreign_language_sponsorship_watchlist_count"] = report[lp.WATCHLIST]["count"]
+    print(json.dumps(summary, sort_keys=True, indent=1))
+    return 0
+
+
 def _prepare(args) -> int:
     criteria, criteria_sha, f04, f04_sha, projection, lineage = _load_inputs(args)
     allowlist = build_allowlist(f04, f04_report_sha256=f04_sha, lineage=lineage, limit=args.limit)
@@ -155,6 +241,8 @@ def _verify(args, *, live_transport, clock, sleep, now) -> int:
     targets = len(doc["targets"])
     if not targets:
         raise DetailVerificationError("NO_TARGETS")
+    if args.history_dir is not None and not args.live:
+        raise DetailVerificationError("HISTORY_ONLY_FOR_LIVE_OR_DERIVED_EVIDENCE")     # synthetic never enters history
     budget_dir = None
     if args.live:
         if args.approve_allowlist_sha256 != digest:
@@ -187,8 +275,9 @@ def _verify(args, *, live_transport, clock, sleep, now) -> int:
         verification = verify_details(projection, observations, criteria, criteria_sha256=criteria_sha,
                                       expected_criteria_sha256=args.expected_criteria_sha256,
                                       expected_rule_version=args.expected_rule_version)
+        watch = _update_history(args.history_dir, verification) if args.history_dir is not None else None
         report = build_report(doc, verification, carrier, criteria_sha256=criteria_sha, allowlist_sha256=digest,
-                              mode=mode, started_at=started)
+                              mode=mode, started_at=started, watchlist_store=watch)
         handoff = build_handoff(report)
         journal.event({"event": "run_finished", "requests_attempted": carrier.total})
     finally:
@@ -199,6 +288,8 @@ def _verify(args, *, live_transport, clock, sleep, now) -> int:
     first = handoff["first_candidate_for_review"]
     print(json.dumps({"mode": mode, "evidence_origin": origin, "requests_attempted": carrier.total,
                       "requests_approved": targets, "verdicts": report["verdict_counts"],
+                      **({"foreign_language_sponsorship_watchlist_count": report[lp.WATCHLIST]["count"]}
+                         if lp.WATCHLIST in report else {}),
                       "handoff_candidates": len(handoff["candidates"]),
                       "first_candidate_for_review": ({k: first[k] for k in ("tenant", "posting_id", "canonical_url",
                                                                            "requisition_id")} if first else None),
@@ -211,7 +302,7 @@ def main(argv: list[str] | None = None, *, live_transport: Callable = urllib_tra
          now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("prepare", "verify"):
+    for name in ("prepare", "verify", "reassess"):
         p = sub.add_parser(name)
         p.add_argument("--f04-report", type=Path, required=True, help="suitability-report.json from Function 04")
         p.add_argument("--criteria", type=Path, required=True)
@@ -222,17 +313,24 @@ def main(argv: list[str] | None = None, *, live_transport: Callable = urllib_tra
         p.add_argument("--expected-f02-sha256", required=True, help="independently recorded SHA-256 of that file")
         p.add_argument("--out-dir", type=Path, required=True, help="absolute owner-only directory outside the repo")
     sub.choices["prepare"].add_argument("--limit", type=int, default=5)
+    r = sub.choices["reassess"]
+    r.add_argument("--allowlist", type=Path, required=True)
+    r.add_argument("--evidence-dir", type=Path, required=True, help="the original live run's output directory (read only)")
+    r.add_argument("--history-dir", type=Path, required=True, help="persistent owner-only watchlist/exclusion history")
     v = sub.choices["verify"]
     v.add_argument("--allowlist", type=Path, required=True)
     mode = v.add_mutually_exclusive_group(required=True)
     mode.add_argument("--replay-dir", type=Path, help="offline: <tenant>__<posting_id>.json files")
     mode.add_argument("--live", action="store_true", help="read each allowlisted endpoint once (needs the digest)")
     v.add_argument("--approve-allowlist-sha256", help="allowlist_sha256 the owner approved; required with --live")
+    v.add_argument("--history-dir", type=Path, help="persistent owner-only watchlist/exclusion history (live only)")
     v.add_argument("--budget-dir", type=Path, help="persistent owner-only single-use budget directory; required with --live")
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
             return _prepare(args)
+        if args.command == "reassess":
+            return _reassess(args, now=now)
         return _verify(args, live_transport=live_transport, clock=clock, sleep=sleep, now=now)
     except (CriteriaError, DetailVerificationError, OutputDirError, ValueError, OSError) as exc:
         print(f"function05: refused: {type(exc).__name__}: {exc}", file=sys.stderr)

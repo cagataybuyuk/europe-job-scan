@@ -190,8 +190,84 @@ Any HTTP error, redirect, 429/403, body above 5 MB, or unreadable/unbound respon
 budget is never reset automatically; the owner decides after reading `attempt-journal.jsonl`. Function 06 does not start
 from this hand-off.
 
+## Real-evidence extraction and language policy (EJS-LANG-SPONSOR-POLICY-1.0)
+
+Background: the first live pilot returned five valid bodies (HTTP 200, hashes verified, active, identity bound, requisition
+ids present) but all five scored 23, because the Function 04 extractors only understood English employer wording. This
+section is an additive fix; nothing was requested from an employer for it.
+
+### Extraction (`suitability_evidence.py`, additive)
+
+* Dutch salary: euro amounts in Dutch formatting (`4.500`, `4.500,-`, ranges with a dash, `tot` or `en`) with an explicit
+  month or year period and a salary word. Gross stays gross, net stays net, an unmarked amount stays `unspecified`; net is
+  never derived. Allowances, bonuses and amounts without a period stay Unknown.
+* Languages: Dutch wording (`spreekt vloeiend Nederlands`, `minimaal C1 Engels`, `Engels op C1-niveau`) with the CEFR level
+  kept per language (`language_levels`). Preferences (`pré`, `bij voorkeur`, `plus`), negation, conditions and
+  alternatives (`Nederlands of Engels`) are not promoted to a mandatory language.
+* `experience_requirements` and `education_requirements`: minimum years and education level (`wo_master` only when the
+  posting says WO or MSc; a generic master stays `master`), each with the employer quote and a kind of `mandatory`,
+  `preferred`, `conditional` or `stated_unclassified`. These are employer statements only; they are not compared with any
+  candidate fact, so `candidate_for_review` still states that the mandatory-qualification check is not performed.
+* Dutch sponsorship: only explicit offers or refusals count; hedged or conditional wording is Unknown; a posting that makes
+  both statements is contradictory and is never treated as a refusal.
+
+### Policy (`language_policy.py`, versioned separately from the criteria artifact)
+
+Advertisement language (detected from the posting body only, never the title) and mandatory working languages are separate
+fields. Detection uses small stop-word sets; thin or mixed evidence is `undetermined` or
+`multilingual_including_english`, never `non_english`.
+
+| Advertisement language | Sponsorship offered | Sponsorship unknown | Explicitly unavailable |
+|---|---|---|---|
+| english | evaluate | evaluate | exclude (existing K2 rule) |
+| non_english | watchlist | policy exclusion | exclude (existing K2 rule) |
+| multilingual including English | evaluate | evaluate | exclude (existing K2 rule) |
+| undetermined | review | review | exclude (existing K2 rule) |
+
+Contradictory sponsorship is never a refusal: it evaluates for English or multilingual ads (Function 04's contradiction rule
+then asks for review) and is a review otherwise. The approved criteria artifact, scoring weights and thresholds are not
+modified; the policy only decides which verdict a verified posting receives.
+
+New verdict statuses: `policy_excluded` (kept apart from `confirmed_incompatible`; a posting that is both lists the policy
+reason separately in `policy_reasons` and in the history) and `foreign_language_sponsorship_watchlist` (logical
+classification, never in `candidates`, never application authority).
+
+### Watchlist and history (owner-only, `--history-dir`)
+
+* `foreign-language-sponsorship-watchlist.json`: one entry per canonical identity (`ats:region:tenant:posting_id`) with
+  employer, country, position, advertisement language, mandatory working languages, sponsorship evidence (quote), source
+  URL, `first_seen` and `last_seen`. Re-observing never duplicates and never moves `first_seen` later.
+* `policy-exclusion-history.json`: every excluded listing and each distinct reason set, retained; nothing is removed.
+* The report and hand-off carry a `foreign_language_sponsorship_watchlist` section (with `count`) only when it is
+  non-empty; at zero the section is omitted. This is the existing report pipeline, not a new notification system.
+
+### Offline reassessment of previously collected live evidence (no request)
+
+`reassess` re-reads the saved bodies of a finished live run, checks every body's SHA-256 against the fsynced journal and the
+evidence manifest, and applies the current extraction and policy. It has no carrier, makes no request, never touches the
+budget, and only reads the original directory; its output must go to a different directory. Output files
+(`reassessed-verification-report.json`, `reassessed-f06-handoff.json`) are labelled
+`derived_offline_analysis_of_live_evidence`. Synthetic replay output is refused as a source and never feeds the history.
+
+```sh
+cd ~/Local/Projeler/EJS/ejs-function-05-detail-verification && PYTHONPATH=src /Users/cagataybuyuk/europe-job-scan/.venv/bin/python \
+  scripts/function05_detail_verification.py reassess \
+  --f04-report <same as step 1> --criteria <same> --expected-criteria-sha256 <same> --expected-rule-version <same> \
+  --f02-report "$F02_REPORT" --expected-f02-sha256 "$F02_SHA" \
+  --allowlist "$HOME/Local/Projeler/EJS/.ejs-local/f05-allowlist-20261126/detail-allowlist.json" \
+  --evidence-dir "$HOME/Local/Projeler/EJS/.ejs-local/f05-detail-20261126" \
+  --history-dir "$HOME/Local/Projeler/EJS/.ejs-local/f05-policy-history" \
+  --out-dir "$HOME/Local/Projeler/EJS/.ejs-local/f05-reassess-20261126"
+```
+
+The printed summary lists, per posting, the detected advertisement language, sponsorship status, salary evidence,
+experience and education requirements and verdict, plus the policy-exclusion and watchlist counts. The results of the five
+real bodies are not known to this work (private store not readable here); they appear only after the owner runs this command.
+
 ## Status
 
-Function 05 offline acceptance: complete. Live pilot: ready, **not approved, not executed**. Real shortlist, real verdict
-counts and any first candidate for review: not available until the owner runs step 1 (and, after approval, step 2).
+Function 05 offline acceptance: complete, including the language policy and the offline reassessment command. The owner's
+first live pilot returned 5 of 5 HTTP 200 responses; the language-policy work added no request, no budget reset and no
+Function 06 step. Real reassessment results (languages, sponsorship, salary, requirements, watchlist count) are not
+available to this work until the owner runs `reassess`.
 Employer-confirmed autonomous applications remain 0.

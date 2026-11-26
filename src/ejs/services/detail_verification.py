@@ -41,7 +41,9 @@ from ejs.services.execution_manifest import validate_apply_url
 from ejs.services.http_carrier import HttpCarrier
 from ejs.services.suitability import (AUTHORITY as F04_AUTHORITY, ROW_FIELDS, SCHEMA as F04_SCHEMA, evaluate_report,
                                       canonical_sha256)
-from ejs.services.suitability_evidence import VacancyDetail, detail_from_smartrecruiters, html_to_text
+from ejs.services import language_policy as lp
+from ejs.services.suitability_evidence import (VacancyDetail, detail_from_smartrecruiters, extract_detail_evidence,
+                                               html_to_text)
 
 SCHEMA_ALLOWLIST = "EJS-DETAIL-ALLOWLIST-1"
 SCHEMA_REPORT = "EJS-DETAIL-VERIFICATION-1"
@@ -66,7 +68,11 @@ _TENANT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}")
 _MANDATORY = re.compile(r"\b(?:must|required|requires?|mandatory|essential)\b", re.I)
 _OPTIONAL = re.compile(r"\b(?:plus|advantage|preferred|preferably|ideally|nice to have|desirable|bonus|optional|"
                        r"not required|not mandatory|beneficial|an asset)\b", re.I)
-_STATUS_ORDER = {"candidate_for_review": 0, "incomplete_evidence": 1, "confirmed_incompatible": 2}
+WATCHLIST_STATUS = lp.WATCHLIST
+_STATUS_ORDER = {"candidate_for_review": 0, "incomplete_evidence": 1, "confirmed_incompatible": 2,
+                 "policy_excluded": 3, WATCHLIST_STATUS: 4}
+_BASE_STATUSES = ("candidate_for_review", "incomplete_evidence", "confirmed_incompatible")
+LANGUAGE_BLOCKER = "confirmed:blocker:mandatory-language-unmet"
 _CONFIRMED_CLASSES = frozenset({"verified_blocked", "verified_below_threshold"})
 _ALLOWLIST_KEYS = frozenset({"schema", "mode", "executable", "submit_authorized", "authority", "request_policy",
                              "source", "selection", "targets", "approval"})
@@ -74,6 +80,7 @@ _ALLOWLIST_KEYS = frozenset({"schema", "mode", "executable", "submit_authorized"
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 LIVE_ORIGIN, REPLAY_ORIGIN = "live_employer_response", "offline_replay_synthetic"
+DERIVED_ORIGIN = "derived_offline_analysis_of_live_evidence"
 
 
 class DetailVerificationError(ValueError):
@@ -363,6 +370,34 @@ def request_details(allowlist: Mapping[str, Any], carrier: HttpCarrier, *, now: 
     return observations
 
 
+def observations_from_saved(allowlist: Mapping[str, Any], journal: list[Mapping[str, Any]],
+                            read_raw: Callable[[str], bytes]) -> list[dict[str, Any]]:
+    """Rebuild observations from previously collected live evidence. NO request: the saved body is replayed to the
+    W2 observation through a closure and its SHA-256 must equal the one the fsynced journal recorded at receipt."""
+    finished = {e["detail_url"]: e for e in journal if e.get("event") == "attempt_finished"}
+    observations = []
+    for target in allowlist["targets"]:
+        e = finished.get(target["detail_url"])
+        if e is None:
+            raise DetailVerificationError("SAVED_ATTEMPT_MISSING")
+        raw = read_raw(e["stored_as"]) if e.get("stored_as") else None
+        if raw is not None and sha256(raw).hexdigest() != e["response_sha256"]:
+            raise DetailVerificationError("SAVED_EVIDENCE_HASH_MISMATCH")
+        w2: dict[str, Any] = {"tenant": target["tenant"], "posting_id": target["posting_id"]}
+        if raw is not None:
+            def replay(url: str, raw=raw, target=target) -> bytes:
+                if url != target["detail_url"]:
+                    raise DetailVerificationError("REQUEST_NOT_ALLOWLISTED_OR_DUPLICATE")
+                return raw
+            observe_posting_detail(w2, replay)
+        obs = {"target": target, "outcome": e["outcome"], "http_status": e["http_status"], "attempted": 1,
+               "requested_at": e["requested_at"], "observed_at": e["completed_at"], "duration_ms": e["duration_ms"],
+               "response_bytes": e["response_bytes"], "response_sha256": e["response_sha256"], "raw": raw, "w2": w2}
+        obs["facts"] = analyze(obs)
+        observations.append(obs)
+    return observations
+
+
 # ----------------------------------------------------------------------------------------- extraction
 def extract_sections(data: Mapping[str, Any]) -> dict[str, Any]:
     """Employer wording only. ``jobDescription`` and ``qualifications`` lines verbatim; mandatory lines are those
@@ -435,7 +470,8 @@ def analyze(observation: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------------------------------- verdict
-def _verdict(observation: Mapping[str, Any], facts: Mapping[str, Any], entry: Mapping[str, Any] | None) -> dict:
+def _verdict(observation: Mapping[str, Any], facts: Mapping[str, Any], entry: Mapping[str, Any] | None,
+             policy: Mapping[str, str] | None = None) -> dict:
     reasons: list[str] = []
     if observation["raw"] is None:
         out = observation["outcome"]
@@ -450,8 +486,25 @@ def _verdict(observation: Mapping[str, Any], facts: Mapping[str, Any], entry: Ma
     contradictory = "contradiction" in s["reason_codes"] or s["reason_code"] == "contradiction"
     confirmed = [c for c in s["confirmed_incompatibilities"]
                  if c != "confirmed:compensation_below_target" and not (contradictory and c.startswith("confirmed:blocker:"))]
+    action = policy["action"] if policy else "evaluate"
+    if action == "watchlist":
+        # Sponsored foreign-language posting: kept apart from the application queue. A language blocker does not
+        # exclude it (the working languages are recorded); any other confirmed exclusion still does.
+        rest = [c for c in confirmed if c != LANGUAGE_BLOCKER]
+        if rest:
+            return {"status": "confirmed_incompatible", "reasons": rest}
+        return {"status": WATCHLIST_STATUS, "reasons": [f"language_policy:{policy['reason_code']}"],
+                "policy": dict(policy)}
     if confirmed or (not contradictory and s["classification"] in _CONFIRMED_CLASSES):
-        return {"status": "confirmed_incompatible", "reasons": confirmed or [s["classification"]]}
+        out = {"status": "confirmed_incompatible", "reasons": confirmed or [s["classification"]]}
+        if action == "policy_exclusion":
+            out["policy_reasons"] = [f"language_policy:{policy['reason_code']}"]     # both apply; kept distinguishable
+        return out
+    if action == "policy_exclusion":
+        return {"status": "policy_excluded", "reasons": [f"language_policy:{policy['reason_code']}"],
+                "policy": dict(policy)}
+    if action == "review":
+        reasons.append(f"language_policy:{policy['reason_code']}")
     if contradictory:
         reasons.append("contradictory_evidence_requires_review")
     if "confirmed:compensation_below_target" in s["confirmed_incompatibilities"]:
@@ -487,12 +540,36 @@ def verify_details(projection: Any, observations: list[dict[str, Any]], criteria
     if result["criteria"]["approval"] != APPROVED_CRITERIA_STATUS or result["details_rejected"]:
         raise DetailVerificationError("REEVALUATION_REFUSED")
     by_identity = {(r["tenant"], r.get("posting_id")): r for r in result["vacancies"]}
-    candidates = []
+    countries = {(r["tenant"], r.get("posting_id")): sorted({c for c in ((r.get("discovery_evidence") or {}).get("countries") or [])
+                                                             if isinstance(c, str)})
+                 for r in projection["vacancies"]}
+    candidates, watchlist, history = [], [], []
     for obs, fact in zip(observations, facts):
         target = obs["target"]
         entry = by_identity.get((target["tenant"], target["posting_id"]))
-        verdict = _verdict(obs, fact, entry if fact["identity"] == "bound" else None)
-        suit = entry["suitability"] if entry is not None and fact["identity"] == "bound" else None
+        bound = fact["identity"] == "bound"
+        evidence = extract_detail_evidence(fact["vacancy_detail"]) if bound else None
+        posting = _posting_evidence(evidence, fact["vacancy_detail"]) if bound else None
+        policy = lp.decide(posting["advertisement_language"]["status"], posting["sponsorship"]["status"]) if bound else None
+        verdict = _verdict(obs, fact, entry if bound else None, policy)
+        suit = entry["suitability"] if entry is not None and bound else None
+        identity = lp.canonical_identity(target["ats"], target["region"], target["tenant"], target["posting_id"])
+        base = {"identity": identity, "employer": target["company"], "position": target["role"],
+                "source_url": target["canonical_url"], "observed_at": obs["observed_at"],
+                "evidence_sha256": obs["response_sha256"], "policy_version": lp.POLICY_VERSION}
+        if verdict["status"] == lp.WATCHLIST:
+            watchlist.append({**base, "country": countries.get((target["tenant"], target["posting_id"]), []),
+                              "advertisement_language": posting["advertisement_language"],
+                              "mandatory_working_languages": posting["mandatory_working_languages"],
+                              "sponsorship_evidence": posting["sponsorship"]})
+        ad_status = posting["advertisement_language"]["status"] if posting else None
+        if verdict["status"] == "confirmed_incompatible":
+            history.append({**base, "kind": "confirmed_incompatibility", "reasons": list(verdict["reasons"]),
+                            "advertisement_language_status": ad_status})
+        if verdict["status"] == "policy_excluded" or verdict.get("policy_reasons"):
+            history.append({**base, "kind": "policy_exclusion",       # never merged into candidate incompatibilities
+                            "reasons": list(verdict["reasons"]) if verdict["status"] == "policy_excluded"
+                            else list(verdict["policy_reasons"]), "advertisement_language_status": ad_status})
         candidates.append({
             "sequence": target["sequence"], "f04_priority_rank": target["f04_priority_rank"],
             "reevaluated_priority_rank": entry["priority_rank"] if suit else None,
@@ -509,12 +586,32 @@ def verify_details(projection: Any, observations: list[dict[str, Any]], criteria
             "identity": {"status": fact["identity"], "reasons": fact["identity_reasons"]},
             "availability": fact["availability"], "requisition_id": fact["requisition_id"],
             "w2_eligibility_conditions": fact["w2_eligibility_conditions"],
-            "sections": fact["sections"], "reevaluation": _compact(suit), "verdict": verdict})
+            "sections": fact["sections"], "posting_evidence": posting, "language_policy": policy,
+            "reevaluation": _compact(suit), "verdict": verdict})
     counts = Counter(c["verdict"]["status"] for c in candidates)
-    return {"candidates": candidates, "verdict_counts": {k: counts.get(k, 0) for k in _STATUS_ORDER},
+    return {"candidates": candidates, "watchlist_records": watchlist, "history_records": history,
+            "verdict_counts": {k: counts.get(k, 0) for k in _STATUS_ORDER if k in _BASE_STATUSES or counts.get(k)},
             "reevaluation_summary": {"rows_evaluated": result["listings_kept"], "details_applied": result["details_applied"],
                                      "classification_distribution": result["classification_distribution"]},
             "rule_version": result["rule_version"], "policy_version": result["policy_version"]}
+
+
+def _posting_evidence(evidence: Any, detail: VacancyDetail) -> dict[str, Any]:
+    """What the employer's wording says, kept apart: advertisement language vs mandatory working languages."""
+    q = evidence.quotes
+    sponsorship = lp.sponsorship_status(evidence)
+    return {
+        "advertisement_language": lp.detect_ad_language(detail.text),
+        "mandatory_working_languages": list(evidence.mandatory_languages),
+        "language_levels": dict(evidence.language_levels),
+        "language_quotes": {k: v for k, v in q.items() if k.startswith("mandatory_language:")},
+        "sponsorship": {"status": sponsorship, "quote": q.get("sponsorship_no") if sponsorship == "unavailable"
+                        else q.get("sponsorship_yes") if sponsorship == "offered" else None,
+                        "quotes_if_contradictory": ([q.get("sponsorship_no"), q.get("sponsorship_yes")]
+                                                    if sponsorship == "contradictory" else None)},
+        "compensation": evidence.compensation,
+        "experience_requirements": list(evidence.experience_requirements),
+        "education_requirements": list(evidence.education_requirements)}
 
 
 def _compact(s: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -527,13 +624,32 @@ def _compact(s: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return {k: s[k] for k in keys}
 
 
-def build_report(allowlist: Mapping[str, Any], verification: Mapping[str, Any], carrier: HttpCarrier, *,
-                 criteria_sha256: str, allowlist_sha256: str, mode: str, started_at: str) -> dict[str, Any]:
+class NoRequests:
+    """Stand-in carrier for offline reassessment: no request is possible or recorded."""
+    total = 0
+    log: list = []
+
+
+_ORIGINS = {"live_allowlisted_get": LIVE_ORIGIN, "derived_offline_reassessment": DERIVED_ORIGIN}
+
+
+def build_report(allowlist: Mapping[str, Any], verification: Mapping[str, Any], carrier: HttpCarrier | NoRequests, *,
+                 criteria_sha256: str, allowlist_sha256: str, mode: str, started_at: str,
+                 watchlist_store: Mapping[str, Any] | None = None,
+                 derived_from: Mapping[str, Any] | None = None) -> dict[str, Any]:
     log = [{k: e[k] for k in ("url", "status", "bytes")} for e in carrier.log]
-    live = mode == "live_allowlisted_get"
+    origin = _ORIGINS.get(mode, REPLAY_ORIGIN)
+    real = origin != REPLAY_ORIGIN
+    store = watchlist_store if watchlist_store is not None else lp.merge_watchlist(None, verification["watchlist_records"])
     return {"schema": SCHEMA_REPORT, "mode": "detail_verification_no_submit", "transport_mode": mode,
-            "evidence_origin": LIVE_ORIGIN if live else REPLAY_ORIGIN, "real_evidence": live,
-            "function06_eligible": live, "executable": False, "submit_authorized": False, "authority": dict(AUTHORITY),
+            "evidence_origin": origin, "real_evidence": real,
+            "function06_eligible": real, "derived_from": dict(derived_from) if derived_from else None,
+            "language_policy": {"version": lp.POLICY_VERSION, "approval": lp.POLICY_APPROVAL,
+                                "matrix": {f"{a}|{b}": v[0] for (a, b), v in lp.MATRIX.items()}},
+            **lp.reporting_section(store),
+            "policy_exclusions": [{"identity": h["identity"], "reasons": h["reasons"]}
+                                  for h in verification["history_records"] if h["kind"] == "policy_exclusion"],
+            "executable": False, "submit_authorized": False, "authority": dict(AUTHORITY),
             "policy_version": POLICY_VERSION, "started_at": started_at,
             "source": {**allowlist["source"], "allowlist_sha256": allowlist_sha256,
                        "criteria_sha256_verified": criteria_sha256},
@@ -555,7 +671,7 @@ def build_handoff(report: Mapping[str, Any]) -> dict[str, Any]:
                 -Fraction(s["score_exact"]) if s else 0, c["f04_priority_rank"])
 
     ranked = sorted(report["candidates"], key=order)
-    keep = [c for c in ranked if c["verdict"]["status"] != "confirmed_incompatible"]
+    keep = [c for c in ranked if c["verdict"]["status"] in _BASE_STATUSES[:2]]
     out = []
     for position, c in enumerate(keep, 1):
         s = c["reevaluation"]
@@ -571,7 +687,8 @@ def build_handoff(report: Mapping[str, Any]) -> dict[str, Any]:
                     "mandatory_qualification_lines": (c["sections"] or {}).get("mandatory_qualification_lines", []),
                     "candidate_qualification_match": "not_performed_requires_verified_candidate_facts"})
     first = next((c for c in out if c["status"] == "candidate_for_review"), None)
-    return {"schema": SCHEMA_HANDOFF, "mode": "function06_handoff_non_executable", "executable": False,
+    watch = {k: v for k, v in report.items() if k == lp.WATCHLIST}               # present only when non-empty
+    return {"schema": SCHEMA_HANDOFF, **watch, "mode": "function06_handoff_non_executable", "executable": False,
             "submit_authorized": False, "authority": dict(AUTHORITY), "source_report_schema": report["schema"],
             "source": report["source"], "evidence_origin": report["evidence_origin"],
             "real_evidence": report["real_evidence"], "function06_eligible": report["function06_eligible"],
@@ -583,4 +700,7 @@ def build_handoff(report: Mapping[str, Any]) -> dict[str, Any]:
             "prerequisites_before_function_06": list(HANDOFF_PREREQUISITES), "candidates": out,
             "confirmed_incompatible": [{"tenant": c["tenant"], "posting_id": c["posting_id"],
                                        "canonical_url": c["canonical_url"], "reasons": c["verdict"]["reasons"]}
-                                      for c in ranked if c["verdict"]["status"] == "confirmed_incompatible"]}
+                                      for c in ranked if c["verdict"]["status"] == "confirmed_incompatible"],
+            "policy_excluded": [{"tenant": c["tenant"], "posting_id": c["posting_id"],
+                                 "canonical_url": c["canonical_url"], "reasons": c["verdict"]["reasons"]}
+                                for c in ranked if c["verdict"]["status"] == "policy_excluded"]}

@@ -43,11 +43,20 @@ _NO_SPONSOR = tuple(re.compile(p, re.I) for p in (
     r"\bno\s+(?:visa\s+|work\s+permit\s+)?sponsorship\s+(?:is\s+)?(?:available|offered|provided)\b",
     r"\bunable\s+to\s+(?:offer\s+|provide\s+)?sponsor\w*\b[^.]{0,30}\b(?:visas?|work\s+permits?)\b",
     r"\bwe\s+do\s+not\s+sponsor\b",
+    # Dutch (explicit refusal only)
+    r"\bgeen\s+(?:visum|visa|werkvergunning|verblijfsvergunning)[- ]?sponsor(?:ing|schap)\b",
+    r"\b(?:wij|we)\s+(?:bieden|verlenen|verzorgen)\s+geen\s+(?:visum|visa|werkvergunning)[- ]?sponsor\w*",
+    r"\b(?:wij|we)\s+sponsoren\s+geen\s+(?:visum|visa|visums|werkvergunning\w*)\b",
+    r"\b(?:visum|visa|werkvergunning)[- ]?sponsoring\s+is\s+niet\s+(?:mogelijk|beschikbaar)\b",
 ))
 _YES_SPONSOR = tuple(re.compile(p, re.I) for p in (
     r"\b(?:visa|work\s+permit)\s+sponsorship\s+(?:is\s+)?(?:available|provided|offered)\b",
     r"\bwe\s+(?:offer|provide|will\s+provide)\s+(?:visa|work\s+permit)\s+sponsorship\b",
     r"\bwe\s+sponsor\s+(?:work\s+)?(?:visas?|permits?)\b",
+    # Dutch (explicit offer only)
+    r"\b(?:wij|we)\s+(?:bieden|verzorgen|regelen)\s+(?:je\s+|jou\s+)?(?:een\s+)?(?:visum|visa|werkvergunning)[- ]?sponsor(?:ing|schap)\b",
+    r"\b(?:wij|we)\s+sponsoren\s+(?:een\s+|het\s+)?(?:visum|visa|werkvergunning)\b",
+    r"\b(?:visum|visa|werkvergunning)[- ]?sponsoring\s+is\s+(?:mogelijk|beschikbaar)\b",
 ))
 # Explicit demand for an unrestricted / permanent right to work, or for no need of sponsorship.
 _UNLIMITED_RIGHT = tuple(re.compile(p, re.I) for p in (
@@ -80,6 +89,50 @@ _PERIOD_MONTH = re.compile(r"(?:per|/|a|each)\s*month|monthly", re.I)
 _PERIOD_YEAR = re.compile(r"(?:per|/|a|each)\s*(?:year|annum)|annual|yearly|p\.a\.", re.I)
 _NET = re.compile(r"\bnet\b", re.I)
 _GROSS = re.compile(r"\bgross\b|\bbruto\b|\bbrutto\b", re.I)
+
+
+# ---- Dutch support (additive). Same safeguards as English: preference, negation, condition and alternatives stay Unknown.
+NL_LANGUAGES = {"nederlands": "dutch", "engels": "english", "duits": "german", "frans": "french", "spaans": "spanish",
+                "portugees": "portuguese", "italiaans": "italian", "zweeds": "swedish", "deens": "danish",
+                "noors": "norwegian", "fins": "finnish", "pools": "polish", "iers": "irish"}
+_NL_LANG = "(" + "|".join(NL_LANGUAGES) + ")"
+_NL_PREF = re.compile(r"\b(?:bij voorkeur|voorkeur|pr[eé]|pluspunt|liefst|wenselijk|idealiter|gewenst|een plus|plus|"
+                      r"voordeel|optioneel|niet vereist|geen vereiste|niet noodzakelijk|nice to have|preferably|"
+                      r"preferred|ideally|advantage)\b", re.I)
+_NL_HEDGE = re.compile(r"\b(?:tenzij|behalve|momenteel|meestal|doorgaans|normaal gesproken|indien|eventueel|mogelijk|"
+                       r"afhankelijk van|in sommige gevallen|bepaalde)\b", re.I)
+_NL_NEG = re.compile(r"\b(?:geen|niet|nooit|zonder)\b", re.I)
+_NL_LANG_VERB = re.compile(r"\b(?:spreekt|spreek|schrijft|beheerst|beheers|vloeiend|uitstekende?\s+beheersing|"
+                           r"uitstekende?\s+kennis|vereist|verplicht|noodzakelijk|een must|minimaal|minimum|ten minste)\b", re.I)
+_NL_LANG_ALT = re.compile(rf"\b{_NL_LANG}\b\s*(?:/|\bof\b|en/of)\s*{_NL_LANG}\b", re.I)
+_CEFR_BEFORE = re.compile(rf"\b(?:minimaal|minimum|ten minste)?\s*([ABC][12])(?:[- ]niveau)?\s+{_NL_LANG}\b", re.I)
+_CEFR_AFTER = re.compile(rf"\b{_NL_LANG}\b\s*\(?\s*(?:minimaal\s+|minimum\s+|op\s+)?([ABC][12])\b", re.I)
+_NL_AMOUNT = r"\d{1,3}(?:\.\d{3})+(?:,\d{1,2}|,-)?|\d+(?:,\d{1,2}|,-)?"
+_NL_MONEY = re.compile(rf"(?:€|\bEUR\b)\s*(?P<lo>{_NL_AMOUNT})(?:\s*(?:-|–|—|tot(?:\s+en\s+met)?|en)\s*(?:€|\bEUR\b)?\s*"
+                       rf"(?P<hi>{_NL_AMOUNT}))?", re.I)
+_NL_SALARY_WORD = re.compile(r"\b(?:salaris|loon|bruto|netto|verdien\w*|inkomen|beloning|salary)\b", re.I)
+_NL_NOT_SALARY = re.compile(r"\b(?:vergoeding|toelage|bonus|vakantiegeld|reiskosten|lease|budget|bijdrage|pensioen|"
+                            r"kilometer|opleidingsbudget)\b", re.I)
+_NL_MONTH = re.compile(r"\bper\s+maand\b|/\s*maand\b|\bmaandsalaris\b|\bmaandelijks\b|\bp\.?m\.?(?=\W|$)|\bper\s+month\b", re.I)
+_NL_YEAR = re.compile(r"\bper\s+jaar\b|/\s*jaar\b|\bjaarsalaris\b|\bjaarlijks\b|\bper\s+annum\b|\bp\.a\.|\bper\s+year\b", re.I)
+_NL_NET = re.compile(r"\bnet(?:to)?\b", re.I)
+_EXP_MIN = r"minimaal|minimum|ten\s+minste|tenminste|at\s+least|minimum\s+of|min\."
+_EXP = re.compile(rf"(?:\b(?P<min>{_EXP_MIN})\s+)?\b(?P<lo>\d{{1,2}})(?:\s*(?:-|–|tot|to)\s*(?P<hi>\d{{1,2}}))?(?P<plus>\s*\+)?\s*"
+                  r"(?:jaar|jaren|years?|yrs?)\b", re.I)
+_EXP_WORD = re.compile(r"\b(?:ervaring|werkervaring|experience)\b", re.I)
+_EDU = (
+    ("phd", re.compile(r"\b(?:phd|ph\.d|promotie|doctoraat|doctorate)\b", re.I)),
+    ("wo_master", re.compile(r"\b(?:wo[- ]?master\w*|master\s+(?:op\s+)?wo|wetenschappelijk\s+onderwijs|universitaire\s+master|"
+                             r"msc|master\s+of\s+science|afgeronde?\s+(?:wo|universitaire)\b[^.;]{0,20}master)\b", re.I)),
+    ("wo_bachelor", re.compile(r"\b(?:wo[- ]?bachelor\w*|universitaire\s+bachelor)\b", re.I)),
+    ("hbo", re.compile(r"\bhbo\b", re.I)),
+    ("bachelor", re.compile(r"\bbachelor'?s?(?:\s+degree)?\b", re.I)),
+    ("master", re.compile(r"\bmaster\b", re.I)),
+)
+_EDU_CUE = re.compile(r"\b(?:je\s+hebt|u\s+heeft|you\s+(?:have|hold|bring)|afgeronde?|completed|degree|diploma|opleiding|"
+                      r"studie|vereist|required|minimaal|minimum|ten\s+minste|beschik\w*)\b", re.I)
+_EDU_COMPLETED = re.compile(r"\b(?:afgeronde?|completed|behaald\w*|graduated)\b", re.I)
+_EDU_MANDATORY = re.compile(r"\b(?:afgeronde?|completed|vereist|required|must|minimaal|minimum|ten\s+minste)\b", re.I)
 
 
 class _Text(HTMLParser):
@@ -169,6 +222,9 @@ class DetailEvidence:
     quotes: dict[str, str] = field(default_factory=dict)
     contradictions: tuple[str, ...] = ()
     hedged: tuple[str, ...] = ()
+    language_levels: dict[str, str] = field(default_factory=dict)
+    experience_requirements: tuple[dict[str, Any], ...] = ()
+    education_requirements: tuple[dict[str, Any], ...] = ()
 
 
 def _parse_amount(raw: str, k: str | None) -> float | None:
@@ -209,6 +265,73 @@ def extract_compensation(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _parse_nl_amount(raw: str) -> float | None:
+    s = raw.strip().removesuffix(",-")
+    s = s.replace(".", "").replace(",", ".") if "," in s or re.fullmatch(r"\d{1,3}(?:\.\d{3})+", s) else s
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def extract_compensation_nl(text: str) -> dict[str, Any] | None:
+    """Dutch salary sentences: EUR amounts (``4.500``, ``4.500,-``, ranges with ``tot``/``en``/dash) with an explicit
+    month or year period and a salary word. Gross stays gross; net is never derived. Otherwise ``None`` (Unknown)."""
+    for sentence in _sentences(text):
+        m = _NL_MONEY.search(sentence)
+        if not m or not _NL_SALARY_WORD.search(sentence) or _NL_NOT_SALARY.search(sentence):
+            continue
+        month, year = bool(_NL_MONTH.search(sentence)), bool(_NL_YEAR.search(sentence))
+        if month == year:
+            continue                                   # no period, or both: ambiguous
+        lo = _parse_nl_amount(m.group("lo"))
+        hi = _parse_nl_amount(m.group("hi")) if m.group("hi") else lo
+        if lo is None or hi is None or lo > hi or hi <= 0:
+            continue
+        basis = "net" if _NL_NET.search(sentence) and not _GROSS.search(sentence) else (
+            "gross" if _GROSS.search(sentence) and not _NL_NET.search(sentence) else "unspecified")
+        div = 12 if year else 1
+        return {"currency": "EUR", "monthly_min": lo / div, "monthly_max": hi / div, "basis": basis,
+                "period_stated": "year" if year else "month", "quote": _quote(sentence)}
+    return None
+
+
+def _kind(sentence: str, explicit_minimum: bool) -> str:
+    if _NL_NEG.search(sentence) and not explicit_minimum or _NL_HEDGE.search(sentence):
+        return "conditional"
+    if _NL_PREF.search(sentence):
+        return "preferred"
+    return "mandatory" if explicit_minimum else "stated_unclassified"
+
+
+def extract_requirements(text: str) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    """Minimum relevant experience and required education, with the employer quote and a mandatory / preferred /
+    conditional / unclassified kind. Statements only; nothing is compared to the candidate."""
+    experience: list[dict[str, Any]] = []
+    education: list[dict[str, Any]] = []
+    for sentence in _sentences(text):
+        for clause in sentence.split(";"):
+            if _EXP_WORD.search(clause):
+                for m in _EXP.finditer(clause):
+                    lo, hi = int(m.group("lo")), int(m.group("hi")) if m.group("hi") else None
+                    if not 0 < lo <= 40 or (hi is not None and hi < lo):
+                        continue
+                    explicit = bool(m.group("min") or m.group("plus"))
+                    row = {"min_years": lo, "max_years": hi, "kind": _kind(clause, explicit), "quote": _quote(clause)}
+                    if row not in experience:
+                        experience.append(row)
+            if _EDU_CUE.search(clause):
+                for level, pattern in _EDU:
+                    if pattern.search(clause):
+                        explicit = bool(_EDU_MANDATORY.search(clause))
+                        row = {"level": level, "kind": _kind(clause, explicit),
+                               "completed_stated": bool(_EDU_COMPLETED.search(clause)), "quote": _quote(clause)}
+                        if row not in education:
+                            education.append(row)
+                        break
+    return tuple(experience), tuple(education)
+
+
 def normalize_structured_compensation(raw: dict[str, Any]) -> dict[str, Any] | None:
     """Caller-supplied figures: ``currency``, ``min``, ``max``, ``period`` (month|year), ``basis`` (net|gross|unspecified)."""
     try:
@@ -234,21 +357,38 @@ def extract_detail_evidence(detail: VacancyDetail) -> DetailEvidence:
     languages: list[str] = []
     working_english = False
     junior = False
+    levels: dict[str, str] = {}
     for sentence in _sentences(detail.text):
         refuses = any(p.search(sentence) for p in _NO_SPONSOR)
         if refuses:
-            if _HEDGE.search(sentence) or _AMBIGUOUS.search(sentence):
+            if _HEDGE.search(sentence) or _AMBIGUOUS.search(sentence) or _NL_HEDGE.search(sentence):
                 hedged.append("sponsorship")
             else:
                 no_s = True
                 quotes.setdefault("sponsorship_no", _quote(sentence))
         elif any(p.search(sentence) for p in _YES_SPONSOR):
-            if _HEDGE.search(sentence) or _AMBIGUOUS.search(sentence):
+            if _HEDGE.search(sentence) or _AMBIGUOUS.search(sentence) or _NL_HEDGE.search(sentence):
                 hedged.append("sponsorship")
             else:
                 yes_s = True
                 quotes.setdefault("sponsorship_yes", _quote(sentence))
-        ambiguous = bool(_HEDGE.search(sentence) or _AMBIGUOUS.search(sentence) or _SOFT_LANGUAGE.search(sentence))
+        ambiguous = bool(_HEDGE.search(sentence) or _AMBIGUOUS.search(sentence) or _SOFT_LANGUAGE.search(sentence)
+                         or _NL_HEDGE.search(sentence) or _NL_PREF.search(sentence))
+        for clause in sentence.split(";"):
+            nl_langs = [NL_LANGUAGES[m.group(1).lower()] for m in re.finditer(rf"\b{_NL_LANG}\b", clause, re.I)]
+            if nl_langs and _NL_LANG_VERB.search(clause):
+                if (_NL_PREF.search(clause) or _NL_HEDGE.search(clause) or _NL_NEG.search(clause)
+                        or _NL_LANG_ALT.search(clause) or _HEDGE.search(clause)):
+                    hedged.append("language")
+                else:
+                    for lang in nl_langs:
+                        if lang not in languages:
+                            languages.append(lang)
+                            quotes.setdefault(f"mandatory_language:{lang}", _quote(clause.strip()))
+                    for m in _CEFR_BEFORE.finditer(clause):
+                        levels.setdefault(NL_LANGUAGES[m.group(2).lower()], m.group(1).upper())
+                    for m in _CEFR_AFTER.finditer(clause):
+                        levels.setdefault(NL_LANGUAGES[m.group(1).lower()], m.group(2).upper())
         if any(p.search(sentence) for p in _UNLIMITED_RIGHT) and not refuses or _UNLIMITED_EXPLICIT.search(sentence):
             if _NOT_REQUIRED.search(sentence) and not _UNLIMITED_EXPLICIT.search(sentence) or ambiguous or \
                     not _CUE.search(sentence):
@@ -275,7 +415,9 @@ def extract_detail_evidence(detail: VacancyDetail) -> DetailEvidence:
             junior = True
             quotes.setdefault("junior_statement", _quote(sentence))
     comp = (normalize_structured_compensation(detail.structured_compensation)
-            if detail.structured_compensation else extract_compensation(detail.text))
+            if detail.structured_compensation else
+            extract_compensation(detail.text) or extract_compensation_nl(detail.text))
+    experience, education = extract_requirements(detail.text)
     contradictions = ("sponsorship_statements_conflict",) if no_s and yes_s else ()
     return DetailEvidence(
         vacancy_open=detail.active,
@@ -287,4 +429,5 @@ def extract_detail_evidence(detail: VacancyDetail) -> DetailEvidence:
         mandatory_languages=tuple(sorted(languages)),
         english_working_language=True if working_english else None,
         compensation=comp, quotes=dict(sorted(quotes.items())), contradictions=contradictions,
-        hedged=tuple(sorted(set(hedged))))
+        hedged=tuple(sorted(set(hedged))), language_levels={k: levels[k] for k in sorted(levels) if k in languages},
+        experience_requirements=experience, education_requirements=education)
