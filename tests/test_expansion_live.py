@@ -798,3 +798,45 @@ def test_acceptance_check_rejects_a_wrong_invocation_count_and_missing_input(cli
     out = accepted_bundle(cli_inputs)
     assert acceptance_check.main(["--bundle-dir", str(out), "--expect-invocations", "1"]) == 1
     assert acceptance_check.main(["--bundle-dir", str(tmp_path / "missing")]) == 2
+
+
+# --- explicit second pilot scope; no union, no new transport ---------------------------------------
+def test_servicenow_scope_isolated_and_accepted_with_four_requests(cli_inputs, capsys):
+    import scripts.expansion_shadow as es
+    from ejs.services.expansion_replay import SERVICENOW_APPROVED_PAIRS
+    assert SERVICENOW_APPROVED_PAIRS == {("ServiceNow", "NL"), ("ServiceNow", "IE")}
+    out = cli_inputs[2] / "servicenow"
+    parser = cli.argparse.ArgumentParser()
+    ns = cli.argparse.Namespace(
+        watchlist=str(cli_inputs[0]), criteria=str(cli_inputs[1]), out_dir=str(out),
+        expansion_live=True, expansion_init=True, expansion_max_pages=5,
+        expansion_fixtures=None, sheet_labels=None, expansion_scope="servicenow-nl-ie")
+    pages = {("ServiceNow", "nl", 0): feed("NL", total=1, ids=("nl1",), tenant="ServiceNow"),
+             ("ServiceNow", "ie", 0): feed("IE", total=2, ids=("ie1", "ie2"), tenant="ServiceNow")}
+    fake = Feed(pages)
+    assert es.run_expansion(ns, parser, transport=fake, clock=lambda: 0.0, sleep=lambda s: None) == 0
+    assert fake.urls == [live_page_url("ServiceNow", country, 0) for country in ("NL", "IE", "NL", "IE")]
+    report = report_of(out)
+    assert report["request_accounting"]["spent"] == 4 and report["request_accounting"]["remaining"] == 1
+    assert report["coverage"]["research_scope"]["approved_pairs"] == 2
+    assert report["acceptance"]["ready"] and project_for_application_bridge(report)["listings_kept"] == 3
+    assert acceptance_check.main(["--bundle-dir", str(out), "--scope", "servicenow-nl-ie", "--expect-invocations", "1"]) == 0
+    assert acceptance_check.main(["--bundle-dir", str(out)]) == 1
+    before = (out / store.BUNDLE_NAME).read_bytes()
+    ns.expansion_init = False
+    silent = Feed({})
+    assert es.run_expansion(ns, parser, transport=silent, clock=lambda: 0.0, sleep=lambda s: None) == 0
+    assert silent.urls == [] and (out / store.BUNDLE_NAME).read_bytes() == before
+    ns.expansion_scope = None
+    with pytest.raises(SystemExit):
+        es.run_expansion(ns, parser, transport=silent, clock=lambda: 0.0, sleep=lambda s: None)
+    assert silent.urls == []
+
+
+def test_second_scope_requires_explicit_live_expansion(cli_inputs):
+    watchlist, criteria, root = cli_inputs
+    common = ["--watchlist", str(watchlist), "--criteria", str(criteria), "--out-dir", str(root / "wrong")]
+    for extra in (["--expansion-scope", "servicenow-nl-ie"], ["--expansion-fixtures", "x", "--expansion-scope", "servicenow-nl-ie"],
+                  ["--expansion-live", "--expansion-scope", "arbitrary"]):
+        with pytest.raises(SystemExit):
+            cli.main([*common, *extra])

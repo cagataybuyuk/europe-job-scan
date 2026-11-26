@@ -208,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--criteria", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--sheet-labels")
+    ap.add_argument("--expansion-scope", choices=("servicenow-nl-ie",),
+                    help="select the separately owner-approved ServiceNow NL/IE pilot (live expansion only)")
     ap.add_argument("--expansion-init", action="store_true", help="initialize an unused W3.5 output directory")
     ap.add_argument("--expansion-max-pages", type=int, help="lower the W3.5 batch page ceiling")
     mode = ap.add_mutually_exclusive_group()
@@ -218,6 +220,8 @@ def main(argv: list[str] | None = None) -> int:
                       help="FUNCTION-02: read-only country feed, only for owner-approved employer/country pairs")
     a = ap.parse_args(argv)
 
+    if a.expansion_scope is not None and not a.expansion_live:
+        ap.error("--expansion-scope requires --expansion-live")
     if a.expansion_fixtures is not None or a.expansion_live:
         if a.sheet_labels is not None:
             ap.error("--sheet-labels cannot be used with --expansion-fixtures or --expansion-live")
