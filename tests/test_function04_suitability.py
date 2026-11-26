@@ -121,12 +121,28 @@ def test_closed_vacancy_is_blocked_and_unknown_status_is_not():
     assert s["decision_label"] == "needs_user" and s["reason_code"] == "vacancy_evidence_missing"
 
 
-def test_junior_title_is_blocked_only_when_not_owner_included():
-    junior = evaluate_report(report(row("1", "Junior Business Analyst")), criteria())
-    assert by_posting(junior)["1"]["classification"] == "preliminary_blocked"
+def test_junior_blocker_needs_title_marker_and_posting_statement():
+    title_only = evaluate_report(report(row("1", "Junior Business Analyst")), criteria())
+    s = by_posting(title_only)["1"]
+    assert s["classification"] == "preliminary_high" and s["confirmed_incompatibilities"] == []
+    assert s["preliminary_signals"] == ["title_junior_marker:junior"]
+    assert title_only["listings_kept"] == 1 and project_for_bridge(title_only)["listings_kept"] == 1
+    both = evaluate_report(report(row("1", "Junior Business Analyst")), criteria(),
+                           details={("Acme", "1"): detail("1", "This is an entry-level position.")})
+    assert by_posting(both)["1"]["reason_code"] == "blocker:junior-or-technical-only"
+    assert by_posting(both)["1"]["classification"] == "verified_blocked"
+    marker_only = evaluate_report(report(row("1", "Junior Business Analyst")), criteria(),
+                                  details={("Acme", "1"): detail("1", "Own the analysis for our teams.")})
+    assert not by_posting(marker_only)["1"]["reason_code"].startswith("blocker:")
+    assert by_posting(marker_only)["1"]["confirmed_incompatibilities"] == []
+    statement_only = evaluate_report(report(row("1", "Senior Business Analyst")), criteria(),
+                                     details={("Acme", "1"): detail("1", "An entry-level position.")})
+    assert not by_posting(statement_only)["1"]["reason_code"].startswith("blocker:")
+    assert "junior_signal_needs_review" in by_posting(statement_only)["1"]["review_flags"]
     owner_ok = criteria(PROFILE_SECTIONS.replace("include: [senior, lead]", "include: [junior]"))
-    allowed = evaluate_report(report(row("1", "Junior Business Analyst")), owner_ok)
-    assert by_posting(allowed)["1"]["classification"] != "preliminary_blocked"
+    allowed = evaluate_report(report(row("1", "Junior Business Analyst")), owner_ok,
+                              details={("Acme", "1"): detail("1", "This is an entry-level position.")})
+    assert "junior_or_technical_only" not in by_posting(allowed)["1"]["reason_code"]
 
 
 def test_unrestricted_right_not_a_blocker_when_candidate_is_authorized():
@@ -218,7 +234,9 @@ def test_missing_evidence_and_confirmed_incompatibility_are_separate_fields():
     result = evaluate_report(report(row("1", "Accountant"), row("2", "Senior Business Analyst")), criteria(),
                              details={("Acme", "2"): detail("2", "Salary: €2,000 per month gross.")})
     s = by_posting(result)
-    assert "title:no_role_track_match" in s["1"]["confirmed_incompatibilities"]
+    assert s["1"]["confirmed_incompatibilities"] == []                       # a title alone confirms nothing
+    assert s["1"]["preliminary_signals"] == ["title_no_role_track_match"]
+    assert s["1"]["ratings"]["role_fit"] is None and "role_fit_evidence_missing" in s["1"]["missing_evidence"]
     assert "confirmed:compensation_below_target" in s["2"]["confirmed_incompatibilities"]
     assert "scope_evidence_missing" in s["2"]["missing_evidence"]
     assert not set(s["2"]["confirmed_incompatibilities"]) & set(s["2"]["missing_evidence"])
@@ -251,22 +269,26 @@ def test_geography_outside_or_unknown_never_reaches_apply(country, flag, status)
     assert s["classification"] == "verified_needs_review"
 
 
-def test_geography_tiers_and_preliminary_demotion():
+def test_geography_is_a_tie_break_and_review_gate_not_a_tier_or_score_change():
     result = evaluate_report(report(row("1", "Senior Business Analyst", country="IE"),
                                     row("2", "Senior Business Analyst", country="NL"),
                                     row("3", "Senior Business Analyst", country="FR")), criteria())
-    assert [v["posting_id"] for v in result["vacancies"]] == ["2", "1", "3"]
-    assert [by_posting(result)[i]["classification"] for i in "123"] == ["preliminary_high", "preliminary_high",
-                                                                          "preliminary_low"]
-
-
-def test_preliminary_tier_demotions_for_excluded_seniority_and_unknown_country():
-    result = evaluate_report(report(row("1", "Director Business Analyst"), row("2", "Senior Business Analyst", country=None),
-                                    row("3", "Senior Data Analyst")), criteria())
     s = by_posting(result)
-    assert s["1"]["classification"] == "preliminary_medium" and "title:seniority_excluded" in s["1"]["confirmed_incompatibilities"]
-    assert s["2"]["classification"] == "preliminary_medium" and s["2"]["review_flags"] == ["geography_unknown"]
-    assert s["3"]["classification"] == "preliminary_medium"
+    assert [v["posting_id"] for v in result["vacancies"]] == ["2", "1", "3"]
+    assert {s[i]["classification"] for i in "123"} == {"preliminary_high"}
+    assert len({s[i]["score_exact"] for i in "123"}) == 1                   # geography moves no score
+    assert "geography_not_in_configured_countries" in s["3"]["review_flags"]
+
+
+def test_title_signals_never_change_the_preliminary_tier_or_exclude():
+    result = evaluate_report(report(row("1", "Director Business Analyst"), row("2", "Senior Business Analyst", country=None),
+                                    row("3", "Senior Data Analyst"), row("4", "Accountant")), criteria())
+    s = by_posting(result)
+    assert [s[i]["classification"] for i in "1234"] == ["preliminary_high", "preliminary_high",
+                                                         "preliminary_medium", "preliminary_low"]
+    assert s["1"]["preliminary_signals"] == ["title_seniority_excluded_term"] and s["1"]["confirmed_incompatibilities"] == []
+    assert s["2"]["review_flags"] == ["geography_unknown"]
+    assert result["listings_kept"] == 4 and project_for_bridge(result)["listings_kept"] == 4
 
 
 def test_reviewer_rating_requires_reference_and_known_component():
@@ -358,9 +380,9 @@ def test_smartrecruiters_detail_adapter_checks_identity_and_extracts_text():
 # ---- 7. downstream compatibility ---------------------------------------------------------------------
 def test_projection_is_accepted_by_unchanged_w2_bridge():
     rep = report(row("1", "Senior Business Analyst"), row("2", "Data Analyst"), row("3", "Junior Analyst"))
-    result = evaluate_report(rep, criteria())
+    result = evaluate_report(rep, criteria(), details={("Acme", "3"): detail("3", "We do not offer visa sponsorship.")})
     projected = project_for_bridge(result)
-    assert projected["listings_kept"] == 2 and projected["excluded_rows"]["reasons"] == {"preliminary_blocked": 1}
+    assert projected["listings_kept"] == 2 and projected["excluded_rows"]["reasons"] == {"verified_blocked": 1}
     prepared = prepare_application_report(projected)
     assert prepared["input_rows"] == 2 and prepared["executable"] is False and prepared["submit_authorized"] is False
     assert [c["posting_id"] for c in prepared["candidates"]] == ["1", "2"]
@@ -376,24 +398,55 @@ def test_projection_refuses_non_suitability_or_executable_reports():
 
 
 # ---- 8. authority, criteria approval, profile --------------------------------------------------------
-def test_output_grants_no_authority_and_is_unapproved_without_a_reference():
+SHA = "57faeefb94441abe9f659f8ce636b35c42cbe1b2411e67035ef296d485191f73"
+RV = "OPPORTUNITY-1.0+K2-test"
+
+
+def approved_kwargs(**over):
+    return {"criteria_sha256": SHA, "expected_criteria_sha256": SHA, "expected_rule_version": RV} | over
+
+
+def test_output_grants_no_authority_and_approval_is_bound_to_the_recorded_digest():
     result = evaluate_report(report(row("1", "Senior Business Analyst")), criteria())
     assert result["schema"] == SCHEMA and result["mode"] == "suitability_no_submit"
     assert result["executable"] is False and result["submit_authorized"] is False
     assert not any(v for k, v in result["authority"].items() if k != "label_is_not_authority")
     assert result["criteria"]["approved_by_owner"] is False and result["handoff_ready"] is False
-    approved = evaluate_report(report(row("1", "Senior Business Analyst")), criteria(), criteria_approval_ref="OWNER-REF-1")
-    assert approved["handoff_ready"] is True and approved["criteria"]["approval_ref"] == "OWNER-REF-1"
+    assert result["criteria"]["approval"] == "not_verified_no_expected_digest"
+    ok = evaluate_report(report(row("1", "Senior Business Analyst")), criteria(), **approved_kwargs())
+    assert ok["handoff_ready"] is True and ok["criteria"]["approval"] == "approved_digest_and_rule_version_match"
+    assert ok["policy"]["owner_approved_fields"] == ["role_primary", "role_secondary", "role_no_title_match"]
+    assert "compensation_meets" in ok["policy"]["provisional_fields"]
+
+
+@pytest.mark.parametrize("over,status", [
+    ({"criteria_sha256": "0" * 64}, "digest_mismatch"),
+    ({"criteria_sha256": None}, "not_verified_no_actual_digest"),
+    ({"criteria_sha256": "ABC"}, "not_verified_no_actual_digest"),
+    ({"expected_criteria_sha256": "nothex"}, "expected_digest_malformed"),
+    ({"expected_criteria_sha256": None}, "not_verified_no_expected_digest"),
+    ({"expected_rule_version": "OTHER"}, "rule_version_mismatch"),
+    ({"expected_rule_version": None}, "not_verified_no_expected_digest"),
+])
+def test_approval_requires_matching_digest_and_rule_version(over, status):
+    result = evaluate_report(report(row("1", "Senior Business Analyst")), criteria(), **approved_kwargs(**over))
+    assert result["criteria"]["approval"] == status
+    assert result["criteria"]["approved_by_owner"] is False and result["handoff_ready"] is False
+
+
+def test_an_arbitrary_approval_reference_no_longer_approves_anything():
+    with pytest.raises(TypeError):
+        evaluate_report(report(row("1", "Senior Business Analyst")), criteria(), criteria_approval_ref="ANY")
 
 
 def test_profile_gaps_block_handoff_and_make_dimensions_unknown():
     bare = criteria("")
     assert set(profile_from_criteria(bare).gaps) == {"role_tracks", "seniority", "countries", "languages_required_met",
                                                      "compensation_target", "work_authorization"}
-    result = evaluate_report(report(row("1", "Senior Business Analyst")), bare, criteria_approval_ref="REF")
+    result = evaluate_report(report(row("1", "Senior Business Analyst")), bare, **approved_kwargs())
     s = by_posting(result)["1"]
     assert s["ratings"]["role_fit"] is None and s["dimensions"]["role_track"]["status"] == "unknown"
-    assert result["handoff_ready"] is False
+    assert result["criteria"]["approved_by_owner"] is True and result["handoff_ready"] is False
 
 
 def test_unfilled_template_placeholder_is_refused():
@@ -471,7 +524,8 @@ def test_cli_writes_owner_only_outputs_refuses_overwrite_and_repo_paths(tmp_path
             "--out-dir", str(out), "--details-dir", str(details)]
     assert cli.main(argv) == 0
     summary = json.loads(capsys.readouterr().out)
-    assert summary["listings_kept"] == 5 and summary["criteria_approved"] is False and summary["handoff_ready"] is False
+    assert summary["listings_kept"] == 5 and summary["criteria_approval"] == "not_verified_no_expected_digest"
+    assert summary["handoff_ready"] is False
     assert summary["evidence_levels"] == {"listing_metadata": 4, "vacancy_details": 1}
     for name in ("suitability-report.json", "suitability-bridge.json"):
         assert oct(os.stat(out / name).st_mode & 0o777) == "0o600"
@@ -495,3 +549,94 @@ def test_cli_refuses_unreadable_criteria_and_unsupported_report(tmp_path, capsys
     assert cli.main(["--report", str(tmp_path / "r.json"), "--criteria", str(tmp_path / "missing.yaml"),
                      "--out-dir", str(tmp_path / "o2")]) == 2
     assert not (tmp_path / "o" / "suitability-report.json").exists()
+
+
+# ---- review gaps: ambiguity, unknown candidate facts, incomplete vs confirmed ---------------------------------
+@pytest.mark.parametrize("text", [
+    "An unrestricted right to work is not required.",
+    "Unrestricted right to work is preferred.",
+    "No unrestricted right to work is needed for this role.",
+    "You do not need an unrestricted right to work in the EU.",
+    "If you hold an unrestricted right to work, please mention it.",
+])
+def test_negative_or_conditional_work_right_statements_never_block(text):
+    ev = extract_detail_evidence(detail("1", text))
+    assert ev.requires_unlimited_work_right is None
+    result = evaluate_report(report(row("1", "Senior Business Analyst")), criteria(), details={("Acme", "1"): detail("1", text)})
+    assert not by_posting(result)["1"]["reason_code"].startswith("blocker:")
+    assert by_posting(result)["1"]["confirmed_incompatibilities"] == []
+
+
+@pytest.mark.parametrize("text", [
+    "Visa sponsorship is not currently available.",
+    "We do not offer visa sponsorship unless you are an exceptional candidate.",
+    "We generally do not offer visa sponsorship.",
+    "We do not offer visa sponsorship except for our Dublin office.",
+    "We do not offer visa sponsorship if you can start immediately.",
+])
+def test_conditional_or_scoped_sponsorship_refusals_are_not_confirmed(text):
+    ev = extract_detail_evidence(detail("1", text))
+    assert ev.explicit_no_sponsorship is None
+    result = evaluate_report(report(row("1", "Senior Business Analyst")), criteria(), details={("Acme", "1"): detail("1", text)})
+    assert by_posting(result)["1"]["confirmed_incompatibilities"] == []
+    assert by_posting(result)["1"]["ratings"]["sponsorship"] is None
+
+
+@pytest.mark.parametrize("text", ["Dutch or German is required.", "Dutch/German is required.", "Dutch is not required.",
+                                  "Dutch is preferred.", "Knowing Dutch is ideally required."])
+def test_ambiguous_language_statements_are_not_mandatory(text):
+    assert extract_detail_evidence(detail("1", text)).mandatory_languages == ()
+
+
+def test_unknown_candidate_work_authorization_is_not_a_confirmed_incompatibility():
+    unknown_auth = criteria(PROFILE_SECTIONS.replace("work_rights:\n  eu_work_authorization: false\n", ""))
+    text = "Visa sponsorship is available. Applicants need an unrestricted right to work in the EU."
+    result = evaluate_report(report(row("1", "Senior Business Analyst")), unknown_auth, details={("Acme", "1"): detail("1", text)})
+    s = by_posting(result)["1"]
+    assert not s["reason_code"].startswith("blocker:") and s["confirmed_incompatibilities"] == []
+    assert s["dimensions"]["work_authorization"]["need"] == "candidate_work_authorization_in_criteria"
+    assert "work_authorization_unknown_for_requirement" in s["review_flags"] and s["decision_label"] != "auto_apply"
+    assert "candidate_work_authorization_in_criteria" in s["missing_evidence"]
+    declared_no = evaluate_report(report(row("1", "Senior Business Analyst")), criteria(), details={("Acme", "1"): detail("1", text)})
+    assert by_posting(declared_no)["1"]["reason_code"] == "blocker:unlimited-work-right-required"
+
+
+def test_low_score_with_incomplete_evidence_is_not_a_confirmed_exclusion():
+    result = evaluate_report(report(row("1", "Senior Business Analyst"), row("2", "Accountant")), criteria(),
+                             details={("Acme", "1"): detail("1", "Great team."), ("Acme", "2"): detail("2", "Great team.")})
+    s = by_posting(result)
+    assert s["1"]["decision_label"] == "auto_skip" and s["1"]["reason_code"] == "score_below_min_evidence_incomplete"
+    assert s["1"]["classification"] == "verified_incomplete" and s["1"]["confirmed_incompatibilities"] == []
+    assert s["2"]["classification"] == "verified_needs_review" and s["2"]["reason_code"] == "evidence_missing"
+    assert project_for_bridge(result)["listings_kept"] == 2                       # still handed over
+    low = evaluate_report(report(row("1", "Senior Business Analyst")), criteria(), details={("Acme", "1"): detail(
+        "1", "Salary: €1,000 per month gross. Visa sponsorship is available. Working language is English.")},
+        reviewer_ratings={("Acme", "1"): {"scope": {"rating": 0, "ref": "r"}, "career_upside": {"rating": 0, "ref": "r"}}})
+    t = by_posting(low)["1"]
+    assert t["classification"] == "verified_below_threshold" and t["unknown_components"] == []
+    assert project_for_bridge(low)["listings_kept"] == 0
+
+
+def test_no_title_match_is_unknown_low_priority_and_blocks_apply():
+    text = "Visa sponsorship is available. Working language is English. Salary: €4,500 per month net."
+    result = evaluate_report(report(row("1", "Accountant")), criteria(), details={("Acme", "1"): detail("1", text)})
+    s = by_posting(result)["1"]
+    assert s["ratings"]["role_fit"] is None and s["decision_label"] != "auto_apply"
+    assert s["review_flags"] == ["role_title_no_match_needs_review"] and s["classification"] == "verified_needs_review"
+
+
+def test_cli_refuses_a_criteria_file_that_is_not_the_approved_digest(tmp_path, capsys):
+    cli = _cli()
+    f02, ids, tenant = _f02_report(tmp_path)
+    (tmp_path / "f02.json").write_text(json.dumps(f02), encoding="utf-8")
+    (tmp_path / "criteria.yaml").write_text(criteria_text(), encoding="utf-8")
+    from hashlib import sha256
+    good = sha256((tmp_path / "criteria.yaml").read_bytes()).hexdigest()
+    base = ["--report", str(tmp_path / "f02.json"), "--criteria", str(tmp_path / "criteria.yaml")]
+    assert cli.main([*base, "--out-dir", str(tmp_path / "bad"), "--expected-criteria-sha256", "0" * 64,
+                     "--expected-rule-version", RV]) == 2
+    assert not (tmp_path / "bad" / "suitability-report.json").exists()
+    assert cli.main([*base, "--out-dir", str(tmp_path / "ok"), "--expected-criteria-sha256", good,
+                     "--expected-rule-version", RV]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["criteria_approval"] == "approved_digest_and_rule_version_match" and summary["handoff_ready"] is True

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 import sys
 from hashlib import sha256
 from pathlib import Path
@@ -47,7 +48,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", type=Path, required=True, help="absolute owner-only directory outside the repo")
     parser.add_argument("--details-dir", type=Path)
     parser.add_argument("--reviewer-ratings", type=Path, help="JSON: {'tenant/posting': {'scope': {'rating': n, 'ref': s}}}")
-    parser.add_argument("--criteria-approval-ref", help="opaque reference to the owner's approval of this criteria file")
+    parser.add_argument("--expected-criteria-sha256", help="independently recorded SHA-256 of the approved criteria file")
+    parser.add_argument("--expected-rule-version", help="independently recorded rule version of the approved criteria")
     args = parser.parse_args(argv)
     try:
         out_dir = prepare_output_dir(args.out_dir)
@@ -55,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
             raise OutputDirError("OUTPUT_EXISTS")
         criteria_bytes = args.criteria.read_bytes()
         criteria = load_criteria(args.criteria)
+        actual_sha = sha256(criteria_bytes).hexdigest()
+        if args.expected_criteria_sha256 and actual_sha != args.expected_criteria_sha256:
+            raise ValueError("CRITERIA_DIGEST_MISMATCH")      # a different file than the approved one: do not evaluate
         report = json.loads(args.report.read_bytes())
         if isinstance(report, dict) and report.get("schema") == EXPANSION_SCHEMA:
             report = project_for_application_bridge(report)
@@ -64,10 +69,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.reviewer_ratings:
             reviewer = {tuple(k.split("/", 1)): v for k, v in json.loads(args.reviewer_ratings.read_text()).items()}
         result = evaluate_report(report, criteria, details=details, reviewer_ratings=reviewer,
-                                 criteria_approval_ref=args.criteria_approval_ref,
-                                 criteria_sha256=sha256(criteria_bytes).hexdigest())
+                                 criteria_sha256=actual_sha,
+                                 expected_criteria_sha256=args.expected_criteria_sha256,
+                                 expected_rule_version=args.expected_rule_version)
         payload = (json.dumps(result, sort_keys=True, indent=1, ensure_ascii=False) + "\n").encode()
-        bridge = (json.dumps(project_for_bridge(result), sort_keys=True, indent=1, ensure_ascii=False) + "\n").encode()
+        projected = project_for_bridge(result)
+        bridge = (json.dumps(projected, sort_keys=True, indent=1, ensure_ascii=False) + "\n").encode()
     except (CriteriaError, SuitabilityError, OutputDirError, ValueError, OSError) as exc:
         print(f"function04: refused: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
@@ -76,7 +83,15 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({"listings_kept": result["listings_kept"], "duplicate_rows": result["duplicate_rows"],
                       "evidence_levels": result["evidence_level_distribution"],
                       "classifications": result["classification_distribution"],
-                      "criteria_approved": result["criteria"]["approved_by_owner"],
+                      "criteria_approval": result["criteria"]["approval"],
+                      "profile_gaps": result["criteria"]["profile_gaps"],
+                      "missing_evidence": result["missing_evidence_distribution"],
+                      "review_flags": dict(sorted(Counter(f for v in result["vacancies"]
+                                                          for f in v["suitability"]["review_flags"]).items())),
+                      "preliminary_signals": dict(sorted(Counter(f for v in result["vacancies"]
+                                                                 for f in v["suitability"]["preliminary_signals"]).items())),
+                      "exclusions": projected["excluded_rows"],
+                      "downstream_candidates": projected["listings_kept"],
                       "handoff_ready": result["handoff_ready"]}, sort_keys=True))
     return 0
 

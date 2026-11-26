@@ -7,7 +7,7 @@ Function 02 çıktısı artık çevrimdışı, açıklanabilir ve deterministik 
 yeni katman ilan başlığı/ülke kanıtını (ön öncelik) ilan ayrıntısı kanıtından
 (doğrulanmış uygunluk) ayırıyor, bilinmeyeni bilinmeyen bırakıyor ve hiçbir
 yetki vermiyor. Gerçek 198 ilan ve onaylı kriterler bu oturumda erişilemediği
-için gerçek dağılım yok; kalan sahip kararları
+için gerçek dağılım yok (onay artık kayıtlı SHA-256 özetine bağlı, başlık tek başına dışlama üretmiyor); kalan sahip kararları
 [FUNCTION_04_SUITABILITY.md](FUNCTION_04_SUITABILITY.md) içinde.
 
 ## 2026-11-26 — W3.5 çevrimdışı gölge keşif entegrasyonu

@@ -30,9 +30,10 @@ from ejs.services.shadow_run import SCHEMA as DISCOVERY_SCHEMA
 from ejs.services.suitability_evidence import (DetailEvidence, VacancyDetail, extract_detail_evidence)
 
 SCHEMA = "EJS-SUITABILITY-1"
-POLICY_VERSION = "SUITABILITY-1.0-PROVISIONAL"
+POLICY_VERSION = "SUITABILITY-1.1"
 IDENTITY_FIELDS = ("ats_kind", "region", "tenant", "posting_id")
 ROW_FIELDS = ("company", "role", "location", "url", "ats_kind", "source", "tenant", "region")
+APPROVED_POLICY_FIELDS = ("role_primary", "role_secondary", "role_no_title_match")
 AUTHORITY = {"execute": False, "submit": False, "form_access": False, "network": False,
              "label_is_not_authority": True}
 
@@ -55,11 +56,15 @@ class SuitabilityError(ValueError):
 
 @dataclass(frozen=True)
 class SuitabilityPolicy:
-    """Rating percentages per evidence outcome. PROVISIONAL: not owner-approved (see owner decisions)."""
+    """Rating percentages per evidence outcome.
+
+    Owner-approved (26 Nov 2026): primary title match 100, secondary 70, no title match = Unknown (low
+    preliminary priority, never a confirmed incompatibility). Every other value is PROVISIONAL.
+    """
     version: str = POLICY_VERSION
     role_primary: int = 100
     role_secondary: int = 70
-    role_no_title_match: int = 0
+    role_no_title_match: int | None = None
     seniority_include: int = 100
     seniority_exclude: int = 0
     compensation_meets: int = 100
@@ -158,7 +163,7 @@ def _assess_listing(row: Mapping[str, Any], profile: Profile, policy: Suitabilit
         dims["role_track"] = {"status": "secondary_match", "matched": hit}
     else:
         ratings["role_fit"] = policy.role_no_title_match
-        dims["role_track"] = {"status": "no_title_match", "note": "title only; description not read"}
+        dims["role_track"] = {"status": "no_title_match", "note": "title only; description not read; not an incompatibility"}
 
     included = _matches(title, profile.seniority_include)
     excluded = _matches(title, profile.seniority_exclude)
@@ -174,8 +179,7 @@ def _assess_listing(row: Mapping[str, Any], profile: Profile, policy: Suitabilit
     else:
         dims["seniority"] = {"status": "not_stated_in_title"}
     if junior:
-        signals["junior_or_technical_only"] = True
-        dims["seniority"]["junior_marker"] = junior[0]
+        dims["seniority"]["junior_title_marker"] = junior[0]      # a signal; a blocker needs posting evidence too
 
     de = row.get("discovery_evidence")
     codes = [canon_country(c) for c in (de.get("countries") if isinstance(de, dict) else None) or ()
@@ -208,16 +212,19 @@ def _assess_details(ev: DetailEvidence, profile: Profile, policy: SuitabilityPol
                                "need": "explicit_employer_sponsorship_statement"}
 
     if ev.requires_unlimited_work_right:
-        signals["requires_unlimited_work_right"] = profile.work_authorization is not True
+        auth = profile.work_authorization
+        signals["requires_unlimited_work_right"] = None if auth is None else not auth   # unknown stays unknown
         dims["work_authorization"] = {"status": "unrestricted_right_required", "quote": q.get("unlimited_work_right"),
-                                      "candidate_authorization": profile.work_authorization}
+                                      "candidate_authorization": auth}
+        if auth is None:
+            dims["work_authorization"]["need"] = "candidate_work_authorization_in_criteria"
     elif ev.generic_right_to_work_required:
         dims["work_authorization"] = {"status": "right_to_work_required_scope_unclear",
                                       "quote": q.get("generic_right_to_work"),
                                       "candidate_authorization": profile.work_authorization,
                                       "need": "owner_review_of_requirement_vs_candidate_facts"}
     else:
-        dims["work_authorization"] = {"status": "not_stated"}
+        dims["work_authorization"] = {"status": "ambiguous_statement" if "work_right" in ev.hedged else "not_stated"}
 
     langs = ev.mandatory_languages
     if langs:
@@ -230,7 +237,7 @@ def _assess_details(ev: DetailEvidence, profile: Profile, policy: SuitabilityPol
             dims["language"] = {"status": "mandatory_unmet" if unmet else "mandatory_met",
                                 "mandatory": list(langs), "unmet": unmet}
     else:
-        dims["language"] = {"status": "not_stated"}
+        dims["language"] = {"status": "ambiguous_statement" if "language" in ev.hedged else "not_stated"}
     english_stated = "english" in langs or ev.english_working_language
     if english_stated and profile.languages_met:
         ratings["english_intl"] = policy.english_met if "english" in profile.languages_met else policy.english_unmet
@@ -259,40 +266,43 @@ def _assess_details(ev: DetailEvidence, profile: Profile, policy: SuitabilityPol
 
 # Hits here never approve; they only downgrade an apply label to needs_user.
 _DOWNGRADE = {"geography_not_in_configured_countries", "geography_unknown", "identity_unknown",
-              "work_right_requirement_needs_owner_review", "duplicate_similarity_group"}
+              "work_right_requirement_needs_owner_review", "work_authorization_unknown_for_requirement",
+              "junior_signal_needs_review", "role_title_no_match_needs_review", "duplicate_similarity_group"}
+_STAGE = {"verified_apply_candidate": 0, "verified_needs_review": 1, "verified_incomplete": 1, "preliminary_high": 2,
+          "preliminary_medium": 3, "preliminary_low": 4, "verified_below_threshold": 5, "verified_blocked": 6}
 
 
 def _order_key(r: dict[str, Any]) -> tuple:
     s = r["suitability"]
-    stage_rank = {"verified_apply_candidate": 0, "verified_needs_review": 1, "preliminary_high": 2,
-                  "preliminary_medium": 3, "preliminary_low": 4, "verified_below_threshold": 5,
-                  "verified_blocked": 6, "preliminary_blocked": 6}[s["classification"]]
-    tier = {"tier_1": 0, "other": 1}.get(s["dimensions"]["geography"]["status"], 2)
-    return (stage_rank, -Fraction(s["score_exact"]), tier, r["ats_kind"], r["region"], r["tenant"],
+    tier = {"tier_1": 0, "other": 1}.get(s["dimensions"]["geography"]["status"], 2)   # tie-break only
+    return (_STAGE[s["classification"]], -Fraction(s["score_exact"]), tier, r["ats_kind"], r["region"], r["tenant"],
             r["posting_id"] or "", r["url"] or "", r["company"], r["role"], r["location"])
 
 
 def _preliminary_tier(dims: Mapping[str, Any]) -> str:
-    """Listing-metadata priority from known dimensions. Threshold bands are NOT used here: with most
-    components Unknown, the approved bands cannot be reached and would hide every difference."""
-    level = {"primary_match": 0, "secondary_match": 1, "unknown": 1, "no_title_match": 2}[dims["role_track"]["status"]]
-    if dims["seniority"]["status"] in ("exclude_match", "conflicting_title_terms"):
-        level += 1
-    geo = dims["geography"]["status"]
-    if geo == "not_configured":
-        level = 2
-    elif geo == "unknown":
-        level += 1
-    return ("preliminary_high", "preliminary_medium", "preliminary_low")[min(level, 2)]
+    """Listing-metadata priority from the role-track title match only (owner decision). Threshold bands are not
+    used: with most components Unknown the approved bands are unreachable. Geography and seniority are
+    tie-breaks/review gates, never tier changes. A title that matches nothing is low priority, not excluded."""
+    return {"primary_match": "preliminary_high", "secondary_match": "preliminary_medium", "unknown": "preliminary_medium",
+            "no_title_match": "preliminary_low"}[dims["role_track"]["status"]]
 
 
-def _classify(decision: Decision, level: str, flags: list[str], blocked_preliminary: bool,
-              dims: Mapping[str, Any]) -> str:
-    if level == "vacancy_details":
-        if decision.label == "auto_skip":
-            return "verified_blocked" if decision.reason_code.startswith("blocker:") else "verified_below_threshold"
-        return "verified_apply_candidate" if decision.label == "auto_apply" and not flags else "verified_needs_review"
-    return "preliminary_blocked" if blocked_preliminary else _preliminary_tier(dims)
+def _ceiling_exact(ratings: Mapping[str, int | None], criteria: Criteria) -> Fraction:
+    """Best score still reachable if every Unknown component turned out at 100."""
+    return compute_opportunity({c: 100 if r is None else r for c, r in ratings.items()}, criteria).score_exact
+
+
+def _classify(decision: Decision, level: str, flags: list[str], dims: Mapping[str, Any],
+              ratings: Mapping[str, int | None], criteria: Criteria) -> str:
+    if level == "listing_metadata":
+        return _preliminary_tier(dims)
+    if decision.label == "auto_skip":
+        if decision.reason_code.startswith("blocker:"):
+            return "verified_blocked"
+        # Below the minimum only counts as an exclusion when no Unknown could still lift the score over it.
+        return ("verified_below_threshold" if _ceiling_exact(ratings, criteria) < criteria.auto_apply_min
+                else "verified_incomplete")
+    return "verified_apply_candidate" if decision.label == "auto_apply" and not flags else "verified_needs_review"
 
 
 def assess_row(row: Mapping[str, Any], criteria: Criteria, profile: Profile, policy: SuitabilityPolicy, *,
@@ -313,6 +323,16 @@ def assess_row(row: Mapping[str, Any], criteria: Criteria, profile: Profile, pol
             ratings[comp] = spec["rating"]
             dims[comp] = {"status": "reviewer_rated", "ref": spec["ref"]}
 
+    # Explicit junior incompatibility needs two independent sources: a title marker and a posting statement.
+    marker = dims["seniority"].get("junior_title_marker")
+    statement = bool(evidence and evidence.junior_statement)
+    if marker and statement:
+        signals["junior_or_technical_only"] = True
+        dims["seniority"]["junior_posting_statement"] = evidence.quotes.get("junior_statement")
+    flags: list[str] = []
+    if level == "vacancy_details" and (marker or statement) and not (marker and statement):
+        flags.append("junior_signal_needs_review")
+
     facts = ListingFacts(
         listing_id=row["url"] or f"identity:{row['ats_kind']}:{row['tenant']}:{row.get('posting_id')}",
         ratings=ratings, vacancy_open=evidence.vacancy_open if evidence else None,
@@ -324,7 +344,6 @@ def assess_row(row: Mapping[str, Any], criteria: Criteria, profile: Profile, pol
     decision = decide(facts, criteria)
     result = compute_opportunity(ratings, criteria)
 
-    flags: list[str] = []
     geo = dims["geography"]["status"]
     if geo == "not_configured":
         flags.append("geography_not_in_configured_countries")
@@ -332,30 +351,41 @@ def assess_row(row: Mapping[str, Any], criteria: Criteria, profile: Profile, pol
         flags.append("geography_unknown")
     if not row.get("posting_id"):
         flags.append("identity_unknown")
-    if dims.get("work_authorization", {}).get("status") == "right_to_work_required_scope_unclear" \
-            and profile.work_authorization is not True:
+    wa = dims.get("work_authorization", {})
+    if wa.get("status") == "right_to_work_required_scope_unclear" and profile.work_authorization is not True:
         flags.append("work_right_requirement_needs_owner_review")
+    if wa.get("status") == "unrestricted_right_required" and profile.work_authorization is None:
+        flags.append("work_authorization_unknown_for_requirement")
+    if dims["role_track"]["status"] == "no_title_match":
+        flags.append("role_title_no_match_needs_review")
     if similarity_duplicate:
         flags.append("duplicate_similarity_group")
 
     label, reason = decision.label, decision.reason_code
     if label == "auto_apply" and any(f in _DOWNGRADE for f in flags):
-        label, reason = "needs_user", flags[0]
+        label, reason = "needs_user", next(f for f in flags if f in _DOWNGRADE)
+    final = decision if label == decision.label else replace(decision, label=label, reason_code=reason)
+    classification = _classify(final, level, flags, dims, ratings, criteria)
+
     blockers = [f"blocker:{c}" for c in criteria.hard_blockers if c != "closed-vacancy"
                 and signals.get(BLOCKER_FIELDS[c]) is True]
-    final = decision if label == decision.label else replace(decision, label=label, reason_code=reason)
-    classification = _classify(final, level, flags, bool(blockers), dims)
     unknown = list(result.unknown_components)
+    if classification == "verified_incomplete":
+        reason = "score_below_min_evidence_incomplete"
     need = sorted({dims[k]["need"] for k in dims if isinstance(dims[k], dict) and "need" in dims[k]}
                   | ({"vacancy_detail_not_observed"} if level == "listing_metadata" else set())
                   | {f"{c}_evidence_missing" for c in unknown})
+    # Confirmed = stated by the employer in the posting (or the posting is closed). Never from a title alone.
     incompat = sorted(
         [f"confirmed:{b}" for b in blockers]
         + (["confirmed:vacancy_closed"] if evidence and evidence.vacancy_open is False else [])
         + (["confirmed:compensation_below_target"] if dims.get("compensation", {}).get("status") ==
-           "below_target_confirmed" else [])
-        + (["title:seniority_excluded"] if dims["seniority"]["status"] == "exclude_match" else [])
-        + (["title:no_role_track_match"] if dims["role_track"]["status"] == "no_title_match" else []))
+           "below_target_confirmed" else []))
+    # Title-only observations: they lower priority and are listed here, but they never exclude a listing.
+    prelim = sorted(
+        (["title_no_role_track_match"] if dims["role_track"]["status"] == "no_title_match" else [])
+        + (["title_seniority_excluded_term"] if dims["seniority"]["status"] == "exclude_match" else [])
+        + ([f"title_junior_marker:{marker}"] if marker else []))
     return {
         "suitability": {
             "evidence_level": level, "classification": classification,
@@ -366,8 +396,9 @@ def assess_row(row: Mapping[str, Any], criteria: Criteria, profile: Profile, pol
             "band": result.band, "band_basis": ("verified_evidence" if level == "vacancy_details" else
                                                 "listing_metadata_unknown_credit_applied"),
             "ratings": dict(ratings), "unknown_components": unknown,
-            "dimensions": dims, "confirmed_incompatibilities": incompat, "missing_evidence": need,
-            "review_flags": flags, "detail_sha256": detail.detail_sha256 if detail else None,
+            "dimensions": dims, "confirmed_incompatibilities": incompat, "preliminary_signals": prelim,
+            "missing_evidence": need, "review_flags": flags,
+            "detail_sha256": detail.detail_sha256 if detail else None,
             "detail_quotes": dict(evidence.quotes) if evidence else {},
             "rule_version": criteria.rule_version, "policy_version": policy.version},
         "_decision": decision}
@@ -386,6 +417,24 @@ def _validate_input(report: Any) -> list[dict[str, Any]]:
     return rows
 
 
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def criteria_approval_status(criteria: Criteria, actual: str | None, expected: str | None,
+                             expected_rule_version: str | None) -> str:
+    if not expected or not expected_rule_version:
+        return "not_verified_no_expected_digest"
+    if not isinstance(expected, str) or not _HEX64.match(expected):
+        return "expected_digest_malformed"
+    if not isinstance(actual, str) or not _HEX64.match(actual):
+        return "not_verified_no_actual_digest"
+    if actual != expected:
+        return "digest_mismatch"
+    if criteria.rule_version != expected_rule_version:
+        return "rule_version_mismatch"
+    return "approved_digest_and_rule_version_match"
+
+
 def canonical_sha256(value: Any) -> str:
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
 
@@ -393,9 +442,15 @@ def canonical_sha256(value: Any) -> str:
 def evaluate_report(report: dict[str, Any], criteria: Criteria, *,
                     details: Mapping[tuple[str, str], VacancyDetail] | None = None,
                     reviewer_ratings: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
-                    criteria_approval_ref: str | None = None, criteria_sha256: str | None = None,
+                    criteria_sha256: str | None = None, expected_criteria_sha256: str | None = None,
+                    expected_rule_version: str | None = None,
                     policy: SuitabilityPolicy | None = None) -> dict[str, Any]:
-    """Prioritize a Function 02 projection. Deterministic: same inputs give byte-identical JSON."""
+    """Prioritize a Function 02 projection. Deterministic: same inputs give byte-identical JSON.
+
+    Approval is never asserted by the caller. The criteria count as owner-approved only when the digest of the
+    exact bytes read (``criteria_sha256``) equals the independently recorded ``expected_criteria_sha256`` and the
+    file's rule version equals ``expected_rule_version``.
+    """
     policy = policy or SuitabilityPolicy()
     rows = _validate_input(report)
     profile = profile_from_criteria(criteria)
@@ -445,15 +500,20 @@ def evaluate_report(report: dict[str, Any], criteria: Criteria, *,
     bands = Counter(r["suitability"]["band"] for r in out)
     reasons = Counter(c for r in out for c in r["suitability"]["reason_codes"])
     missing = Counter(c for r in out for c in r["suitability"]["missing_evidence"])
-    approved = bool(criteria_approval_ref)
+    approval = criteria_approval_status(criteria, criteria_sha256, expected_criteria_sha256, expected_rule_version)
+    approved = approval == "approved_digest_and_rule_version_match"
     return {
         "schema": SCHEMA, "source_schema": DISCOVERY_SCHEMA, "mode": "suitability_no_submit",
         "executable": False, "submit_authorized": False, "authority": dict(AUTHORITY),
         "source_projection": report.get("projection"), "source_report_sha256": canonical_sha256(report),
         "rule_version": criteria.rule_version, "policy_version": policy.version,
-        "criteria": {"schema": criteria.schema, "sha256": criteria_sha256, "approved_by_owner": approved,
-                     "approval_ref": criteria_approval_ref if approved else None, "profile_gaps": list(profile.gaps)},
-        "handoff_ready": approved and not profile.gaps,
+        "criteria": {"schema": criteria.schema, "rule_version": criteria.rule_version, "sha256": criteria_sha256,
+                     "expected_sha256": expected_criteria_sha256, "expected_rule_version": expected_rule_version,
+                     "approval": approval, "approved_by_owner": approved, "profile_gaps": list(profile.gaps)},
+        "policy": {"version": policy.version, "owner_approved_fields": list(APPROVED_POLICY_FIELDS),
+                   "provisional_fields": sorted(f for f in policy.__dataclass_fields__
+                                                if f not in (*APPROVED_POLICY_FIELDS, "version", "junior_markers"))},
+        "handoff_ready": approved and "role_tracks" not in profile.gaps,
         "input_rows": len(rows), "duplicate_rows": duplicate_rows, "listings_kept": len(out),
         "details_supplied": len(details), "details_applied": len(used),
         "details_rejected": dict(rejected), "details_unmatched": unused_details,
@@ -476,7 +536,7 @@ def project_for_bridge(report: dict[str, Any]) -> dict[str, Any]:
     """Priority-ordered view the unchanged W2 bridge accepts. Confirmed-blocked and below-threshold rows are dropped."""
     if not isinstance(report, dict) or report.get("schema") != SCHEMA or report.get("executable") is not False:
         raise SuitabilityError("SUITABILITY_PROJECTION_REFUSED")
-    drop = {"verified_blocked", "preliminary_blocked", "verified_below_threshold"}
+    drop = {"verified_blocked", "verified_below_threshold"}     # only confirmed exclusions leave the hand-off
     kept, excluded = [], Counter()
     for r in report["vacancies"]:
         s = r["suitability"]

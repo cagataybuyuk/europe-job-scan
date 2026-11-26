@@ -21,6 +21,18 @@ LANGUAGES = ("english", "dutch", "flemish", "german", "french", "spanish", "port
 
 _HEDGE = re.compile(r"\b(?:may|might|possibly|possible|case[- ]by[- ]case|depending|depends|subject to|"
                     r"if applicable|for the right|selected|exceptional|considered)\b", re.I)
+# Conditional, scoped or time-limited wording: the employer statement is ambiguous, so it is never a confirmed fact.
+_AMBIGUOUS = re.compile(r"\b(?:unless|except|excluding|other than|outside|currently|at this time|generally|usually|"
+                        r"typically|normally|in most cases|in some cases|for some|certain|preferably|ideally|"
+                        r"if\s+(?:you|applicable|needed|required|possible)|where\s+(?:possible|applicable)|"
+                        r"or equivalent|or similar)\b", re.I)
+# "... is not required", "no need for ...": the requirement is explicitly absent.
+_NOT_REQUIRED = re.compile(r"\b(?:(?:is|are|be|was|were)\s+(?:not|no longer|never)\s+(?:be\s+)?(?:required|necessary|needed|"
+                           r"mandatory|essential|a\s+requirement)|(?:not|n't)\s+(?:be\s+)?(?:required|necessary|needed|mandatory|"
+                           r"essential)|no\s+(?:need|requirement)|need\s+not|(?:do|does|don't|doesn't)\s+not\s+(?:need|require)|"
+                           r"don't\s+(?:need|require)|doesn't\s+require|not\s+a\s+requirement)\b", re.I)
+_NEGATION = re.compile(r"\b(?:not|no|never|neither|nor)\b|n't", re.I)
+_CUE = re.compile(r"\b(?:must|need|needs|required|requires?|require|have\s+to|has\s+to|should|mandatory|essential)\b", re.I)
 _SOFT_LANGUAGE = re.compile(r"\b(?:plus|advantage|asset|nice to have|preferred|desirable|beneficial|bonus|"
                             r"an added|is a plus|welcome|not required|not mandatory|optional)\b", re.I)
 
@@ -40,10 +52,13 @@ _YES_SPONSOR = tuple(re.compile(p, re.I) for p in (
 # Explicit demand for an unrestricted / permanent right to work, or for no need of sponsorship.
 _UNLIMITED_RIGHT = tuple(re.compile(p, re.I) for p in (
     r"\b(?:unrestricted|unlimited|permanent|indefinite)\s+right\s+to\s+work\b",
-    r"\bright\s+to\s+work\b[^.]{0,40}\b(?:without|not\s+requir\w+|no\s+need\s+for)\b[^.]{0,20}\bsponsorship\b",
+    r"\bright\s+to\s+work\b[^.]{0,40}\bwithout\b[^.]{0,20}\bsponsorship\b",
     r"\bwithout\s+(?:requiring\s+)?(?:visa\s+)?sponsorship\b",
-    r"\bmust\s+not\s+require\s+(?:visa\s+)?sponsorship\b",
 ))
+_UNLIMITED_EXPLICIT = re.compile(r"\b(?:must|need\s+to|have\s+to)\s+not\s+require\s+(?:visa\s+)?sponsorship\b", re.I)
+_JUNIOR_STATEMENT = re.compile(
+    r"\b(?:entry[- ]level|junior\s+(?:level|position|role|profile|engineer|analyst)|graduate\s+(?:programme|program|scheme)|"
+    r"internship|(?:0|zero)\s*(?:-|–|to)\s*[12]\s+years?|no\s+(?:prior\s+|previous\s+)?experience\s+(?:is\s+)?required)\b", re.I)
 _GENERIC_RIGHT = re.compile(r"\b(?:must|need\s+to|should|required\s+to)\s+(?:already\s+)?have\s+(?:the\s+)?"
                             r"(?:legal\s+)?right\s+to\s+work\b", re.I)
 _LANG = "(" + "|".join(LANGUAGES) + ")"
@@ -54,6 +69,7 @@ _MANDATORY_LANG = tuple(re.compile(p, re.I) for p in (
     rf"\b(?:must|need\s+to|have\s+to)\s+(?:be\s+)?(?:fluent|proficient)\s+in\s+{_LANG}\b",
     rf"\b(?:requires?|required)\s+(?:fluent\s+|native\s+)?{_LANG}\b(?!\s+(?:or|and/or)\b)[^.]{{0,15}}\b(?:fluency|fluent|native|proficiency)\b",
 ))
+_LANG_ALTERNATIVES = re.compile(rf"\b{_LANG}\b\s*(?:/|\bor\b|and/or)\s*{_LANG}\b", re.I)
 _WORKING_ENGLISH = re.compile(r"\b(?:working\s+language\s+is\s+english|english\s+is\s+(?:our|the)\s+(?:working|corporate|"
                               r"business)\s+language|work\s+in\s+an\s+english[- ]speaking)\b", re.I)
 _MONEY = re.compile(
@@ -146,6 +162,7 @@ class DetailEvidence:
     explicit_sponsorship_offered: bool | None = None
     requires_unlimited_work_right: bool | None = None
     generic_right_to_work_required: bool | None = None
+    junior_statement: bool | None = None
     mandatory_languages: tuple[str, ...] = ()
     english_working_language: bool | None = None
     compensation: dict[str, Any] | None = None
@@ -216,35 +233,47 @@ def extract_detail_evidence(detail: VacancyDetail) -> DetailEvidence:
     no_s = yes_s = unlimited = generic = False
     languages: list[str] = []
     working_english = False
+    junior = False
     for sentence in _sentences(detail.text):
-        if any(p.search(sentence) for p in _NO_SPONSOR):
-            if _HEDGE.search(sentence):
+        refuses = any(p.search(sentence) for p in _NO_SPONSOR)
+        if refuses:
+            if _HEDGE.search(sentence) or _AMBIGUOUS.search(sentence):
                 hedged.append("sponsorship")
             else:
                 no_s = True
                 quotes.setdefault("sponsorship_no", _quote(sentence))
-        if any(p.search(sentence) for p in _YES_SPONSOR) and not any(p.search(sentence) for p in _NO_SPONSOR):
-            if _HEDGE.search(sentence):
+        elif any(p.search(sentence) for p in _YES_SPONSOR):
+            if _HEDGE.search(sentence) or _AMBIGUOUS.search(sentence):
                 hedged.append("sponsorship")
             else:
                 yes_s = True
                 quotes.setdefault("sponsorship_yes", _quote(sentence))
-        if any(p.search(sentence) for p in _UNLIMITED_RIGHT) and not any(p.search(sentence) for p in _NO_SPONSOR):
-            unlimited = True
-            quotes.setdefault("unlimited_work_right", _quote(sentence))
-        if _GENERIC_RIGHT.search(sentence):
+        ambiguous = bool(_HEDGE.search(sentence) or _AMBIGUOUS.search(sentence) or _SOFT_LANGUAGE.search(sentence))
+        if any(p.search(sentence) for p in _UNLIMITED_RIGHT) and not refuses or _UNLIMITED_EXPLICIT.search(sentence):
+            if _NOT_REQUIRED.search(sentence) and not _UNLIMITED_EXPLICIT.search(sentence) or ambiguous or \
+                    not _CUE.search(sentence):
+                hedged.append("work_right")
+            else:
+                unlimited = True
+                quotes.setdefault("unlimited_work_right", _quote(sentence))
+        if _GENERIC_RIGHT.search(sentence) and not _NOT_REQUIRED.search(sentence) and not _NEGATION.search(sentence):
             generic = True
             quotes.setdefault("generic_right_to_work", _quote(sentence))
-        if not _SOFT_LANGUAGE.search(sentence):
-            for pattern in _MANDATORY_LANG:
-                for m in pattern.finditer(sentence):
-                    lang = m.group(1).lower()
+        found = [m.group(1).lower() for pattern in _MANDATORY_LANG for m in pattern.finditer(sentence)]
+        if found:
+            if ambiguous or _NEGATION.search(sentence) or _NOT_REQUIRED.search(sentence) or _LANG_ALTERNATIVES.search(sentence):
+                hedged.append("language")
+            else:
+                for lang in found:
                     if lang not in languages:
                         languages.append(lang)
                         quotes.setdefault(f"mandatory_language:{lang}", _quote(sentence))
-        if _WORKING_ENGLISH.search(sentence):
+        if _WORKING_ENGLISH.search(sentence) and not _NEGATION.search(sentence):
             working_english = True
             quotes.setdefault("english_working_language", _quote(sentence))
+        if _JUNIOR_STATEMENT.search(sentence) and not ambiguous:
+            junior = True
+            quotes.setdefault("junior_statement", _quote(sentence))
     comp = (normalize_structured_compensation(detail.structured_compensation)
             if detail.structured_compensation else extract_compensation(detail.text))
     contradictions = ("sponsorship_statements_conflict",) if no_s and yes_s else ()
@@ -254,6 +283,7 @@ def extract_detail_evidence(detail: VacancyDetail) -> DetailEvidence:
         explicit_sponsorship_offered=True if yes_s else None,
         requires_unlimited_work_right=True if unlimited else None,
         generic_right_to_work_required=True if generic else None,
+        junior_statement=True if junior else None,
         mandatory_languages=tuple(sorted(languages)),
         english_working_language=True if working_english else None,
         compensation=comp, quotes=dict(sorted(quotes.items())), contradictions=contradictions,
