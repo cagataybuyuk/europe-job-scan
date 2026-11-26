@@ -201,6 +201,13 @@ section is an additive fix; nothing was requested from an employer for it.
 * Dutch salary: euro amounts in Dutch formatting (`4.500`, `4.500,-`, ranges with a dash, `tot` or `en`) with an explicit
   month or year period and a salary word. Gross stays gross, net stays net, an unmarked amount stays `unspecified`; net is
   never derived. Allowances, bonuses and amounts without a period stay Unknown.
+* Compound salary words (`Brutomaandsalaris`, `Nettomaandsalaris`) state basis and period themselves. A benefit word
+  (bonus, allowance, `onkostenvergoeding`) disqualifies an amount only when it labels that amount (just before it, or
+  right after it up to the next comma), so a base range may share a sentence with bonuses and allowances.
+* Preference scope: `bij voorkeur ...` covers only what follows it. `Een afgeronde WO-masteropleiding, bij voorkeur op het
+  snijvlak van ...` is a mandatory completed WO master with a preferred specialisation; `minimaal 6-7+ jaar ... bij
+  voorkeur binnen consultancy` is a mandatory minimum of 6 years (open ended) with a preferred environment. Predicate
+  markers (`is een pré`, `pluspunt`), negation and conditions (`tenzij`, `geen ... nodig`) still apply to the whole clause.
 * Languages: Dutch wording (`spreekt vloeiend Nederlands`, `minimaal C1 Engels`, `Engels op C1-niveau`) with the CEFR level
   kept per language (`language_levels`). Preferences (`pré`, `bij voorkeur`, `plus`), negation, conditions and
   alternatives (`Nederlands of Engels`) are not promoted to a mandatory language.

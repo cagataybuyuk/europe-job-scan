@@ -1398,7 +1398,7 @@ def test_a_base_salary_range_coexists_with_bonus_and_allowance_but_benefits_are_
                  "Vaste onkostenvergoeding € 200 per maand.", "Salaris naar rato van ervaring."):
         assert ev(text).compensation is None, text
     assert ev("Nettomaandsalaris € 3.000 per maand.").compensation["basis"] == "net"     # net is stated, never derived
-    assert ev("Maandsalaris € 3.000.").compensation is None                              # amount without a period
+    assert ev("Salaris € 3.000.").compensation is None                              # amount without a period
 
 
 def test_real_mandatory_education_keeps_the_preferred_specialisation_apart():
