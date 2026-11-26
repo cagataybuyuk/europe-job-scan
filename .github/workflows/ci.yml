@@ -153,6 +153,7 @@ jobs:
           tests/test_expansion_shadow_integration.py
           tests/test_expansion_live.py
           tests/test_function04_suitability.py
+          tests/test_function05_detail_verification.py
           tests/unit/test_ejs_shadow_phaseA.py
 
   mvp01-render-regression:
