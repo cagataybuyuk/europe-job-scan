@@ -294,7 +294,10 @@ def test_restart_after_interruption_equals_uninterrupted_run(cli_inputs, approve
     final = json.loads((full / store.REPORT_NAMES[0]).read_bytes())
     assert final["listings_parsed"] == 4 and final["listings_kept"] == 3 and final["listings_duplicate"] == 1
     assert {v["posting_id"] for v in final["vacancies"]} == {"a", "b", "c"}
-    assert final["network_requests"] == 3 and final["transport_mode"] == "live_country_feed"
+    # 3 pages + 3 first-page rechecks would be 6, so the 5-request ceiling leaves the last recheck unchecked
+    assert [c["status"] for c in final["snapshot_consistency"]["first_page_rechecks"]] == [
+        "stable", "stable", "not_checked"]
+    assert final["network_requests"] == 5 and final["transport_mode"] == "live_country_feed"
     # every owner-only file, no candidate data
     for path in full.iterdir():
         assert path.stat().st_mode & 0o077 == 0
@@ -339,3 +342,129 @@ def test_process_killed_mid_batch_commits_nothing_and_resume_matches_clean_run(c
     run_cli(cli_inputs, clean_dir, Feed(DAY1), init=True)
     read = lambda d: (d / store.BUNDLE_NAME).read_bytes()
     assert read(killed_dir) == read(clean_dir)
+
+
+# --- pilot decisions: 5-request ceiling, drift recheck, minimal W2 projection --------------------
+
+from ejs.services.expansion_replay import LIVE_MAX_REQUESTS, recheck_first_page
+from ejs.services.expansion_shadow import project_for_application_bridge
+
+PILOT = frozenset({(KPMG, "NL")})
+
+
+@pytest.fixture
+def pilot(monkeypatch):
+    import scripts.expansion_shadow as es
+    import ejs.services.expansion_replay as er
+    monkeypatch.setattr(er, "LIVE_APPROVED_PAIRS", PILOT)
+    monkeypatch.setattr(es, "LIVE_APPROVED_PAIRS", PILOT)
+
+
+def two_pages(second_total=150, second_ids=None):
+    ids = [f"k{n:03d}" for n in range(150)]
+    return {(KPMG, "nl", 0): feed("NL", total=150, ids=ids[:100]),
+            (KPMG, "nl", 100): feed("NL", offset=100, total=second_total, ids=second_ids or ids[100:])}
+
+
+def report_of(out):
+    return json.loads((out / store.REPORT_NAMES[0]).read_bytes())
+
+
+def test_pilot_makes_exactly_pages_plus_one_recheck_and_never_more_than_five(cli_inputs, pilot):
+    out, feed_ = cli_inputs[2] / "pilot", Feed(two_pages())
+    status = run_cli(cli_inputs, out, feed_, init=True)
+    report = report_of(out)
+    assert LIVE_MAX_REQUESTS == 5
+    assert len(feed_.urls) == 3 == report["network_requests"]
+    assert [urlparse(u).query for u in feed_.urls] == [
+        "country=nl&offset=0&limit=100", "country=nl&offset=100&limit=100", "country=nl&offset=0&limit=100"]
+    assert [r["status"] for r in report["request_log"]] == [200, 200, 200]
+    checks = report["snapshot_consistency"]["first_page_rechecks"]
+    assert [c["status"] for c in checks] == ["stable"] and report["snapshot_consistency"]["atomic_snapshot"] is False
+    assert report["listings_kept"] == 150 and report["coverage"]["counts"]["completed"] == 1
+    assert status == 3                       # 242 pairs outside the approved scope stay incomplete
+
+
+def test_requests_never_exceed_five_even_when_every_call_fails(cli_inputs, pilot):
+    feed_ = Feed({(KPMG, "nl", 0): 429})
+    assert run_cli(cli_inputs, cli_inputs[2] / "p", feed_, init=True) == 1
+    assert len(feed_.urls) == 1              # no retry after a failure
+
+
+def test_recheck_detects_total_and_identity_drift():
+    def go(first, again):
+        calls = iter([first, again])
+        c = carrier(lambda url, h, t: (200, next(calls)))
+        result = live_replay_batch(initial_checkpoint(), c, c.begin_employer, approved=PILOT, max_pages=1)
+        return recheck_first_page(result.checkpoint.cursors[0], c, c.begin_employer)
+
+    base = feed("NL", total=2, ids=("a", "b"))
+    assert go(base, base)["status"] == "stable"
+    assert go(base, feed("NL", total=3, ids=("a", "b", "c")))["reason"] == "total_changed"
+    assert go(base, feed("NL", total=2, ids=("z", "a")))["reason"] == "first_page_identities_changed"
+    assert go(base, b"garbage")["status"] == "unreadable"
+
+
+def test_recheck_over_budget_is_not_a_failure():
+    calls = iter([feed("NL", total=1, ids=("a",))])
+    c = carrier(lambda url, h, t: (200, next(calls)), max_requests=1)
+    result = live_replay_batch(initial_checkpoint(), c, c.begin_employer, approved=PILOT, max_pages=1)
+    assert recheck_first_page(result.checkpoint.cursors[0], c, c.begin_employer)["status"] == "not_checked"
+
+
+def test_drift_between_pages_stops_the_pair_and_the_run_exits_nonzero(cli_inputs, pilot):
+    out = cli_inputs[2] / "drift"
+    assert run_cli(cli_inputs, out, Feed(two_pages(second_total=151)), init=True) == 1
+    report = report_of(out)
+    assert report["coverage"]["counts"]["failed"] == 1 and report["listings_kept"] == 100
+    with pytest.raises(ValueError, match="EXPANSION_PROJECTION_REFUSED"):
+        project_for_application_bridge(report)
+
+
+def test_recheck_drift_exits_nonzero_and_blocks_projection(cli_inputs, pilot):
+    pages = two_pages()
+    first = pages[(KPMG, "nl", 0)]
+    calls = {"n": 0}
+
+    class Moving(Feed):
+        def __call__(self, url, headers, timeout):
+            calls["n"] += 1
+            if calls["n"] == 3:                      # the recheck sees a shifted first page
+                return 200, feed("NL", total=151, ids=[f"k{n:03d}" for n in range(100)])
+            return super().__call__(url, headers, timeout)
+
+    out = cli_inputs[2] / "moving"
+    assert run_cli(cli_inputs, out, Moving(pages), init=True) == 1
+    report = report_of(out)
+    assert report["snapshot_consistency"]["first_page_rechecks"][0]["reason"] == "total_changed"
+    with pytest.raises(ValueError, match="EXPANSION_PROJECTION_REFUSED"):
+        project_for_application_bridge(report)
+
+
+def test_verified_projection_feeds_the_unchanged_bridge(cli_inputs, pilot):
+    out = cli_inputs[2] / "ok"
+    pages = {(KPMG, "nl", 0): feed("NL", total=2, ids=("744000000000001", "744000000000002"))}
+    run_cli(cli_inputs, out, Feed(pages), init=True)
+    projected = project_for_application_bridge(report_of(out))
+    assert projected["atomic_snapshot"] is False and projected["coverage_status"] == "incomplete"
+    prepared = prepare_application_report(projected)
+    assert [c["posting_id"] for c in prepared["candidates"]] == ["744000000000001", "744000000000002"]
+    assert prepared["executable"] is False and prepared["submit_authorized"] is False
+    assert {c["readiness"] for c in prepared["candidates"]} == {"missing_evidence"}
+
+
+@pytest.mark.parametrize("tamper", [
+    lambda r: r.update(transport_mode="offline_expansion"),
+    lambda r: r.update(execution_authorized=True),
+    lambda r: r["snapshot_consistency"].update(atomic_snapshot=True),
+    lambda r: r.update(listings_kept=r["listings_kept"] + 1),
+    lambda r: r["vacancies"][0]["discovery_evidence"].update(observation="synthetic_country_replay"),
+    lambda r: r.pop("snapshot_consistency"),
+])
+def test_projection_refuses_unverified_reports(cli_inputs, pilot, tamper):
+    out = cli_inputs[2] / "t"
+    run_cli(cli_inputs, out, Feed({(KPMG, "nl", 0): feed("NL", total=1, ids=("a",))}), init=True)
+    report = report_of(out)
+    tamper(report)
+    with pytest.raises(ValueError, match="EXPANSION_PROJECTION_REFUSED"):
+        project_for_application_bridge(report)

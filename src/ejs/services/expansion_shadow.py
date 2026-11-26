@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from ejs.services.criteria_loader import Criteria
 from ejs.services.discovery import AtsClass, classify_url
 from ejs.services.expansion_replay import COUNTRIES, RESEARCH, Checkpoint, live_page_url
-from ejs.services.shadow_run import build_shadow_report
+from ejs.services.shadow_run import SCHEMA as DISCOVERY_SCHEMA, build_shadow_report
 
 SCHEMA = "EJS-EXPANSION-SHADOW-REPORT-1"
 _SCOPE = {name: tenant for name, tenant, _, _ in RESEARCH}
@@ -29,11 +29,14 @@ def validate_watchlist(rows: list[dict[str, str]]) -> dict[str, str]:
 
 def build_expansion_report(checkpoint: Checkpoint, listings: list[dict[str, str]],
                            markets: dict[str, str], criteria: Criteria, *,
-                           live_requests: Mapping[str, int] | None = None) -> dict:
+                           live_requests: Mapping[str, int] | None = None,
+                           request_log: list[dict] | None = None,
+                           rechecks: list[dict] | None = None) -> dict:
     """Report cumulative coverage and evidence from a validated bundle snapshot.
 
     ``live_requests`` (employer tenant -> requests made by this invocation) marks a report built from the
-    live country feed; omit it for a synthetic replay.
+    live country feed; omit it for a synthetic replay. ``request_log`` (url, status, bytes) and ``rechecks``
+    (first-page drift checks) are recorded as observed. A live report never claims an atomic snapshot.
     """
     live = live_requests is not None
     failed_tenants = {cursor.tenant: cursor.error for cursor in checkpoint.cursors
@@ -80,6 +83,14 @@ def build_expansion_report(checkpoint: Checkpoint, listings: list[dict[str, str]
     report = build_shadow_report(employers, [], [by_identity[key] for key in countries], criteria,
                                  evidence_for=evidence, vacancy_open=None)
     parsed = sum(cursor.offset for cursor in checkpoint.cursors)
+    if live:
+        report["request_log"] = [{k: entry[k] for k in ("url", "status", "bytes")} for entry in request_log or []]
+        report["snapshot_consistency"] = {
+            "atomic_snapshot": False,
+            "statement": "Pages were read sequentially; completeness is per observed page and total, not a "
+                         "point-in-time snapshot. Unobserved changes cannot be excluded.",
+            "first_page_rechecks": list(rechecks or []),
+        }
     report.update(
         schema=SCHEMA, transport_mode="live_country_feed" if live else "offline_expansion",
         network_requests=sum(live_requests.values()) if live else 0,
@@ -97,3 +108,29 @@ def build_expansion_report(checkpoint: Checkpoint, listings: list[dict[str, str]
                       "Bu rapor yürütme yetkisi vermez."],
     )
     return report
+
+
+def project_for_application_bridge(report: dict) -> dict:
+    """Minimal W2-compatible view of a verified live expansion report; the bridge itself is unchanged.
+
+    Refuses synthetic reports, any failed pair, any non-stable drift check and anything that is not a
+    non-executable live report. The projection says explicitly that it is not an atomic snapshot.
+    """
+    consistency = report.get("snapshot_consistency") if isinstance(report, dict) else None
+    coverage = report.get("coverage") if isinstance(report, dict) else None
+    vacancies = report.get("vacancies") if isinstance(report, dict) else None
+    if (not isinstance(consistency, dict) or not isinstance(coverage, dict) or not isinstance(vacancies, list)
+            or report.get("schema") != SCHEMA or report.get("transport_mode") != "live_country_feed"
+            or report.get("execution_authorized") is not False
+            or consistency.get("atomic_snapshot") is not False
+            or coverage.get("counts", {}).get("failed") != 0 or coverage.get("status") == "failed"
+            or report.get("listings_kept") != len(vacancies)
+            or any(c.get("status") not in ("stable", "not_applicable")
+                   for c in consistency.get("first_page_rechecks", ()))
+            or any(not isinstance(v.get("discovery_evidence"), dict)
+                   or v["discovery_evidence"].get("observation") != "live_country_feed" for v in vacancies)):
+        raise ValueError("EXPANSION_PROJECTION_REFUSED")
+    return {"schema": DISCOVERY_SCHEMA, "mode": "shadow_no_submit", "source_schema": SCHEMA,
+            "projection": "verified_live_country_feed", "atomic_snapshot": False,
+            "coverage_status": coverage["status"], "listings_kept": len(vacancies),
+            "vacancies": [dict(v) for v in vacancies]}

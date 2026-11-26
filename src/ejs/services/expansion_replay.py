@@ -60,6 +60,8 @@ _PAGE_ERROR = "page_review_required"
 # Exact (tenant, country) pairs approved for live read-only collection. Owner decision; empty = no live access.
 LIVE_APPROVED_PAIRS: frozenset[tuple[str, str]] = frozenset()
 LIVE_FEED_HOST = "api.smartrecruiters.com"
+# Total GET attempts (failures included) one live invocation may make; the owner-approved pilot ceiling.
+LIVE_MAX_REQUESTS = 5
 _POSTING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
@@ -238,6 +240,32 @@ def live_replay_batch(checkpoint: Checkpoint, fetch: Callable[[str], bytes],
         return live_page(key[0], key[1], fetch(live_page_url(*key)))
 
     return _replay(checkpoint, read, max_pages, max_per_employer, approved)
+
+
+def recheck_first_page(cursor: Cursor, fetch: Callable[[str], bytes],
+                       begin_employer: Callable[[str], None]) -> dict[str, str]:
+    """Re-read offset 0 of a completed pair once and report observable drift.
+
+    A changed total or changed first-page identities shows the feed moved while it was being read. A stable
+    result proves nothing about unobserved pages, so no caller may claim an atomic snapshot from it.
+    """
+    pair = {"tenant": cursor.tenant, "country": cursor.country}
+    if cursor.status != "complete" or not cursor.total:
+        return {**pair, "status": "not_applicable", "reason": "empty_or_incomplete"}
+    try:
+        begin_employer(cursor.tenant)
+        again, page = _page(Cursor(cursor.tenant, cursor.country),
+                            live_page(cursor.tenant, cursor.country,
+                                      fetch(live_page_url(cursor.tenant, cursor.country, 0))))
+    except (RequestBudgetError, PageLimitError):
+        return {**pair, "status": "not_checked", "reason": "request_budget"}
+    except (KeyError, DiscoveryError):
+        return {**pair, "status": "unreadable", "reason": "recheck_page_rejected"}
+    if again.total != cursor.total:
+        return {**pair, "status": "drift", "reason": "total_changed"}
+    if again.seen != cursor.seen[:len(again.seen)]:
+        return {**pair, "status": "drift", "reason": "first_page_identities_changed"}
+    return {**pair, "status": "stable", "reason": "first_page_and_total_unchanged"}
 
 
 def _replay(checkpoint: Checkpoint, read: Callable[[tuple[str, str, int]], object],

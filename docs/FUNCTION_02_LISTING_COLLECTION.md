@@ -15,6 +15,18 @@ submits, writes forms, uploads candidate data or touches runtime, STOP, ledger o
 | `shadow_discovery.py --expansion-live` | Mutually exclusive with `--live`, `--fixture-dir` and `--expansion-fixtures`. Exits with `EXPANSION_LIVE_SCOPE_NOT_APPROVED` before any request while `LIVE_APPROVED_PAIRS` is empty. |
 | `build_expansion_report(live_requests=...)` | Marks `transport_mode: live_country_feed`, records the real feed URL as evidence and the per-employer request count of the invocation (`requests_scope: this_invocation`). `execution_authorized` stays `false`. |
 
+Added after owner decisions of 26 Nov 2026 (pilot `KPMGNederland` / `NL`, at most 5 public GET attempts,
+failures included, 1 s interval, no redirects, no authentication, no internal postings):
+
+| Area | Change |
+| --- | --- |
+| `LIVE_MAX_REQUESTS = 5` | Hard per-invocation ceiling. The CLI builds the carrier with it, so failed attempts count and nothing retries. |
+| `recheck_first_page` | After a pair completes, offset 0 is read once more. A changed `totalFound` or changed first-page identities is reported as `drift`; an unreadable page as `unreadable`; an exhausted budget as `not_checked`. One request is reserved for it. Any `drift` or `unreadable` check makes the run exit `1`. |
+| Pagination drift inside a run | Already fail-closed: changed total, wrong offset echo, repeated or overlapping IDs reject the page and block the tenant. |
+| `snapshot_consistency` | Every live report states `atomic_snapshot: false`. Completeness means observed pages and totals only. A stable recheck does not prove unobserved pages did not move. |
+| `request_log` | Each report lists URL, status and size of every request of the invocation. |
+| `project_for_application_bridge` | Minimal verified view for the unchanged W2 bridge (`schema`, `listings_kept`, `vacancies`, plus provenance fields). Refuses synthetic or executable reports, failed pairs, non-stable rechecks and count mismatches with `EXPANSION_PROJECTION_REFUSED`. |
+
 Preserved unchanged: normalization (`parse_smartrecruiters`), exact `(tenant, posting_id)` deduplication,
 cursor checkpoint, private bundle, report builder, the four-employer `--live` gate, and the HTTP carrier's
 GET-only, no-redirect, 1 s floor, 5/60 limits and host allowlist.
@@ -70,8 +82,8 @@ Request counts in a report describe the latest invocation only.
 
 1. **Scope approval.** Name the exact tenant/country pairs, as a prefix of `COUNTRIES` per tenant, and the request ceilings. The current four-employer gate lists only `Rituals1` for SmartRecruiters, which is not in the 27-employer research scope. Verifying the filter therefore needs an explicit read-only approval; this work made no live request.
 2. **Live verification run.** A small approved pilot (one tenant, one country, up to five requests) should confirm the lowercase code, filter exactness, total stability and the response shape before widening. Record only status codes, counts and execution IDs.
-3. **Bridge intake.** Decide whether the W2 bridge accepts the expansion schema when `transport_mode` is `live_country_feed`, or whether the explicit projection stays the contract.
-4. **Same-total drift.** Decide whether a second pass or a checkpointed total re-read is required for completeness claims.
+3. **Bridge intake.** Decided: the W2 contract is unchanged and `project_for_application_bridge` is the minimal verified projection.
+4. **Same-total drift.** Only the first page is re-read. Drift deeper in the feed is not observable inside the request budget, so no atomic or full-snapshot completeness is ever claimed.
 5. **Release.** Merge into `main` needs release approval. Exact-head CI on the pushed branch is not yet observed.
 
 ## Validation

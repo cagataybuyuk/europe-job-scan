@@ -12,7 +12,7 @@ import time
 
 from ejs.services.criteria_loader import load_criteria
 from ejs.services.expansion_replay import (
-    COUNTRIES, LIVE_APPROVED_PAIRS, RESEARCH, Checkpoint, live_replay_batch,
+    COUNTRIES, LIVE_APPROVED_PAIRS, LIVE_MAX_REQUESTS, RESEARCH, Checkpoint, live_replay_batch, recheck_first_page,
 )
 from ejs.services.http_carrier import HttpCarrier, MAX_REQUESTS_PER_RUN, urllib_transport
 from ejs.services.expansion_shadow import build_expansion_report, validate_watchlist
@@ -78,22 +78,34 @@ def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser, *,
             parser.error(_FIXTURE_ERROR)
 
     inputs = json.dumps([markets, criteria_bytes, fixture_digest, "live" if live else "fixtures"], sort_keys=True)
+    budget = min(args.expansion_max_pages or MAX_REQUESTS_PER_RUN, LIVE_MAX_REQUESTS)
     carrier = (HttpCarrier(enabled=True, transport=transport, clock=clock, sleep=sleep,
-                           max_requests=args.expansion_max_pages or MAX_REQUESTS_PER_RUN) if live else None)
+                           max_requests=budget, max_pages=budget) if live else None)
+    rechecks: list[dict] = []
     coverage_status = ""
 
     def render_reports(checkpoint: Checkpoint, listings: list[dict[str, str]]) -> tuple[bytes, bytes]:
         nonlocal coverage_status
         report = build_expansion_report(checkpoint, listings, markets, criteria,
-                                        live_requests=dict(carrier.per_employer) if live else None)
+                                        live_requests=dict(carrier.per_employer) if live else None,
+                                        request_log=carrier.log if live else None, rechecks=rechecks)
         coverage_status = report["coverage"]["status"]
         return ((json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n").encode(),
                 render_markdown(report).encode())
 
     replay = None
     if live:
-        replay = lambda checkpoint: live_replay_batch(  # noqa: E731
-            checkpoint, carrier, carrier.begin_employer, max_pages=args.expansion_max_pages)
+        # Keep one request for the drift recheck; further rechecks run only while the carrier budget remains.
+        reserve = 1 if budget > 1 else 0
+
+        def replay(checkpoint: Checkpoint):
+            before = {(c.tenant, c.country) for c in checkpoint.cursors if c.status == "complete"}
+            result = live_replay_batch(checkpoint, carrier, carrier.begin_employer,
+                                       max_pages=budget - reserve, max_per_employer=budget - reserve)
+            rechecks.extend(recheck_first_page(c, carrier, carrier.begin_employer)
+                            for c in result.checkpoint.cursors
+                            if c.status == "complete" and (c.tenant, c.country) not in before)
+            return result
     try:
         result = replay_private_batch(Path(args.out_dir), fixtures, initialize=args.expansion_init,
                                       max_pages=args.expansion_max_pages, replay=replay,
@@ -102,4 +114,6 @@ def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser, *,
         parser.error(STORE_ERROR)
     print(f"coverage={coverage_status} {'live' if live else 'fixture'}_pages={result.pages} "
           f"new_listings={len(result.listings)} requests={carrier.total if live else 0}")
+    if any(c["status"] in ("drift", "unreadable") for c in rechecks):
+        return 1
     return {"completed": 0, "failed": 1, "incomplete": 3}[coverage_status]
