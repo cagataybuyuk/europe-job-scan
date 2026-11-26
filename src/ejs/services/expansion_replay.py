@@ -1,19 +1,25 @@
-"""W3.5 research-backed, offline-only country replay.
+"""W3.5 research-backed country replay and the FUNCTION-02 live-feed adapter.
 
-No network, filesystem, queue or submission integration. Existing live pilot
-gate and transport remain unchanged. Research counts are historical evidence,
-never a filter or a claim of current completeness.
+The replay itself has no network, filesystem, queue or submission integration.
+``live_replay_batch`` reads pages through an injected read-only carrier and only
+for pairs in ``LIVE_APPROVED_PAIRS``, which is empty until the owner approves an
+exact employer/country scope in a reviewed change. The existing four-employer
+pilot gate and transport are unchanged. Research counts are historical
+evidence, never a filter or a claim of current completeness.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+import json
 import re
+from urllib.parse import quote
 
 from ejs.services.discovery import (
     AtsClass, BadPayloadError, DiscoveryError, PAGE_SIZE,
     MAX_PAGES_PER_EMPLOYER, parse_smartrecruiters,
 )
-from ejs.services.http_carrier import MAX_REQUESTS_PER_RUN
+from ejs.services.http_carrier import MAX_REQUESTS_PER_RUN, PageLimitError, RequestBudgetError
 
 COUNTRIES = ("NL", "IE", "DE", "BE", "SE", "DK", "ES", "PT", "IT")
 SCOPE_VERSION = "W3.4-2026-11-26-v1"
@@ -51,6 +57,9 @@ _SCOPE = tuple((tenant, country) for _, tenant, _, _ in RESEARCH for country in 
 _NAMES = {tenant: name for name, tenant, _, _ in RESEARCH}
 _ERROR = "EXPANSION_CHECKPOINT_REVIEW_REQUIRED"
 _PAGE_ERROR = "page_review_required"
+# Exact (tenant, country) pairs approved for live read-only collection. Owner decision; empty = no live access.
+LIVE_APPROVED_PAIRS: frozenset[tuple[str, str]] = frozenset()
+LIVE_FEED_HOST = "api.smartrecruiters.com"
 _POSTING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
@@ -153,6 +162,43 @@ def _page(cursor: Cursor, payload: object) -> tuple[Cursor, list[dict[str, str]]
                    status="complete" if new_offset == total else "pending"), page
 
 
+def live_page_url(tenant: str, country: str, offset: int) -> str:
+    """Public postings feed URL; SmartRecruiters documents ``country`` as a lowercase ISO 3166-1 alpha-2 filter."""
+    if (tenant, country) not in _SCOPE or type(offset) is not int or offset < 0:
+        raise ValueError(_ERROR)
+    return (f"https://{LIVE_FEED_HOST}/v1/companies/{quote(tenant, safe='')}/postings"
+            f"?country={country.lower()}&offset={offset}&limit={PAGE_SIZE}")
+
+
+def live_page(tenant: str, country: str, body: bytes) -> dict:
+    """Turn a real feed response into the replay page shape without trusting it.
+
+    The feed carries no tenant/country metadata, so those come from the request; offset/limit/total stay as echoed. The provider reports
+    lowercase country codes; a posting is relabelled only when it equals the requested country ignoring case.
+    Anything else stays as received and is rejected by ``_page``.
+    """
+    try:
+        payload = json.loads(bytes(body).decode("utf-8"))
+    except (ValueError, RecursionError):
+        raise BadPayloadError("invalid_json") from None
+    if type(payload) is not dict or type(payload.get("content")) is not list:
+        raise BadPayloadError("invalid_page")
+    items = []
+    for item in payload["content"]:
+        if type(item) is dict:
+            item = dict(item)
+            location, publisher = item.get("location"), item.get("company")
+            if type(location) is dict and type(location.get("country")) is str \
+                    and location["country"].casefold() == country.casefold():
+                item["location"] = {**location, "country": country}
+            if type(publisher) is dict and type(publisher.get("identifier")) is str \
+                    and publisher["identifier"].casefold() == tenant.casefold():
+                item["company"] = {**publisher, "identifier": tenant}
+        items.append(item)
+    # offset stays as the provider echoed it: _page compares it with the cursor.
+    return {**payload, "content": items, "tenant": tenant, "country": country}
+
+
 def replay_batch(checkpoint: Checkpoint, fixtures: dict[tuple[str, str, int], object],
                  *, max_pages: int = MAX_REQUESTS_PER_RUN,
                  max_per_employer: int = MAX_PAGES_PER_EMPLOYER) -> ReplayResult:
@@ -164,9 +210,40 @@ def replay_batch(checkpoint: Checkpoint, fixtures: dict[tuple[str, str, int], ob
     tenant and country, including empty pages. Listings are new identities only,
     including across countries and prior batches.
     """
-    validate_checkpoint(checkpoint)
     if type(fixtures) is not dict:
         raise ValueError("EXPANSION_FIXTURES_INVALID")
+    return _replay(checkpoint, fixtures.__getitem__, max_pages, max_per_employer, None)
+
+
+def live_replay_batch(checkpoint: Checkpoint, fetch: Callable[[str], bytes],
+                      begin_employer: Callable[[str], None], *,
+                      approved: frozenset[tuple[str, str]] | None = None,
+                      max_pages: int = MAX_REQUESTS_PER_RUN,
+                      max_per_employer: int = MAX_PAGES_PER_EMPLOYER) -> ReplayResult:
+    """Read live country pages through an injected carrier (normally ``HttpCarrier``).
+
+    Same validation, 5/60 ceilings, tenant isolation and checkpoint semantics as ``replay_batch``. Pairs outside
+    ``approved`` (default ``LIVE_APPROVED_PAIRS``; per tenant a prefix of ``COUNTRIES``) are never requested and stay pending. A carrier that is
+    tighter than the batch ceilings stops the batch without marking a pair failed.
+    """
+    approved = LIVE_APPROVED_PAIRS if approved is None else approved
+    if type(approved) is not frozenset or not approved <= set(_SCOPE) or any(
+            {c for t, c in approved if t == tenant} != set(COUNTRIES[:sum(1 for t, _ in approved if t == tenant)])
+            for tenant in {t for t, _ in approved}):
+        # A tenant's countries advance in COUNTRIES order (see validate_checkpoint), so its approved set is a prefix.
+        raise ValueError("EXPANSION_LIVE_SCOPE_INVALID")
+
+    def read(key: tuple[str, str, int]) -> object:
+        begin_employer(key[0])
+        return live_page(key[0], key[1], fetch(live_page_url(*key)))
+
+    return _replay(checkpoint, read, max_pages, max_per_employer, approved)
+
+
+def _replay(checkpoint: Checkpoint, read: Callable[[tuple[str, str, int]], object],
+            max_pages: int, max_per_employer: int,
+            approved: frozenset[tuple[str, str]] | None) -> ReplayResult:
+    validate_checkpoint(checkpoint)
     if (type(max_pages) is not int or not 0 < max_pages <= MAX_REQUESTS_PER_RUN
             or type(max_per_employer) is not int
             or not 0 < max_per_employer <= MAX_PAGES_PER_EMPLOYER):
@@ -177,15 +254,22 @@ def replay_batch(checkpoint: Checkpoint, fixtures: dict[tuple[str, str, int], ob
     counts: dict[str, int] = {}
     output = []
     pages = duplicates = 0
+    exhausted = False
     for index, cursor in enumerate(cursors):
         while (cursor.status == "pending" and cursor.tenant not in blocked
+               and (approved is None or (cursor.tenant, cursor.country) in approved)
                and pages < max_pages
                and counts.get(cursor.tenant, 0) < max_per_employer):
             pages += 1
             counts[cursor.tenant] = counts.get(cursor.tenant, 0) + 1
             key = (cursor.tenant, cursor.country, cursor.offset)
             try:
-                next_cursor, page = _page(cursor, fixtures[key])
+                next_cursor, page = _page(cursor, read(key))
+            except (RequestBudgetError, PageLimitError):
+                pages -= 1
+                counts[cursor.tenant] -= 1
+                exhausted = True
+                break
             except (KeyError, DiscoveryError):
                 cursor = replace(cursor, status="error", error=_PAGE_ERROR)
                 blocked.add(cursor.tenant)
@@ -199,7 +283,7 @@ def replay_batch(checkpoint: Checkpoint, fixtures: dict[tuple[str, str, int], ob
                     seen.add(identity)
                     output.append(item)
         cursors[index] = cursor
-        if pages >= max_pages:
+        if exhausted or pages >= max_pages:
             break
     return ReplayResult(Checkpoint(SCOPE_VERSION, tuple(cursors)),
                         tuple(output), pages, duplicates)

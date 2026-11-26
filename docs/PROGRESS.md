@@ -49,3 +49,11 @@ invalid URL ports, missing markets and unresolved LinkedIn redirect URLs.
 The focused suite passed again with 34 tests. The real export produced the
 same coverage counts and byte-identical reports across two CLI runs.
 Secret scanning and authority boundary checks passed.
+
+## 2026-11-26 — FUNCTION-02 Listing Collection (live-feed adapter, gated)
+
+Added a provider-shaped live page adapter on top of the W3.5 replay: documented `country` filter URL,
+case-insensitive country/tenant binding, fail-closed validation, a carrier-backed `live_replay_batch`,
+a durable-store replay hook and an `--expansion-live` CLI that refuses to run while `LIVE_APPROVED_PAIRS`
+is empty. No live request was made. See [FUNCTION-02 Listing Collection](FUNCTION_02_LISTING_COLLECTION.md)
+for criteria status, evidence, blockers and owner decisions.

@@ -210,7 +210,8 @@ def render_markdown(rep: Mapping[str, Any]) -> str:
         if e["status"] != "pending_adapter":
             L.append(f"| {e['employer']} | {e['ats']} | {e['status']} | {e['error_kind'] or '-'} | {e['requests']} | {e['listings']} |")
     if coverage:
-        L += ["", "## Sentetik ülke kapsamı", "", f"Durum **{coverage['status']}** · `{coverage['scope_version']}`",
+        label = "Canlı ülke kapsamı" if rep.get("transport_mode") == "live_country_feed" else "Sentetik ülke kapsamı"
+        L += ["", f"## {label}", "", f"Durum **{coverage['status']}** · `{coverage['scope_version']}`",
               ", ".join(f"{status}: {count}" for status, count in coverage["counts"].items()), "",
               "| Tenant | Ülke | Durum | Kabul edilen ilan | Bildirilen toplam | Hata sınıfı |",
               "|---|---|---|---|---|---|"]

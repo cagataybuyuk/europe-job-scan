@@ -144,13 +144,17 @@ def _publish_file(directory_fd: int, name: str, raw: bytes) -> None:
     os.fsync(directory_fd)
 
 
-def replay_private_batch(directory: Path, fixtures: dict[tuple[str, str, int], object], *,
+def replay_private_batch(directory: Path, fixtures: dict[tuple[str, str, int], object] | None, *,
                          initialize: bool = False, max_pages: int = MAX_REQUESTS_PER_RUN,
                          max_per_employer: int = MAX_PAGES_PER_EMPLOYER,
                          input_digest: str | None = None,
                          render_reports: Callable[[Checkpoint, list[dict[str, str]]],
-                                                  tuple[bytes, bytes]] | None = None) -> ReplayResult:
-    """Run one synthetic batch and atomically commit progress with cumulative output.
+                                                  tuple[bytes, bytes]] | None = None,
+                         replay: Callable[[Checkpoint], ReplayResult] | None = None) -> ReplayResult:
+    """Run one batch and atomically commit progress with cumulative output.
+
+    Without ``replay`` the batch consumes ``fixtures``. A live caller passes ``replay`` (for example a
+    ``live_replay_batch`` closure) and ``fixtures=None``; the commit, lock and recovery rules are identical.
 
     Each call holds a process lock and reloads the owner-only bundle. Explicit
     initialization requires an absent bundle; resume requires an existing one.
@@ -185,8 +189,13 @@ def replay_private_batch(directory: Path, fixtures: dict[tuple[str, str, int], o
                                 raise ValueError(STORE_ERROR)
                     except FileNotFoundError:
                         continue
-            result = replay_batch(checkpoint, fixtures, max_pages=max_pages,
-                                  max_per_employer=max_per_employer)
+            if replay is not None:
+                if fixtures is not None:
+                    raise ValueError(STORE_ERROR)
+                result = replay(checkpoint)
+            else:
+                result = replay_batch(checkpoint, fixtures, max_pages=max_pages,
+                                      max_per_employer=max_per_employer)
             listings.extend(result.listings)
             if initialize or result.pages:
                 _publish_bundle(directory_fd, result.checkpoint, listings, input_digest)

@@ -7,6 +7,8 @@
 Without --live and without --fixture-dir the carrier is OFF: supported employers report ``no_carrier``.
 --fixture-dir replays ``<dir>/<api-host>/<tenant>/<offset>.json``. The first page has offset 0.
 --expansion-fixtures runs bounded W3.5 synthetic country replay with a durable private checkpoint.
+--expansion-live runs the same bounded workflow against the public country feed, but only for the pairs in
+``expansion_replay.LIVE_APPROVED_PAIRS`` (empty until the owner approves a scope); otherwise it exits before any request.
 """
 from __future__ import annotations
 
@@ -212,11 +214,13 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--fixture-dir")
     mode.add_argument("--live", action="store_true", help="Phase B: public GET for the four pilot employers")
     mode.add_argument("--expansion-fixtures", help="W3.5: synthetic country-page JSON snapshot")
+    mode.add_argument("--expansion-live", action="store_true",
+                      help="FUNCTION-02: read-only country feed, only for owner-approved employer/country pairs")
     a = ap.parse_args(argv)
 
-    if a.expansion_fixtures is not None:
+    if a.expansion_fixtures is not None or a.expansion_live:
         if a.sheet_labels is not None:
-            ap.error("--sheet-labels cannot be used with --expansion-fixtures")
+            ap.error("--sheet-labels cannot be used with --expansion-fixtures or --expansion-live")
         if a.expansion_max_pages is None:
             a.expansion_max_pages = MAX_REQUESTS_PER_RUN
         if not 1 <= a.expansion_max_pages <= MAX_REQUESTS_PER_RUN:
@@ -227,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
             from expansion_shadow import run_expansion
         return run_expansion(a, ap)
     if a.expansion_init or a.expansion_max_pages is not None:
-        ap.error("W3.5 options require --expansion-fixtures")
+        ap.error("W3.5 options require --expansion-fixtures or --expansion-live")
 
     criteria = load_criteria(a.criteria)
     try:

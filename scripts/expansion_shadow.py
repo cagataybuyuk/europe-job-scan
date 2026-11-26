@@ -8,9 +8,13 @@ import json
 import os
 from pathlib import Path
 import stat
+import time
 
 from ejs.services.criteria_loader import load_criteria
-from ejs.services.expansion_replay import COUNTRIES, RESEARCH, Checkpoint
+from ejs.services.expansion_replay import (
+    COUNTRIES, LIVE_APPROVED_PAIRS, RESEARCH, Checkpoint, live_replay_batch,
+)
+from ejs.services.http_carrier import HttpCarrier, MAX_REQUESTS_PER_RUN, urllib_transport
 from ejs.services.expansion_shadow import build_expansion_report, validate_watchlist
 from ejs.services.shadow_run import read_watchlist, render_markdown
 
@@ -50,7 +54,11 @@ def _load_fixtures(path: Path) -> tuple[dict[tuple[str, str, int], object], str]
     return fixtures, sha256(raw).hexdigest()
 
 
-def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser, *,
+                  transport=urllib_transport, clock=time.monotonic, sleep=time.sleep) -> int:
+    live = bool(getattr(args, "expansion_live", False))
+    if live and not LIVE_APPROVED_PAIRS:
+        parser.error("EXPANSION_LIVE_SCOPE_NOT_APPROVED")
     try:
         markets = validate_watchlist(read_watchlist(args.watchlist))
     except (OSError, ValueError, csv.Error):
@@ -60,26 +68,38 @@ def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         criteria_bytes = json.dumps(criteria.raw, sort_keys=True, allow_nan=False)
     except (ValueError, RecursionError):
         parser.error("EXPANSION_CRITERIA_INVALID")
-    try:
-        fixtures, fixture_digest = _load_fixtures(Path(args.expansion_fixtures))
-    except (OSError, ValueError, RecursionError):
-        parser.error(_FIXTURE_ERROR)
+    fixtures = None
+    if live:
+        fixture_digest = sha256(json.dumps(sorted(LIVE_APPROVED_PAIRS)).encode()).hexdigest()
+    else:
+        try:
+            fixtures, fixture_digest = _load_fixtures(Path(args.expansion_fixtures))
+        except (OSError, ValueError, RecursionError):
+            parser.error(_FIXTURE_ERROR)
 
-    inputs = json.dumps([markets, criteria_bytes, fixture_digest], sort_keys=True)
+    inputs = json.dumps([markets, criteria_bytes, fixture_digest, "live" if live else "fixtures"], sort_keys=True)
+    carrier = (HttpCarrier(enabled=True, transport=transport, clock=clock, sleep=sleep,
+                           max_requests=args.expansion_max_pages or MAX_REQUESTS_PER_RUN) if live else None)
     coverage_status = ""
 
     def render_reports(checkpoint: Checkpoint, listings: list[dict[str, str]]) -> tuple[bytes, bytes]:
         nonlocal coverage_status
-        report = build_expansion_report(checkpoint, listings, markets, criteria)
+        report = build_expansion_report(checkpoint, listings, markets, criteria,
+                                        live_requests=dict(carrier.per_employer) if live else None)
         coverage_status = report["coverage"]["status"]
         return ((json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n").encode(),
                 render_markdown(report).encode())
 
+    replay = None
+    if live:
+        replay = lambda checkpoint: live_replay_batch(  # noqa: E731
+            checkpoint, carrier, carrier.begin_employer, max_pages=args.expansion_max_pages)
     try:
         result = replay_private_batch(Path(args.out_dir), fixtures, initialize=args.expansion_init,
-                                      max_pages=args.expansion_max_pages,
+                                      max_pages=args.expansion_max_pages, replay=replay,
                                       input_digest=sha256(inputs.encode()).hexdigest(), render_reports=render_reports)
     except PermissionError:
         parser.error(STORE_ERROR)
-    print(f"coverage={coverage_status} fixture_pages={result.pages} new_listings={len(result.listings)} requests=0")
+    print(f"coverage={coverage_status} {'live' if live else 'fixture'}_pages={result.pages} "
+          f"new_listings={len(result.listings)} requests={carrier.total if live else 0}")
     return {"completed": 0, "failed": 1, "incomplete": 3}[coverage_status]

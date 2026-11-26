@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 
 from ejs.services.criteria_loader import Criteria
 from ejs.services.discovery import AtsClass, classify_url
-from ejs.services.expansion_replay import COUNTRIES, RESEARCH, Checkpoint
+from ejs.services.expansion_replay import COUNTRIES, RESEARCH, Checkpoint, live_page_url
 from ejs.services.shadow_run import build_shadow_report
 
 SCHEMA = "EJS-EXPANSION-SHADOW-REPORT-1"
@@ -27,8 +28,14 @@ def validate_watchlist(rows: list[dict[str, str]]) -> dict[str, str]:
 
 
 def build_expansion_report(checkpoint: Checkpoint, listings: list[dict[str, str]],
-                           markets: dict[str, str], criteria: Criteria) -> dict:
-    """Report cumulative coverage and evidence from a validated bundle snapshot."""
+                           markets: dict[str, str], criteria: Criteria, *,
+                           live_requests: Mapping[str, int] | None = None) -> dict:
+    """Report cumulative coverage and evidence from a validated bundle snapshot.
+
+    ``live_requests`` (employer tenant -> requests made by this invocation) marks a report built from the
+    live country feed; omit it for a synthetic replay.
+    """
+    live = live_requests is not None
     failed_tenants = {cursor.tenant: cursor.error for cursor in checkpoint.cursors
                       if cursor.status == "error"}
     pair_counts = dict.fromkeys(("completed", "incomplete", "blocked", "failed"), 0)
@@ -53,13 +60,16 @@ def build_expansion_report(checkpoint: Checkpoint, listings: list[dict[str, str]
             countries[cursor.tenant, posting_id].append(cursor.country)
 
     def evidence(item: dict[str, str]) -> dict:
-        return {"observation": "synthetic_country_replay", "feed_url": None,
-                "countries": countries[item["tenant"], item["posting_id"]]}
+        seen_in = countries[item["tenant"], item["posting_id"]]
+        return {"observation": "live_country_feed" if live else "synthetic_country_replay",
+                "feed_url": live_page_url(item["tenant"], seen_in[0], 0) if live else None,
+                "countries": seen_in}
 
     per_employer = Counter(item["tenant"] for item in listings)
     employers = [
         {"employer": name, "market": markets[tenant], "ats": "smartrecruiters",
-         "tenant": tenant, "region": "global", "listings": per_employer[tenant], "requests": 0,
+         "tenant": tenant, "region": "global", "listings": per_employer[tenant],
+         "requests": live_requests.get(tenant, 0) if live else 0,
          "status": ("failed" if tenant in failed_tenants else
                     "incomplete" if tenant in pending_tenants else "completed"),
          "error_kind": failed_tenants.get(tenant)}
@@ -71,7 +81,9 @@ def build_expansion_report(checkpoint: Checkpoint, listings: list[dict[str, str]
                                  evidence_for=evidence, vacancy_open=None)
     parsed = sum(cursor.offset for cursor in checkpoint.cursors)
     report.update(
-        schema=SCHEMA, transport_mode="offline_expansion", network_requests=0,
+        schema=SCHEMA, transport_mode="live_country_feed" if live else "offline_expansion",
+        network_requests=sum(live_requests.values()) if live else 0,
+        requests_scope="this_invocation" if live else "none",
         listings_parsed=parsed, listings_duplicate=parsed - len(listings),
         coverage={"scope_version": checkpoint.scope_version, "countries": list(COUNTRIES),
                   "status": ("failed" if failed_tenants else
@@ -79,7 +91,8 @@ def build_expansion_report(checkpoint: Checkpoint, listings: list[dict[str, str]
                   "counts": pair_counts, "pairs": pairs},
         sponsorship_eligibility="unknown", application_readiness="unverified",
         execution_authorized=False,
-        not_verified=["Kapsam, sentetik işveren ve ülke sayfalarının okunmasını gösterir.",
+        not_verified=["Kapsam, onaylı işveren ve ülke sayfalarının okunmasını gösterir." if live else
+                      "Kapsam, sentetik işveren ve ülke sayfalarının okunmasını gösterir.",
                       "İlanların güncelliği, sponsorluk uygunluğu ve başvuru erişilebilirliği doğrulanmadı.",
                       "Bu rapor yürütme yetkisi vermez."],
     )
