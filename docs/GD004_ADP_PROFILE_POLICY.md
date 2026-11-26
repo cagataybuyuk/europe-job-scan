@@ -107,3 +107,9 @@ Before the live profile-v2 canary is dispatched, both environment secrets must h
 3. explicit boolean `adp_ascii_name_policy_approved`.
 
 If either secret is missing, malformed, or contains unsupported identity text, execution fails before any browser profile write.
+
+## AWLI-prefilled values — planned policy
+
+AWLI does not change profile ownership or the native canary's prohibition on social sign-in. After a separately reviewed AWLI entry, compare every returned ADP value with the canonical candidate profile and this policy before advancing. LinkedIn values never become candidate facts automatically. Name normalization still requires `adp_ascii_name_policy_approved`; phone formatting must not be guessed or semantically rewritten. Correct mismatches only through reviewed current-surface safe-fill authority and verified readback. Unresolved/locked mismatches or unknown required facts stop for `human_review`.
+
+The [AWLI feasibility spike](ADP_AWLI_FEASIBILITY_SPIKE.md) must record sanitized field coverage and match/mismatch outcomes without exposing raw values. Existing fingerprint and consent/CV/submit boundaries remain intact.
