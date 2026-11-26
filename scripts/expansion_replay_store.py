@@ -1,4 +1,4 @@
-"""Owner-only persistence for synthetic W3.5 replay batches."""
+"""Owner-only persistence for W3.5 replay batches and FUNCTION-02 live collection evidence."""
 
 from __future__ import annotations
 
@@ -15,8 +15,9 @@ from uuid import uuid4
 
 from ejs.services.expansion_replay import (
     MAX_PAGES_PER_EMPLOYER, MAX_REQUESTS_PER_RUN, RESEARCH,
-    Checkpoint, Cursor, ReplayResult, initial_checkpoint, replay_batch,
-    validate_checkpoint,
+    Checkpoint, Cursor, LiveObservation, ReplayResult, begin_invocation, empty_evidence,
+    initial_checkpoint, record_invocation, remaining_requests, replay_batch, settle_in_flight,
+    validate_checkpoint, validate_evidence,
 )
 if __package__:
     from .shadow_discovery import private_output_directory, require_no_extended_acl
@@ -67,7 +68,8 @@ def decode_json(raw: bytes) -> object:
     return json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
 
 
-def _load_bundle(directory_fd: int, input_digest: str | None) -> tuple[Checkpoint, list[dict[str, str]]]:
+def _load_bundle(directory_fd: int, input_digest: str | None, live: bool = False
+                 ) -> tuple[Checkpoint, list[dict[str, str]], dict | None]:
     with _private_file(directory_fd, BUNDLE_NAME, os.O_RDONLY) as fd:
         with os.fdopen(fd, "rb", closefd=False) as stream:
             raw = stream.read(_MAX_BYTES + 1)
@@ -77,6 +79,8 @@ def _load_bundle(directory_fd: int, input_digest: str | None) -> tuple[Checkpoin
     keys = {"schema", "checkpoint", "listings"}
     if input_digest is not None:
         keys.add("input_sha256")
+    if live:
+        keys.add("evidence")   # a live bundle without evidence has unknown request accounting: refuse it
     if (type(bundle) is not dict or bundle.keys() != keys or bundle.get("input_sha256") != input_digest
             or bundle["schema"] != _SCHEMA or type(bundle["listings"]) is not list):
         raise ValueError(STORE_ERROR)
@@ -113,14 +117,20 @@ def _load_bundle(directory_fd: int, input_digest: str | None) -> tuple[Checkpoin
             raise ValueError(STORE_ERROR)
     if remaining:
         raise ValueError(STORE_ERROR)
-    return checkpoint, bundle["listings"]
+    evidence = bundle.get("evidence")
+    if live:
+        validate_evidence(evidence)
+    return checkpoint, bundle["listings"], evidence
 
 
 def _publish_bundle(directory_fd: int, checkpoint: Checkpoint, listings: list[dict[str, str]],
-                    input_digest: str | None) -> None:
+                    input_digest: str | None, evidence: dict | None = None) -> None:
     bundle = {"schema": _SCHEMA, "checkpoint": asdict(checkpoint), "listings": listings}
     if input_digest is not None:
         bundle["input_sha256"] = input_digest
+    if evidence is not None:
+        validate_evidence(evidence)
+        bundle["evidence"] = evidence
     raw = (json.dumps(bundle, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     if len(raw) > _MAX_BYTES:
         raise ValueError(STORE_ERROR)
@@ -144,13 +154,22 @@ def _publish_file(directory_fd: int, name: str, raw: bytes) -> None:
     os.fsync(directory_fd)
 
 
-def replay_private_batch(directory: Path, fixtures: dict[tuple[str, str, int], object], *,
+def replay_private_batch(directory: Path, fixtures: dict[tuple[str, str, int], object] | None, *,
                          initialize: bool = False, max_pages: int = MAX_REQUESTS_PER_RUN,
                          max_per_employer: int = MAX_PAGES_PER_EMPLOYER,
                          input_digest: str | None = None,
-                         render_reports: Callable[[Checkpoint, list[dict[str, str]]],
-                                                  tuple[bytes, bytes]] | None = None) -> ReplayResult:
-    """Run one synthetic batch and atomically commit progress with cumulative output.
+                         render_reports: Callable[..., tuple[bytes, bytes]] | None = None,
+                         live: Callable[[Checkpoint, int, dict], tuple[ReplayResult, LiveObservation]] | None = None,
+                         live_reserve: int = 0,
+                         live_needed: Callable[[Checkpoint, dict], bool] | None = None) -> ReplayResult:
+    """Run one batch and atomically commit progress with cumulative output.
+
+    Without ``live`` the batch consumes ``fixtures``. A live caller passes ``live`` and ``fixtures=None``.
+    The bundle then also carries cumulative request accounting and recheck evidence. Before any request the
+    invocation's reservation is published durably, so a process that dies mid-run is charged its whole
+    reservation on recovery and the bundle budget can never be exceeded by unrecorded attempts. ``live`` gets
+    the checkpoint, the reservation and the evidence, and returns the result plus what it observed. When
+    ``live_needed`` says there is nothing to request, no reservation is made and the bundle is not rewritten.
 
     Each call holds a process lock and reloads the owner-only bundle. Explicit
     initialization requires an absent bundle; resume requires an existing one.
@@ -172,11 +191,11 @@ def replay_private_batch(directory: Path, fixtures: dict[tuple[str, str, int], o
                 try:
                     os.stat(BUNDLE_NAME, dir_fd=directory_fd, follow_symlinks=False)
                 except FileNotFoundError:
-                    checkpoint, listings = initial_checkpoint(), []
+                    checkpoint, listings, evidence = initial_checkpoint(), [], None
                 else:
                     raise ValueError(STORE_ERROR)
             else:
-                checkpoint, listings = _load_bundle(directory_fd, input_digest)
+                checkpoint, listings, evidence = _load_bundle(directory_fd, input_digest, live is not None)
             if render_reports is not None:
                 for name in REPORT_NAMES:
                     try:
@@ -185,13 +204,32 @@ def replay_private_batch(directory: Path, fixtures: dict[tuple[str, str, int], o
                                 raise ValueError(STORE_ERROR)
                     except FileNotFoundError:
                         continue
-            result = replay_batch(checkpoint, fixtures, max_pages=max_pages,
-                                  max_per_employer=max_per_employer)
+            recovered = False
+            if live is not None:
+                if fixtures is not None or type(live_reserve) is not int or live_reserve < 0:
+                    raise ValueError(STORE_ERROR)
+                recovered = evidence is not None and evidence["in_flight"] is not None
+                evidence = settle_in_flight(evidence if evidence is not None else empty_evidence())
+                reserved = (min(live_reserve, remaining_requests(evidence))
+                            if live_needed is None or live_needed(checkpoint, evidence) else 0)
+                if reserved:
+                    _publish_bundle(directory_fd, checkpoint, listings, input_digest,
+                                    begin_invocation(evidence, reserved))
+                    result, observation = live(checkpoint, reserved, evidence)
+                    evidence = record_invocation(begin_invocation(evidence, reserved), observation)
+                else:
+                    result = ReplayResult(checkpoint, (), 0, 0)
+                changed = bool(reserved)
+            else:
+                result = replay_batch(checkpoint, fixtures, max_pages=max_pages,
+                                      max_per_employer=max_per_employer)
+                changed = bool(result.pages)
             listings.extend(result.listings)
-            if initialize or result.pages:
-                _publish_bundle(directory_fd, result.checkpoint, listings, input_digest)
+            if initialize or changed or (live is not None and recovered):
+                _publish_bundle(directory_fd, result.checkpoint, listings, input_digest, evidence)
             if render_reports is not None:
-                payloads = render_reports(result.checkpoint, listings)
+                payloads = render_reports(result.checkpoint, listings,
+                                          *(() if live is None else (evidence,)))
                 for name, payload in zip(REPORT_NAMES, payloads, strict=True):
                     _publish_file(directory_fd, name, payload)
         return result

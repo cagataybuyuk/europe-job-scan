@@ -8,9 +8,14 @@ import json
 import os
 from pathlib import Path
 import stat
+import time
 
 from ejs.services.criteria_loader import load_criteria
-from ejs.services.expansion_replay import COUNTRIES, RESEARCH, Checkpoint
+from ejs.services.expansion_replay import (
+    COUNTRIES, LIVE_APPROVED_PAIRS, LIVE_MAX_REQUESTS, RESEARCH, Checkpoint, LiveObservation,
+    effective_rechecks, live_replay_batch, recheck_first_page,
+)
+from ejs.services.http_carrier import HttpCarrier, MAX_REQUESTS_PER_RUN, urllib_transport
 from ejs.services.expansion_shadow import build_expansion_report, validate_watchlist
 from ejs.services.shadow_run import read_watchlist, render_markdown
 
@@ -50,7 +55,11 @@ def _load_fixtures(path: Path) -> tuple[dict[tuple[str, str, int], object], str]
     return fixtures, sha256(raw).hexdigest()
 
 
-def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser, *,
+                  transport=urllib_transport, clock=time.monotonic, sleep=time.sleep) -> int:
+    live = bool(getattr(args, "expansion_live", False))
+    if live and not LIVE_APPROVED_PAIRS:
+        parser.error("EXPANSION_LIVE_SCOPE_NOT_APPROVED")
     try:
         markets = validate_watchlist(read_watchlist(args.watchlist))
     except (OSError, ValueError, csv.Error):
@@ -60,26 +69,73 @@ def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         criteria_bytes = json.dumps(criteria.raw, sort_keys=True, allow_nan=False)
     except (ValueError, RecursionError):
         parser.error("EXPANSION_CRITERIA_INVALID")
-    try:
-        fixtures, fixture_digest = _load_fixtures(Path(args.expansion_fixtures))
-    except (OSError, ValueError, RecursionError):
-        parser.error(_FIXTURE_ERROR)
+    fixtures = None
+    if live:
+        fixture_digest = sha256(json.dumps(sorted(LIVE_APPROVED_PAIRS)).encode()).hexdigest()
+    else:
+        try:
+            fixtures, fixture_digest = _load_fixtures(Path(args.expansion_fixtures))
+        except (OSError, ValueError, RecursionError):
+            parser.error(_FIXTURE_ERROR)
 
-    inputs = json.dumps([markets, criteria_bytes, fixture_digest], sort_keys=True)
-    coverage_status = ""
+    inputs = json.dumps([markets, criteria_bytes, fixture_digest, "live" if live else "fixtures"], sort_keys=True)
+    request_budget = min(args.expansion_max_pages or MAX_REQUESTS_PER_RUN, LIVE_MAX_REQUESTS)
+    approved = LIVE_APPROVED_PAIRS if live else None
+    final: dict = {}
 
-    def render_reports(checkpoint: Checkpoint, listings: list[dict[str, str]]) -> tuple[bytes, bytes]:
-        nonlocal coverage_status
-        report = build_expansion_report(checkpoint, listings, markets, criteria)
-        coverage_status = report["coverage"]["status"]
+    def render_reports(checkpoint: Checkpoint, listings: list[dict[str, str]],
+                       evidence: dict | None = None) -> tuple[bytes, bytes]:
+        report = build_expansion_report(checkpoint, listings, markets, criteria, evidence=evidence,
+                                        approved=approved)
+        final["report"] = report
         return ((json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n").encode(),
                 render_markdown(report).encode())
+
+    def work_remaining(checkpoint: Checkpoint, evidence: dict) -> bool:
+        """True when an approved pair can still advance or a completed pair still lacks a recheck."""
+        failed = {c.tenant for c in checkpoint.cursors if c.status == "error"}
+        known = effective_rechecks(evidence)
+        return any((c.status == "pending" and c.tenant not in failed and (c.tenant, c.country) in LIVE_APPROVED_PAIRS)
+                   or (c.status == "complete" and c.total and (c.tenant, c.country) in LIVE_APPROVED_PAIRS
+                       and known.get((c.tenant, c.country), {"status": "not_checked"})["status"] == "not_checked")
+                   for c in checkpoint.cursors)
+
+    def read_live(checkpoint: Checkpoint, reserved: int, evidence: dict):
+        """One bounded invocation. The carrier is capped at the reservation the store already made durable."""
+        carrier = HttpCarrier(enabled=True, transport=transport, clock=clock, sleep=sleep,
+                              max_requests=reserved, max_pages=reserved)
+        # Keep one request for drift rechecks; more run only while the reservation lasts.
+        reserve = 1 if reserved > 1 else 0
+        result = live_replay_batch(checkpoint, carrier, carrier.begin_employer,
+                                   max_pages=reserved - reserve, max_per_employer=reserved - reserve)
+        known = effective_rechecks(evidence)
+        needs = [c for c in result.checkpoint.cursors
+                 if c.status == "complete" and c.total and known.get((c.tenant, c.country),
+                                                                      {"status": "not_checked"})["status"] == "not_checked"]
+        rechecks = tuple(recheck_first_page(c, carrier, carrier.begin_employer) for c in needs)
+        requests = tuple(e for e in carrier.log if e["status"] != "blocked")
+        return result, LiveObservation(requests=requests, rechecks=rechecks)
 
     try:
         result = replay_private_batch(Path(args.out_dir), fixtures, initialize=args.expansion_init,
                                       max_pages=args.expansion_max_pages,
+                                      live=read_live if live else None, live_reserve=request_budget,
+                                      live_needed=work_remaining if live else None,
                                       input_digest=sha256(inputs.encode()).hexdigest(), render_reports=render_reports)
     except PermissionError:
         parser.error(STORE_ERROR)
-    print(f"coverage={coverage_status} fixture_pages={result.pages} new_listings={len(result.listings)} requests=0")
-    return {"completed": 0, "failed": 1, "incomplete": 3}[coverage_status]
+    report = final["report"]
+    coverage_status = report["coverage"]["status"]
+    accounting = report.get("request_accounting")
+    print(f"coverage={coverage_status} {'live' if live else 'fixture'}_pages={result.pages} "
+          f"new_listings={len(result.listings)} requests={accounting['spent'] if live else 0}"
+          + (f" remaining={accounting['remaining']} "
+             f"acceptance={'ready' if report['acceptance']['ready'] else 'not_ready'}" if live else ""))
+    # Drift is sticky in the durable evidence: a resume can never turn it into success.
+    if live and any(c["status"] in ("drift", "unreadable")
+                    for c in report["snapshot_consistency"]["first_page_rechecks"]):
+        return 1
+    code = {"completed": 0, "failed": 1, "incomplete": 3}[coverage_status]
+    if live and code == 0 and not report["acceptance"]["ready"]:
+        return 4          # collection complete, but a required stable recheck is missing: not accepted
+    return code

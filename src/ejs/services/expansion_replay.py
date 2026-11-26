@@ -1,19 +1,24 @@
-"""W3.5 research-backed, offline-only country replay.
+"""W3.5 research-backed country replay and the FUNCTION-02 live-feed adapter.
 
-No network, filesystem, queue or submission integration. Existing live pilot
-gate and transport remain unchanged. Research counts are historical evidence,
-never a filter or a claim of current completeness.
+The replay itself has no network, filesystem, queue or submission integration.
+``live_replay_batch`` reads pages through an injected read-only carrier and only
+for pairs in ``LIVE_APPROVED_PAIRS``, which holds only the owner-approved pilot pair. The existing four-employer
+pilot gate and transport are unchanged. Research counts are historical
+evidence, never a filter or a claim of current completeness.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+import json
 import re
+from urllib.parse import quote
 
 from ejs.services.discovery import (
     AtsClass, BadPayloadError, DiscoveryError, PAGE_SIZE,
     MAX_PAGES_PER_EMPLOYER, parse_smartrecruiters,
 )
-from ejs.services.http_carrier import MAX_REQUESTS_PER_RUN
+from ejs.services.http_carrier import MAX_REQUESTS_PER_RUN, PageLimitError, RequestBudgetError
 
 COUNTRIES = ("NL", "IE", "DE", "BE", "SE", "DK", "ES", "PT", "IT")
 SCOPE_VERSION = "W3.4-2026-11-26-v1"
@@ -51,6 +56,16 @@ _SCOPE = tuple((tenant, country) for _, tenant, _, _ in RESEARCH for country in 
 _NAMES = {tenant: name for name, tenant, _, _ in RESEARCH}
 _ERROR = "EXPANSION_CHECKPOINT_REVIEW_REQUIRED"
 _PAGE_ERROR = "page_review_required"
+# Exact (tenant, country) pairs approved for live read-only collection. Owner decision of 26 Nov 2026:
+# one pilot pair. Widening this set needs a new owner approval in a reviewed change.
+LIVE_APPROVED_PAIRS: frozenset[tuple[str, str]] = frozenset({("KPMGNederland", "NL")})
+LIVE_FEED_HOST = "api.smartrecruiters.com"
+# Total GET attempts (failures included) one live invocation may make; the owner-approved pilot ceiling.
+LIVE_MAX_REQUESTS = 5
+# Cumulative GET attempts one private bundle (one day's snapshot) may spend across all its invocations.
+# Owner-approved pilot total; widening it is an owner decision.
+LIVE_BUNDLE_MAX_REQUESTS = LIVE_MAX_REQUESTS
+EVIDENCE_VERSION = 1
 _POSTING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
@@ -153,6 +168,150 @@ def _page(cursor: Cursor, payload: object) -> tuple[Cursor, list[dict[str, str]]
                    status="complete" if new_offset == total else "pending"), page
 
 
+@dataclass(frozen=True)
+class LiveObservation:
+    """What one live invocation observed: attempted requests and first-page rechecks."""
+    requests: tuple[dict, ...] = ()
+    rechecks: tuple[dict, ...] = ()
+
+
+_RECHECK_STATUSES = ("stable", "drift", "unreadable", "not_checked", "not_applicable")
+
+
+def empty_evidence() -> dict:
+    """Durable live evidence kept in the same atomic private bundle as the checkpoint."""
+    return {"version": EVIDENCE_VERSION, "budget": LIVE_BUNDLE_MAX_REQUESTS, "invocations": [],
+            "rechecks": [], "in_flight": None}
+
+
+def _natural(value: object, limit: int | None = None) -> bool:
+    return type(value) is int and value >= 0 and (limit is None or value <= limit)
+
+
+def validate_evidence(evidence: object) -> None:
+    """Reject evidence that no sequence of recorded invocations could have produced."""
+    if (type(evidence) is not dict
+            or evidence.keys() != {"version", "budget", "invocations", "rechecks", "in_flight"}
+            or evidence["version"] != EVIDENCE_VERSION or not _natural(evidence["budget"], LIVE_BUNDLE_MAX_REQUESTS)
+            or type(evidence["invocations"]) is not list or type(evidence["rechecks"]) is not list):
+        raise ValueError(_ERROR)
+    for position, call in enumerate(evidence["invocations"], 1):
+        if (type(call) is not dict or call.keys() != {"seq", "status", "reserved", "requests"}
+                or call["seq"] != position or call["status"] not in ("completed", "interrupted_unverified")
+                or not _natural(call["reserved"], LIVE_MAX_REQUESTS) or type(call["requests"]) is not list
+                or len(call["requests"]) > call["reserved"]
+                or (call["status"] == "interrupted_unverified" and call["requests"])):
+            raise ValueError(_ERROR)
+        for request in call["requests"]:
+            if (type(request) is not dict or request.keys() != {"url", "status", "bytes"}
+                    or type(request["url"]) is not str or not request["url"].isprintable()
+                    or len(request["url"]) > 300 or type(request["status"]) not in (int, str)
+                    or not _natural(request["bytes"])):
+                raise ValueError(_ERROR)
+    in_flight = evidence["in_flight"]
+    if in_flight is not None and (
+            type(in_flight) is not dict or in_flight.keys() != {"seq", "reserved"}
+            or in_flight["seq"] != len(evidence["invocations"]) + 1
+            or not 0 < in_flight["reserved"] <= LIVE_MAX_REQUESTS):
+        raise ValueError(_ERROR)
+    for check in evidence["rechecks"]:
+        if (type(check) is not dict or check.keys() != {"seq", "tenant", "country", "status", "reason"}
+                or (check["tenant"], check["country"]) not in _SCOPE
+                or check["status"] not in _RECHECK_STATUSES or type(check["reason"]) is not str
+                or not _natural(check["seq"]) or not 0 < check["seq"] <= len(evidence["invocations"])
+                or evidence["invocations"][check["seq"] - 1]["status"] != "completed"):
+            raise ValueError(_ERROR)
+    if spent_requests(evidence) > evidence["budget"]:
+        raise ValueError(_ERROR)
+
+
+def spent_requests(evidence: dict) -> int:
+    """Attempts spent so far. An interrupted or in-flight invocation is charged its full reservation."""
+    spent = sum(len(c["requests"]) if c["status"] == "completed" else c["reserved"]
+                for c in evidence["invocations"])
+    return spent + (evidence["in_flight"]["reserved"] if evidence["in_flight"] else 0)
+
+
+def remaining_requests(evidence: dict) -> int:
+    return max(0, min(evidence["budget"], LIVE_BUNDLE_MAX_REQUESTS) - spent_requests(evidence))
+
+
+def effective_rechecks(evidence: dict) -> dict[tuple[str, str], dict[str, str]]:
+    """Worst recorded recheck per pair. Drift and unreadable are sticky: a later stable result never hides them."""
+    order = {"drift": 0, "unreadable": 1, "stable": 2, "not_checked": 3, "not_applicable": 4}
+    best: dict[tuple[str, str], dict[str, str]] = {}
+    for check in evidence["rechecks"]:
+        pair = (check["tenant"], check["country"])
+        if pair not in best or order[check["status"]] < order[best[pair]["status"]]:
+            best[pair] = {"status": check["status"], "reason": check["reason"]}
+    return best
+
+
+def settle_in_flight(evidence: dict) -> dict:
+    """Recover from a process that died mid-invocation: its whole reservation counts as spent."""
+    if evidence["in_flight"] is None:
+        return evidence
+    call = {"seq": evidence["in_flight"]["seq"], "status": "interrupted_unverified",
+            "reserved": evidence["in_flight"]["reserved"], "requests": []}
+    return {**evidence, "invocations": [*evidence["invocations"], call], "in_flight": None}
+
+
+def begin_invocation(evidence: dict, reserved: int) -> dict:
+    """Evidence to publish durably before any request of the invocation is sent."""
+    if evidence["in_flight"] is not None or not 0 < reserved <= remaining_requests(evidence):
+        raise ValueError(_ERROR)
+    return {**evidence, "in_flight": {"seq": len(evidence["invocations"]) + 1, "reserved": reserved}}
+
+
+def record_invocation(evidence: dict, observation: LiveObservation) -> dict:
+    """Close the in-flight invocation with what it actually did; prior rechecks are only ever appended to."""
+    in_flight = evidence["in_flight"]
+    seq = in_flight["seq"]
+    call = {"seq": seq, "status": "completed", "reserved": in_flight["reserved"],
+            "requests": [{k: r[k] for k in ("url", "status", "bytes")} for r in observation.requests]}
+    checks = [{"seq": seq, "tenant": c["tenant"], "country": c["country"],
+               "status": c["status"], "reason": c["reason"]} for c in observation.rechecks]
+    return {**evidence, "invocations": [*evidence["invocations"], call],
+            "rechecks": [*evidence["rechecks"], *checks], "in_flight": None}
+
+
+def live_page_url(tenant: str, country: str, offset: int) -> str:
+    """Public postings feed URL; SmartRecruiters documents ``country`` as a lowercase ISO 3166-1 alpha-2 filter."""
+    if (tenant, country) not in _SCOPE or type(offset) is not int or offset < 0:
+        raise ValueError(_ERROR)
+    return (f"https://{LIVE_FEED_HOST}/v1/companies/{quote(tenant, safe='')}/postings"
+            f"?country={country.lower()}&offset={offset}&limit={PAGE_SIZE}")
+
+
+def live_page(tenant: str, country: str, body: bytes) -> dict:
+    """Turn a real feed response into the replay page shape without trusting it.
+
+    The feed carries no tenant/country metadata, so those come from the request; offset/limit/total stay as echoed. The provider reports
+    lowercase country codes; a posting is relabelled only when it equals the requested country ignoring case.
+    Anything else stays as received and is rejected by ``_page``.
+    """
+    try:
+        payload = json.loads(bytes(body).decode("utf-8"))
+    except (ValueError, RecursionError):
+        raise BadPayloadError("invalid_json") from None
+    if type(payload) is not dict or type(payload.get("content")) is not list:
+        raise BadPayloadError("invalid_page")
+    items = []
+    for item in payload["content"]:
+        if type(item) is dict:
+            item = dict(item)
+            location, publisher = item.get("location"), item.get("company")
+            if type(location) is dict and type(location.get("country")) is str \
+                    and location["country"].casefold() == country.casefold():
+                item["location"] = {**location, "country": country}
+            if type(publisher) is dict and type(publisher.get("identifier")) is str \
+                    and publisher["identifier"].casefold() == tenant.casefold():
+                item["company"] = {**publisher, "identifier": tenant}
+        items.append(item)
+    # offset stays as the provider echoed it: _page compares it with the cursor.
+    return {**payload, "content": items, "tenant": tenant, "country": country}
+
+
 def replay_batch(checkpoint: Checkpoint, fixtures: dict[tuple[str, str, int], object],
                  *, max_pages: int = MAX_REQUESTS_PER_RUN,
                  max_per_employer: int = MAX_PAGES_PER_EMPLOYER) -> ReplayResult:
@@ -164,9 +323,66 @@ def replay_batch(checkpoint: Checkpoint, fixtures: dict[tuple[str, str, int], ob
     tenant and country, including empty pages. Listings are new identities only,
     including across countries and prior batches.
     """
-    validate_checkpoint(checkpoint)
     if type(fixtures) is not dict:
         raise ValueError("EXPANSION_FIXTURES_INVALID")
+    return _replay(checkpoint, fixtures.__getitem__, max_pages, max_per_employer, None)
+
+
+def live_replay_batch(checkpoint: Checkpoint, fetch: Callable[[str], bytes],
+                      begin_employer: Callable[[str], None], *,
+                      approved: frozenset[tuple[str, str]] | None = None,
+                      max_pages: int = MAX_REQUESTS_PER_RUN,
+                      max_per_employer: int = MAX_PAGES_PER_EMPLOYER) -> ReplayResult:
+    """Read live country pages through an injected carrier (normally ``HttpCarrier``).
+
+    Same validation, 5/60 ceilings, tenant isolation and checkpoint semantics as ``replay_batch``. Pairs outside
+    ``approved`` (default ``LIVE_APPROVED_PAIRS``; per tenant a prefix of ``COUNTRIES``) are never requested and stay pending. A carrier that is
+    tighter than the batch ceilings stops the batch without marking a pair failed.
+    """
+    approved = LIVE_APPROVED_PAIRS if approved is None else approved
+    if type(approved) is not frozenset or not approved <= set(_SCOPE) or any(
+            {c for t, c in approved if t == tenant} != set(COUNTRIES[:sum(1 for t, _ in approved if t == tenant)])
+            for tenant in {t for t, _ in approved}):
+        # A tenant's countries advance in COUNTRIES order (see validate_checkpoint), so its approved set is a prefix.
+        raise ValueError("EXPANSION_LIVE_SCOPE_INVALID")
+
+    def read(key: tuple[str, str, int]) -> object:
+        begin_employer(key[0])
+        return live_page(key[0], key[1], fetch(live_page_url(*key)))
+
+    return _replay(checkpoint, read, max_pages, max_per_employer, approved)
+
+
+def recheck_first_page(cursor: Cursor, fetch: Callable[[str], bytes],
+                       begin_employer: Callable[[str], None]) -> dict[str, str]:
+    """Re-read offset 0 of a completed pair once and report observable drift.
+
+    A changed total or changed first-page identities shows the feed moved while it was being read. A stable
+    result proves nothing about unobserved pages, so no caller may claim an atomic snapshot from it.
+    """
+    pair = {"tenant": cursor.tenant, "country": cursor.country}
+    if cursor.status != "complete" or not cursor.total:
+        return {**pair, "status": "not_applicable", "reason": "empty_or_incomplete"}
+    try:
+        begin_employer(cursor.tenant)
+        again, page = _page(Cursor(cursor.tenant, cursor.country),
+                            live_page(cursor.tenant, cursor.country,
+                                      fetch(live_page_url(cursor.tenant, cursor.country, 0))))
+    except (RequestBudgetError, PageLimitError):
+        return {**pair, "status": "not_checked", "reason": "request_budget"}
+    except (KeyError, DiscoveryError):
+        return {**pair, "status": "unreadable", "reason": "recheck_page_rejected"}
+    if again.total != cursor.total:
+        return {**pair, "status": "drift", "reason": "total_changed"}
+    if again.seen != cursor.seen[:len(again.seen)]:
+        return {**pair, "status": "drift", "reason": "first_page_identities_changed"}
+    return {**pair, "status": "stable", "reason": "first_page_and_total_unchanged"}
+
+
+def _replay(checkpoint: Checkpoint, read: Callable[[tuple[str, str, int]], object],
+            max_pages: int, max_per_employer: int,
+            approved: frozenset[tuple[str, str]] | None) -> ReplayResult:
+    validate_checkpoint(checkpoint)
     if (type(max_pages) is not int or not 0 < max_pages <= MAX_REQUESTS_PER_RUN
             or type(max_per_employer) is not int
             or not 0 < max_per_employer <= MAX_PAGES_PER_EMPLOYER):
@@ -177,15 +393,22 @@ def replay_batch(checkpoint: Checkpoint, fixtures: dict[tuple[str, str, int], ob
     counts: dict[str, int] = {}
     output = []
     pages = duplicates = 0
+    exhausted = False
     for index, cursor in enumerate(cursors):
         while (cursor.status == "pending" and cursor.tenant not in blocked
+               and (approved is None or (cursor.tenant, cursor.country) in approved)
                and pages < max_pages
                and counts.get(cursor.tenant, 0) < max_per_employer):
             pages += 1
             counts[cursor.tenant] = counts.get(cursor.tenant, 0) + 1
             key = (cursor.tenant, cursor.country, cursor.offset)
             try:
-                next_cursor, page = _page(cursor, fixtures[key])
+                next_cursor, page = _page(cursor, read(key))
+            except (RequestBudgetError, PageLimitError):
+                pages -= 1
+                counts[cursor.tenant] -= 1
+                exhausted = True
+                break
             except (KeyError, DiscoveryError):
                 cursor = replace(cursor, status="error", error=_PAGE_ERROR)
                 blocked.add(cursor.tenant)
@@ -199,7 +422,7 @@ def replay_batch(checkpoint: Checkpoint, fixtures: dict[tuple[str, str, int], ob
                     seen.add(identity)
                     output.append(item)
         cursors[index] = cursor
-        if pages >= max_pages:
+        if exhausted or pages >= max_pages:
             break
     return ReplayResult(Checkpoint(SCOPE_VERSION, tuple(cursors)),
                         tuple(output), pages, duplicates)

@@ -150,7 +150,8 @@ Core CI runs the replay, store and shadow integration suites. The targeted local
 `PYTHONPATH=src python -m pytest -q tests/test_expansion_replay.py tests/test_expansion_replay_store.py tests/test_expansion_shadow_integration.py tests/unit/test_ejs_phase1b_discovery.py tests/unit/test_ejs_shadow_phaseA.py tests/unit/test_watchlist_coverage.py tests/test_application_bridge.py tests/test_application_batch.py`.
 Run with network access denied. No candidate data or live ATS access is needed.
 
-Before enabling live expansion, verify the provider's country-filter contract,
+Live expansion beyond the owner-approved pilot pair is documented in
+[FUNCTION_02_LISTING_COLLECTION.md](FUNCTION_02_LISTING_COLLECTION.md). Before widening it, verify the provider's country-filter contract,
 country coverage and pagination consistency on approved read-only targets.
 Review the exact tenant and country allowlist, request ceilings, rate floor
 and live checkpoint provenance and recovery with real feed evidence. Keep

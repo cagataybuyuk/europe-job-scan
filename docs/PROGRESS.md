@@ -49,3 +49,14 @@ invalid URL ports, missing markets and unresolved LinkedIn redirect URLs.
 The focused suite passed again with 34 tests. The real export produced the
 same coverage counts and byte-identical reports across two CLI runs.
 Secret scanning and authority boundary checks passed.
+
+## 2026-11-26 — FUNCTION-02 Listing Collection (live-feed adapter, gated)
+
+Added a provider-shaped live page adapter on top of the W3.5 replay: documented `country` filter URL,
+case-insensitive country/tenant binding, fail-closed validation, a carrier-backed `live_replay_batch`,
+a durable-store live hook and an `--expansion-live` CLI limited to `LIVE_APPROVED_PAIRS` (the owner-approved
+`KPMGNederland` / `NL` pilot pair). One bounded pilot ran: 3 of 5 GETs, 197 unique listings, stable first-page
+recheck. Review fixes (F02-01, F02-02): request accounting and recheck evidence persist in the private bundle,
+projection is row-level, and coverage is measured over the approved scope. See
+[FUNCTION-02 Listing Collection](FUNCTION_02_LISTING_COLLECTION.md) for criteria status, evidence, blockers and
+owner decisions.
