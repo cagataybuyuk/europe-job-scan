@@ -233,7 +233,15 @@ def cli_args(cli_inputs, out, *extra):
             "--expansion-live", *extra]
 
 
+def test_default_live_scope_is_exactly_the_owner_approved_pilot():
+    from ejs.services.expansion_replay import LIVE_APPROVED_PAIRS
+    assert LIVE_APPROVED_PAIRS == {("KPMGNederland", "NL")}
+
+
 def test_cli_refuses_without_an_approved_scope_before_any_request(cli_inputs, monkeypatch):
+    import scripts.expansion_shadow as es0
+    monkeypatch.setattr(es0, "LIVE_APPROVED_PAIRS", frozenset())
+
     def transport(*a):
         pytest.fail("no request may be made without an approved scope")
 

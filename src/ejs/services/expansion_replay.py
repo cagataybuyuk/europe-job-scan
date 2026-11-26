@@ -2,8 +2,7 @@
 
 The replay itself has no network, filesystem, queue or submission integration.
 ``live_replay_batch`` reads pages through an injected read-only carrier and only
-for pairs in ``LIVE_APPROVED_PAIRS``, which is empty until the owner approves an
-exact employer/country scope in a reviewed change. The existing four-employer
+for pairs in ``LIVE_APPROVED_PAIRS``, which holds only the owner-approved pilot pair. The existing four-employer
 pilot gate and transport are unchanged. Research counts are historical
 evidence, never a filter or a claim of current completeness.
 """
@@ -57,8 +56,9 @@ _SCOPE = tuple((tenant, country) for _, tenant, _, _ in RESEARCH for country in 
 _NAMES = {tenant: name for name, tenant, _, _ in RESEARCH}
 _ERROR = "EXPANSION_CHECKPOINT_REVIEW_REQUIRED"
 _PAGE_ERROR = "page_review_required"
-# Exact (tenant, country) pairs approved for live read-only collection. Owner decision; empty = no live access.
-LIVE_APPROVED_PAIRS: frozenset[tuple[str, str]] = frozenset()
+# Exact (tenant, country) pairs approved for live read-only collection. Owner decision of 26 Nov 2026:
+# one pilot pair. Widening this set needs a new owner approval in a reviewed change.
+LIVE_APPROVED_PAIRS: frozenset[tuple[str, str]] = frozenset({("KPMGNederland", "NL")})
 LIVE_FEED_HOST = "api.smartrecruiters.com"
 # Total GET attempts (failures included) one live invocation may make; the owner-approved pilot ceiling.
 LIVE_MAX_REQUESTS = 5
