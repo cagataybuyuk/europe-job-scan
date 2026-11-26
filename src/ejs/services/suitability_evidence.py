@@ -110,12 +110,14 @@ _CEFR_AFTER = re.compile(rf"\b{_NL_LANG}\b\s*\(?\s*(?:minimaal\s+|minimum\s+|op\
 _NL_AMOUNT = r"\d{1,3}(?:\.\d{3})+(?:,\d{1,2}|,-)?|\d+(?:,\d{1,2}|,-)?"
 _NL_MONEY = re.compile(rf"(?:€|\bEUR\b)\s*(?P<lo>{_NL_AMOUNT})(?:\s*(?:-|–|—|tot(?:\s+en\s+met)?|en)\s*(?:€|\bEUR\b)?\s*"
                        rf"(?P<hi>{_NL_AMOUNT}))?", re.I)
-_NL_SALARY_WORD = re.compile(r"\b(?:salaris|loon|bruto|netto|verdien\w*|inkomen|beloning|salary)\b", re.I)
-_NL_NOT_SALARY = re.compile(r"\b(?:vergoeding|toelage|bonus|vakantiegeld|reiskosten|lease|budget|bijdrage|pensioen|"
-                            r"kilometer|opleidingsbudget)\b", re.I)
-_NL_MONTH = re.compile(r"\bper\s+maand\b|/\s*maand\b|\bmaandsalaris\b|\bmaandelijks\b|\bp\.?m\.?(?=\W|$)|\bper\s+month\b", re.I)
-_NL_YEAR = re.compile(r"\bper\s+jaar\b|/\s*jaar\b|\bjaarsalaris\b|\bjaarlijks\b|\bper\s+annum\b|\bp\.a\.|\bper\s+year\b", re.I)
-_NL_NET = re.compile(r"\bnet(?:to)?\b", re.I)
+# Compound words (Brutomaandsalaris, Nettojaarsalaris, onkostenvergoeding) are matched as substrings on purpose.
+_NL_SALARY_WORD = re.compile(r"salaris|\bloon\b|\bverdien\w*|\binkomen\b|\bsalary\b", re.I)
+_NL_BENEFIT = re.compile(r"vergoeding|toelage|bonus|vakantiegeld|reiskosten|\blease|budget|bijdrage|pensioen|kilometer|"
+                         r"\bbeloning|13e\s+maand|dertiende", re.I)
+_NL_MONTH = re.compile(r"\bper\s+maand\b|/\s*maand\b|maandsalaris|\bmaandelijks\b|\bp\.?m\.?(?=\W|$)|\bper\s+month\b", re.I)
+_NL_YEAR = re.compile(r"\bper\s+jaar\b|/\s*jaar\b|jaarsalaris|\bjaarlijks\b|\bper\s+annum\b|\bp\.a\.|\bper\s+year\b", re.I)
+_NL_NET = re.compile(r"\bnetto\w*|\bnet\b", re.I)
+_NL_GROSS = re.compile(r"bruto|brutto|\bgross\b", re.I)
 _EXP_MIN = r"minimaal|minimum|ten\s+minste|tenminste|at\s+least|minimum\s+of|min\."
 _EXP = re.compile(rf"(?:\b(?P<min>{_EXP_MIN})\s+)?\b(?P<lo>\d{{1,2}})(?:\s*(?:-|–|tot|to)\s*(?P<hi>\d{{1,2}}))?(?P<plus>\s*\+)?\s*"
                   r"(?:jaar|jaren|years?|yrs?)\b", re.I)
@@ -279,7 +281,12 @@ def extract_compensation_nl(text: str) -> dict[str, Any] | None:
     month or year period and a salary word. Gross stays gross; net is never derived. Otherwise ``None`` (Unknown)."""
     for sentence in _sentences(text):
         m = _NL_MONEY.search(sentence)
-        if not m or not _NL_SALARY_WORD.search(sentence) or _NL_NOT_SALARY.search(sentence):
+        if not m or not _NL_SALARY_WORD.search(sentence):
+            continue
+        # Benefits (bonus, allowance, ...) may share the sentence with a base salary range; only a benefit word
+        # that directly labels the amount (just before it, or right after it up to the next comma) disqualifies it.
+        before, after = sentence[max(0, m.start() - 40):m.start()], re.split(r"[,;]", sentence[m.end():], maxsplit=1)[0]
+        if _NL_BENEFIT.search(before.split(",")[-1]) or _NL_BENEFIT.search(after[:40]):
             continue
         month, year = bool(_NL_MONTH.search(sentence)), bool(_NL_YEAR.search(sentence))
         if month == year:
@@ -288,20 +295,37 @@ def extract_compensation_nl(text: str) -> dict[str, Any] | None:
         hi = _parse_nl_amount(m.group("hi")) if m.group("hi") else lo
         if lo is None or hi is None or lo > hi or hi <= 0:
             continue
-        basis = "net" if _NL_NET.search(sentence) and not _GROSS.search(sentence) else (
-            "gross" if _GROSS.search(sentence) and not _NL_NET.search(sentence) else "unspecified")
+        basis = "net" if _NL_NET.search(sentence) and not _NL_GROSS.search(sentence) else (
+            "gross" if _NL_GROSS.search(sentence) and not _NL_NET.search(sentence) else "unspecified")
         div = 12 if year else 1
         return {"currency": "EUR", "monthly_min": lo / div, "monthly_max": hi / div, "basis": basis,
                 "period_stated": "year" if year else "month", "quote": _quote(sentence)}
     return None
 
 
-def _kind(sentence: str, explicit_minimum: bool) -> str:
-    if _NL_NEG.search(sentence) and not explicit_minimum or _NL_HEDGE.search(sentence):
+_NL_PREF_INTRO = re.compile(r"\b(?:bij\s+voorkeur|liefst|idealiter|preferably|ideally)\b", re.I)
+
+
+def _kind(clause: str, head: str, explicit_minimum: bool) -> str:
+    """Negation and conditions anywhere in the clause make a requirement conditional; a preference marker makes it
+    preferred only for what it covers (see ``_scoped``)."""
+    if _NL_NEG.search(clause) and not explicit_minimum or _NL_HEDGE.search(clause):
         return "conditional"
-    if _NL_PREF.search(sentence):
+    if _NL_PREF.search(head):
         return "preferred"
     return "mandatory" if explicit_minimum else "stated_unclassified"
+
+
+def _scoped(clause: str) -> list[tuple[str, str, bool]]:
+    """Split ``<requirement>, bij voorkeur <specialisation>`` so the preference covers only what follows it.
+    Returns (text, head-for-kind, is_preferred_scope) parts; a clause without an introducer is one part."""
+    intro = _NL_PREF_INTRO.search(clause)
+    if not intro:
+        return [(clause, clause, False)]
+    head, tail = clause[:intro.start()], clause[intro.start():]
+    parts = [(head, head, False)] if head.strip(" ,:-") else []
+    parts.append((tail, tail, True))
+    return parts
 
 
 def extract_requirements(text: str) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
@@ -311,24 +335,27 @@ def extract_requirements(text: str) -> tuple[tuple[dict[str, Any], ...], tuple[d
     education: list[dict[str, Any]] = []
     for sentence in _sentences(text):
         for clause in sentence.split(";"):
-            if _EXP_WORD.search(clause):
-                for m in _EXP.finditer(clause):
-                    lo, hi = int(m.group("lo")), int(m.group("hi")) if m.group("hi") else None
-                    if not 0 < lo <= 40 or (hi is not None and hi < lo):
-                        continue
-                    explicit = bool(m.group("min") or m.group("plus"))
-                    row = {"min_years": lo, "max_years": hi, "kind": _kind(clause, explicit), "quote": _quote(clause)}
-                    if row not in experience:
-                        experience.append(row)
-            if _EDU_CUE.search(clause):
-                for level, pattern in _EDU:
-                    if pattern.search(clause):
-                        explicit = bool(_EDU_MANDATORY.search(clause))
-                        row = {"level": level, "kind": _kind(clause, explicit),
-                               "completed_stated": bool(_EDU_COMPLETED.search(clause)), "quote": _quote(clause)}
-                        if row not in education:
-                            education.append(row)
-                        break
+            for part, head, preferred_scope in _scoped(clause):
+                if _EXP_WORD.search(clause):
+                    for m in _EXP.finditer(part):
+                        lo, hi = int(m.group("lo")), int(m.group("hi")) if m.group("hi") and not m.group("plus") else None
+                        if not 0 < lo <= 40 or (hi is not None and hi < lo):
+                            continue
+                        explicit = bool(m.group("min") or m.group("plus")) and not preferred_scope
+                        kind = "preferred" if preferred_scope and not _NL_HEDGE.search(clause) else _kind(clause, head, explicit)
+                        row = {"min_years": lo, "max_years": hi, "kind": kind, "quote": _quote(clause)}
+                        if not any(r["min_years"] == lo and r["max_years"] == hi for r in experience):
+                            experience.append(row)
+                if _EDU_CUE.search(clause):
+                    for level, pattern in _EDU:
+                        if pattern.search(part):
+                            explicit = bool(_EDU_MANDATORY.search(head)) and not preferred_scope
+                            kind = "preferred" if preferred_scope and not _NL_HEDGE.search(clause) else _kind(clause, head, explicit)
+                            row = {"level": level, "kind": kind, "completed_stated": bool(_EDU_COMPLETED.search(part)),
+                                   "quote": _quote(clause)}
+                            if not any(r["level"] == level for r in education):
+                                education.append(row)
+                            break
     return tuple(experience), tuple(education)
 
 

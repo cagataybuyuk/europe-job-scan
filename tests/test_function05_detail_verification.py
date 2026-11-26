@@ -1373,3 +1373,72 @@ def test_nothing_in_the_language_policy_path_grants_application_authority(tmp_pa
     assert handoff["candidates"] == [] and handoff["first_candidate_for_review"] is None
     assert handoff[lp.WATCHLIST]["count"] == 5 and handoff[lp.WATCHLIST]["application_queue_authority"] is False
     assert handoff["executable"] is False and handoff["submit_authorized"] is False
+
+
+# ---- G. regressions from the real offline reassessment (exact employer sentence patterns) -----------------
+REAL_SALARY = [
+    ("Brutomaandsalaris tussen € 6.120,- en € 8.850,- afhankelijk van je werkervaring, variabele prestatie beloning, "
+     "een vaste onkostenvergoeding.", 6120.0, 8850.0),
+    ("Brutomaandsalaris tussen € 5.085,- en € 6.230,-", 5085.0, 6230.0),
+    ("Brutomaandsalaris tussen €3.965,- en €5.050,-", 3965.0, 5050.0),
+]
+
+
+@pytest.mark.parametrize("text,low,high", REAL_SALARY)
+def test_real_compound_gross_monthly_salary_ranges_are_exact_and_never_net(text, low, high):
+    c = ev(text).compensation
+    assert (c["monthly_min"], c["monthly_max"], c["basis"], c["currency"], c["period_stated"]) == \
+        (low, high, "gross", "EUR", "month")
+    assert "Brutomaandsalaris" in c["quote"]
+
+
+def test_a_base_salary_range_coexists_with_bonus_and_allowance_but_benefits_are_never_salary():
+    assert ev(REAL_SALARY[0][0]).compensation["monthly_max"] == 8850.0          # bonus / allowance words did not veto it
+    for text in ("Reiskostenvergoeding € 150 per maand.", "Bonus € 500 per maand en salaris op aanvraag.",
+                 "Vaste onkostenvergoeding € 200 per maand.", "Salaris naar rato van ervaring."):
+        assert ev(text).compensation is None, text
+    assert ev("Nettomaandsalaris € 3.000 per maand.").compensation["basis"] == "net"     # net is stated, never derived
+    assert ev("Maandsalaris € 3.000.").compensation is None                              # amount without a period
+
+
+def test_real_mandatory_education_keeps_the_preferred_specialisation_apart():
+    e = ev("Een afgeronde WO-masteropleiding, bij voorkeur op het snijvlak van bedrijfskunde/economie en technologie.")
+    (edu,) = e.education_requirements
+    assert (edu["level"], edu["kind"], edu["completed_stated"]) == ("wo_master", "mandatory", True)
+
+
+def test_real_minimum_years_stay_mandatory_when_only_the_work_environment_is_preferred():
+    e = ev("Met minimaal 6-7+ jaar relevante werkervaring, bij voorkeur binnen consultancy of een grote organisatie.")
+    (x,) = e.experience_requirements
+    assert (x["min_years"], x["max_years"], x["kind"]) == (6, None, "mandatory")          # "6-7+" is open ended
+    e = ev("Je hebt minimaal 3 jaar relevante werkervaring met organisatieverandering en digitale transformaties, "
+           "bij voorkeur binnen consultancy.")
+    (x,) = e.experience_requirements
+    assert (x["min_years"], x["kind"]) == (3, "mandatory") and "bij voorkeur" in x["quote"]
+
+
+def test_preference_negation_and_condition_safeguards_still_hold_after_the_scope_fix():
+    def kinds(text):
+        e = ev(text)
+        return [x["kind"] for x in e.experience_requirements] + [x["kind"] for x in e.education_requirements]
+
+    assert kinds("Bij voorkeur 5 jaar ervaring met Dynamics.") == ["preferred"]
+    assert kinds("Een afgeronde HBO opleiding is een pré.") == ["preferred"]
+    assert kinds("Minimaal 3 jaar werkervaring is een pluspunt.") == ["preferred"]
+    assert kinds("Je hebt geen 3 jaar werkervaring nodig.") == ["conditional"]
+    assert kinds("Minimaal 3 jaar werkervaring, tenzij je een master hebt.") == ["conditional", "conditional"]
+    assert kinds("Een afgeronde WO master, bij voorkeur een PhD.") == ["mandatory", "preferred"]
+    assert kinds("Een afgeronde WO master (MSc) is vereist.") == ["mandatory"]
+
+
+def test_real_sentences_flow_into_the_report_and_leave_policy_and_scoring_untouched():
+    qualifications = ("<ul><li>Een afgeronde WO-masteropleiding, bij voorkeur op het snijvlak van bedrijfskunde/economie en "
+                      "technologie.</li><li>Met minimaal 6-7+ jaar relevante werkervaring, bij voorkeur binnen consultancy "
+                      "of een grote organisatie.</li></ul>")
+    c, _ = decide_for(nl(1, "<p>" + REAL_SALARY[1][0] + "</p>" + NL_SPONSOR_YES, qualifications=qualifications))
+    pe = c["posting_evidence"]
+    assert (pe["compensation"]["monthly_min"], pe["compensation"]["monthly_max"]) == (5085.0, 6230.0)
+    assert [(e["min_years"], e["kind"]) for e in pe["experience_requirements"]] == [(6, "mandatory")]
+    assert [(e["level"], e["kind"]) for e in pe["education_requirements"]] == [("wo_master", "mandatory")]
+    assert c["language_policy"]["action"] == "watchlist" and c["verdict"]["status"] == lp.WATCHLIST   # policy unchanged
+    assert lp.POLICY_VERSION == "EJS-LANG-SPONSOR-POLICY-1.0" and sha256(criteria_text().encode()).hexdigest() == SHA
