@@ -640,3 +640,90 @@ def test_cli_refuses_a_criteria_file_that_is_not_the_approved_digest(tmp_path, c
                      "--expected-rule-version", RV]) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["criteria_approval"] == "approved_digest_and_rule_version_match" and summary["handoff_ready"] is True
+
+
+# ---- CLI integrity: one read, digest and rule version checked before evaluation ------------------------------
+def _cli_inputs(tmp_path):
+    from hashlib import sha256
+    f02, ids, tenant = _f02_report(tmp_path)
+    (tmp_path / "f02.json").write_text(json.dumps(f02), encoding="utf-8")
+    crit = tmp_path / "criteria.yaml"
+    crit.write_text(criteria_text(), encoding="utf-8")
+    base = ["--report", str(tmp_path / "f02.json"), "--criteria", str(crit)]
+    return crit, sha256(crit.read_bytes()).hexdigest(), base
+
+
+def test_cli_parses_the_exact_bytes_it_hashed_and_reads_the_criteria_once(tmp_path, monkeypatch, capsys):
+    from hashlib import sha256
+    from pathlib import Path
+    crit, digest, base = _cli_inputs(tmp_path)
+    cli = _cli()
+    assert not hasattr(cli, "load_criteria")                                   # no second, path-based read
+    reads, parsed = [], []
+    original_read = Path.read_bytes
+    original_parse = cli.parse_criteria_text
+
+    def counting_read(self):
+        if self == crit:
+            reads.append(1)
+            if len(reads) > 1:                                                 # a swapped file on a second read
+                return crit.read_bytes.__func__(self).replace(b"OPPORTUNITY-1.0+K2-test", b"SWAPPED")
+        return original_read(self)
+
+    def recording_parse(text):
+        parsed.append(text)
+        return original_parse(text)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read)
+    monkeypatch.setattr(cli, "parse_criteria_text", recording_parse)
+    assert cli.main([*base, "--out-dir", str(tmp_path / "o"), "--expected-criteria-sha256", digest,
+                     "--expected-rule-version", RV]) == 0
+    assert len(reads) == 1
+    assert len(parsed) == 1 and sha256(parsed[0].encode("utf-8")).hexdigest() == digest
+    report = json.loads((tmp_path / "o" / "suitability-report.json").read_text(encoding="utf-8"))
+    assert report["criteria"]["sha256"] == digest and report["criteria"]["rule_version"] == RV
+    assert json.loads(capsys.readouterr().out)["criteria_approval"] == "approved_digest_and_rule_version_match"
+
+
+def test_cli_rejects_a_rule_version_mismatch_before_any_evaluation_or_output(tmp_path, monkeypatch, capsys):
+    crit, digest, base = _cli_inputs(tmp_path)
+    cli = _cli()
+
+    def forbidden(*a, **k):
+        raise AssertionError("evaluation reached")
+    monkeypatch.setattr(cli, "evaluate_report", forbidden)
+    out = tmp_path / "o"
+    assert cli.main([*base, "--out-dir", str(out), "--expected-criteria-sha256", digest,
+                     "--expected-rule-version", "EJS-OTHER-v9"]) == 2
+    assert "CRITERIA_RULE_VERSION_MISMATCH" in capsys.readouterr().err
+    assert not out.exists()                                                    # nothing created, nothing written
+
+
+def test_cli_digest_mismatch_stops_before_parsing_or_output(tmp_path, monkeypatch, capsys):
+    crit, digest, base = _cli_inputs(tmp_path)
+    cli = _cli()
+
+    def forbidden(*a, **k):
+        raise AssertionError("parsed an unapproved file")
+    monkeypatch.setattr(cli, "parse_criteria_text", forbidden)
+    out = tmp_path / "o"
+    assert cli.main([*base, "--out-dir", str(out), "--expected-criteria-sha256", "0" * 64,
+                     "--expected-rule-version", RV]) == 2
+    assert "CRITERIA_DIGEST_MISMATCH" in capsys.readouterr().err and not out.exists()
+
+
+@pytest.mark.parametrize("which", ["sha", "rule"])
+def test_cli_requires_digest_and_rule_version_together(tmp_path, capsys, which):
+    crit, digest, base = _cli_inputs(tmp_path)
+    extra = (["--expected-criteria-sha256", digest] if which == "sha" else ["--expected-rule-version", RV])
+    assert _cli().main([*base, "--out-dir", str(tmp_path / "o"), *extra]) == 2
+    assert "MUST_BE_GIVEN_TOGETHER" in capsys.readouterr().err and not (tmp_path / "o").exists()
+
+
+def test_cli_refuses_non_utf8_criteria_bytes(tmp_path, capsys):
+    from hashlib import sha256
+    crit, digest, base = _cli_inputs(tmp_path)
+    crit.write_bytes(b"\xff\xfe\x00bad")
+    assert _cli().main([*base, "--out-dir", str(tmp_path / "o"), "--expected-criteria-sha256",
+                        sha256(crit.read_bytes()).hexdigest(), "--expected-rule-version", RV]) == 2
+    assert "CRITERIA_NOT_UTF8" in capsys.readouterr().err and not (tmp_path / "o").exists()

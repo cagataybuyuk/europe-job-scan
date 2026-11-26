@@ -15,7 +15,7 @@ import sys
 from hashlib import sha256
 from pathlib import Path
 
-from ejs.services.criteria_loader import CriteriaError, load_criteria
+from ejs.services.criteria_loader import CriteriaError, parse_criteria_text
 from ejs.services.expansion_shadow import SCHEMA as EXPANSION_SCHEMA, project_for_application_bridge
 from ejs.services.owner_only_files import OutputDirError, prepare_output_dir, write_private_file
 from ejs.services.suitability import SuitabilityError, evaluate_report, project_for_bridge
@@ -52,14 +52,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-rule-version", help="independently recorded rule version of the approved criteria")
     args = parser.parse_args(argv)
     try:
-        out_dir = prepare_output_dir(args.out_dir)
-        if any((out_dir / n).exists() for n in (REPORT_NAME, BRIDGE_NAME)):
-            raise OutputDirError("OUTPUT_EXISTS")
+        if bool(args.expected_criteria_sha256) != bool(args.expected_rule_version):
+            raise ValueError("EXPECTED_DIGEST_AND_RULE_VERSION_MUST_BE_GIVEN_TOGETHER")
+        # One read: the bytes that are hashed are the bytes that are parsed.
         criteria_bytes = args.criteria.read_bytes()
-        criteria = load_criteria(args.criteria)
         actual_sha = sha256(criteria_bytes).hexdigest()
         if args.expected_criteria_sha256 and actual_sha != args.expected_criteria_sha256:
             raise ValueError("CRITERIA_DIGEST_MISMATCH")      # a different file than the approved one: do not evaluate
+        try:
+            criteria = parse_criteria_text(criteria_bytes.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise CriteriaError("CRITERIA_NOT_UTF8") from exc
+        if args.expected_rule_version and criteria.rule_version != args.expected_rule_version:
+            raise ValueError("CRITERIA_RULE_VERSION_MISMATCH")  # rejected before any evaluation or output
+        out_dir = prepare_output_dir(args.out_dir)
+        if any((out_dir / n).exists() for n in (REPORT_NAME, BRIDGE_NAME)):
+            raise OutputDirError("OUTPUT_EXISTS")
         report = json.loads(args.report.read_bytes())
         if isinstance(report, dict) and report.get("schema") == EXPANSION_SCHEMA:
             report = project_for_application_bridge(report)

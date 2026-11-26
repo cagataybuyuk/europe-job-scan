@@ -25,7 +25,7 @@ The scoring engine was not replaced: no demonstrated need.
 | `src/ejs/services/suitability_evidence.py` | Offline evidence extraction from already-collected posting bytes/text. Explicit statements only. Hedged ("may", "depending", "exceptional candidates") or soft ("is a plus") wording stays Unknown. Identity-bound SmartRecruiters adapter (`tenant` + `posting_id` must match). EUR compensation only, with an explicit period; no FX, no tax model. |
 | `src/ejs/services/suitability.py` | `evaluate_report` (deterministic prioritization), `project_for_bridge` (priority-ordered view for the unchanged W2 bridge), `profile_from_criteria`. |
 | `scripts/function04_suitability.py` | Offline CLI. Owner-only output (0700 dir, 0600 files) outside the repo, no overwrite, prints counts only. |
-| `tests/test_function04_suitability.py` | 70 acceptance tests, in the core CI job. |
+| `tests/test_function04_suitability.py` | 76 acceptance tests, in the core CI job. |
 
 ### Evidence levels
 
@@ -84,8 +84,9 @@ Every row lists `missing_evidence` (what would resolve an Unknown) apart from `c
 * **Approval is bound to a digest, not to a reference.** The criteria count as owner-approved only when the SHA-256
   of the exact bytes read equals an independently recorded expected digest **and** the file's rule version equals the
   expected one (`criteria.approval: approved_digest_and_rule_version_match`). Other statuses: `not_verified_no_expected_digest`,
-  `digest_mismatch`, `rule_version_mismatch`, `expected_digest_malformed`, `not_verified_no_actual_digest`. The CLI refuses
-  to evaluate a file whose digest differs from `--expected-criteria-sha256`. There is no free-form approval reference any more.
+  `digest_mismatch`, `rule_version_mismatch`, `expected_digest_malformed`, `not_verified_no_actual_digest`. The CLI reads the criteria file once, hashes those bytes and
+  parses the same bytes (`parse_criteria_text`); a digest or rule-version mismatch, or one expected value without the
+  other, stops it before parsing, evaluation or any output directory is created. There is no free-form approval reference any more.
 * `handoff_ready` is `true` only for an approved digest and configured role tracks. Other profile gaps stay Unknown and are
   listed in `criteria.profile_gaps`; nothing is invented to fill them.
 * The output separates `policy.owner_approved_fields` (primary 100, secondary 70, no title match) from
@@ -111,7 +112,7 @@ PYTHONPATH=src python scripts/function04_suitability.py --report <f02-report.jso
 | 7 | Downstream compatible | Met | Function 02 live-report fixture through projection, suitability and the unchanged W2 bridge |
 | 8 | No execution/submission authority | Met | authority block, no `auto_apply` without verified evidence, geography/identity downgrade, network-denied test |
 
-Validation (offline): 70 Function 04 tests pass (27 added for the review gaps: digest binding, negative/conditional/ambiguous
+Validation (offline): 76 Function 04 tests pass (33 added for the review gaps: digest binding, negative/conditional/ambiguous
 employer statements, unknown candidate work authorization, title-only signals, incomplete versus confirmed). Focused
 regressions (criteria, score/autoreview, dedupe, shadow, bridge, expansion live/replay/store/integration): 402 passed.
 
