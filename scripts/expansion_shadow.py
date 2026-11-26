@@ -12,7 +12,7 @@ import time
 
 from ejs.services.criteria_loader import load_criteria
 from ejs.services.expansion_replay import (
-    COUNTRIES, LIVE_APPROVED_PAIRS, LIVE_MAX_REQUESTS, RESEARCH, Checkpoint, LiveObservation,
+    COUNTRIES, LIVE_APPROVED_PAIRS, SERVICENOW_APPROVED_PAIRS, LIVE_MAX_REQUESTS, RESEARCH, Checkpoint, LiveObservation,
     effective_rechecks, live_replay_batch, recheck_first_page,
 )
 from ejs.services.http_carrier import HttpCarrier, MAX_REQUESTS_PER_RUN, urllib_transport
@@ -58,7 +58,11 @@ def _load_fixtures(path: Path) -> tuple[dict[tuple[str, str, int], object], str]
 def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser, *,
                   transport=urllib_transport, clock=time.monotonic, sleep=time.sleep) -> int:
     live = bool(getattr(args, "expansion_live", False))
-    if live and not LIVE_APPROVED_PAIRS:
+    scope_name = getattr(args, "expansion_scope", None)
+    if scope_name not in (None, "servicenow-nl-ie") or (scope_name is not None and not live):
+        parser.error("EXPANSION_LIVE_SCOPE_NOT_APPROVED")
+    approved = (SERVICENOW_APPROVED_PAIRS if scope_name == "servicenow-nl-ie" else LIVE_APPROVED_PAIRS) if live else None
+    if live and not approved:
         parser.error("EXPANSION_LIVE_SCOPE_NOT_APPROVED")
     try:
         markets = validate_watchlist(read_watchlist(args.watchlist))
@@ -71,7 +75,7 @@ def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser, *,
         parser.error("EXPANSION_CRITERIA_INVALID")
     fixtures = None
     if live:
-        fixture_digest = sha256(json.dumps(sorted(LIVE_APPROVED_PAIRS)).encode()).hexdigest()
+        fixture_digest = sha256(json.dumps(sorted(approved)).encode()).hexdigest()
     else:
         try:
             fixtures, fixture_digest = _load_fixtures(Path(args.expansion_fixtures))
@@ -80,7 +84,6 @@ def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser, *,
 
     inputs = json.dumps([markets, criteria_bytes, fixture_digest, "live" if live else "fixtures"], sort_keys=True)
     request_budget = min(args.expansion_max_pages or MAX_REQUESTS_PER_RUN, LIVE_MAX_REQUESTS)
-    approved = LIVE_APPROVED_PAIRS if live else None
     final: dict = {}
 
     def render_reports(checkpoint: Checkpoint, listings: list[dict[str, str]],
@@ -95,8 +98,8 @@ def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser, *,
         """True when an approved pair can still advance or a completed pair still lacks a recheck."""
         failed = {c.tenant for c in checkpoint.cursors if c.status == "error"}
         known = effective_rechecks(evidence)
-        return any((c.status == "pending" and c.tenant not in failed and (c.tenant, c.country) in LIVE_APPROVED_PAIRS)
-                   or (c.status == "complete" and c.total and (c.tenant, c.country) in LIVE_APPROVED_PAIRS
+        return any((c.status == "pending" and c.tenant not in failed and (c.tenant, c.country) in approved)
+                   or (c.status == "complete" and c.total and (c.tenant, c.country) in approved
                        and known.get((c.tenant, c.country), {"status": "not_checked"})["status"] == "not_checked")
                    for c in checkpoint.cursors)
 
@@ -107,10 +110,10 @@ def run_expansion(args: argparse.Namespace, parser: argparse.ArgumentParser, *,
         # Keep one request for drift rechecks; more run only while the reservation lasts.
         reserve = 1 if reserved > 1 else 0
         result = live_replay_batch(checkpoint, carrier, carrier.begin_employer,
-                                   max_pages=reserved - reserve, max_per_employer=reserved - reserve)
+                                   approved=approved, max_pages=reserved - reserve, max_per_employer=reserved - reserve)
         known = effective_rechecks(evidence)
         needs = [c for c in result.checkpoint.cursors
-                 if c.status == "complete" and c.total and known.get((c.tenant, c.country),
+                 if (c.tenant, c.country) in approved and c.status == "complete" and c.total and known.get((c.tenant, c.country),
                                                                       {"status": "not_checked"})["status"] == "not_checked"]
         rechecks = tuple(recheck_first_page(c, carrier, carrier.begin_employer) for c in needs)
         requests = tuple(e for e in carrier.log if e["status"] != "blocked")
