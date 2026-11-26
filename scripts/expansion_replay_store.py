@@ -8,7 +8,9 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import stat
+from typing import Callable
 from uuid import uuid4
 
 from ejs.services.expansion_replay import (
@@ -16,10 +18,14 @@ from ejs.services.expansion_replay import (
     Checkpoint, Cursor, ReplayResult, initial_checkpoint, replay_batch,
     validate_checkpoint,
 )
-from scripts.shadow_discovery import private_output_directory, require_no_extended_acl
+if __package__:
+    from .shadow_discovery import private_output_directory, require_no_extended_acl
+else:
+    from shadow_discovery import private_output_directory, require_no_extended_acl
 
 
 BUNDLE_NAME = "expansion-replay.json"
+REPORT_NAMES = ("expansion-report.json", "expansion-report.md")
 STORE_ERROR = "EXPANSION_STORE_REVIEW_REQUIRED"
 _SCHEMA = "EJS-EXPANSION-REPLAY-BUNDLE-1"
 _MAX_BYTES = 32_000_000
@@ -57,14 +63,21 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict:
     return obj
 
 
-def _load_bundle(directory_fd: int) -> tuple[Checkpoint, list[dict[str, str]]]:
+def decode_json(raw: bytes) -> object:
+    return json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
+
+
+def _load_bundle(directory_fd: int, input_digest: str | None) -> tuple[Checkpoint, list[dict[str, str]]]:
     with _private_file(directory_fd, BUNDLE_NAME, os.O_RDONLY) as fd:
         with os.fdopen(fd, "rb", closefd=False) as stream:
             raw = stream.read(_MAX_BYTES + 1)
     if len(raw) > _MAX_BYTES:
         raise ValueError(STORE_ERROR)
-    bundle = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
-    if (type(bundle) is not dict or bundle.keys() != {"schema", "checkpoint", "listings"}
+    bundle = decode_json(raw)
+    keys = {"schema", "checkpoint", "listings"}
+    if input_digest is not None:
+        keys.add("input_sha256")
+    if (type(bundle) is not dict or bundle.keys() != keys or bundle.get("input_sha256") != input_digest
             or bundle["schema"] != _SCHEMA or type(bundle["listings"]) is not list):
         raise ValueError(STORE_ERROR)
     data = bundle["checkpoint"]
@@ -103,12 +116,18 @@ def _load_bundle(directory_fd: int) -> tuple[Checkpoint, list[dict[str, str]]]:
     return checkpoint, bundle["listings"]
 
 
-def _publish_bundle(directory_fd: int, checkpoint: Checkpoint, listings: list[dict[str, str]]) -> None:
-    raw = (json.dumps({"schema": _SCHEMA, "checkpoint": asdict(checkpoint), "listings": listings},
-                      ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+def _publish_bundle(directory_fd: int, checkpoint: Checkpoint, listings: list[dict[str, str]],
+                    input_digest: str | None) -> None:
+    bundle = {"schema": _SCHEMA, "checkpoint": asdict(checkpoint), "listings": listings}
+    if input_digest is not None:
+        bundle["input_sha256"] = input_digest
+    raw = (json.dumps(bundle, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     if len(raw) > _MAX_BYTES:
         raise ValueError(STORE_ERROR)
+    _publish_file(directory_fd, BUNDLE_NAME, raw)
 
+
+def _publish_file(directory_fd: int, name: str, raw: bytes) -> None:
     pending = f".expansion-{uuid4().hex}.tmp"
     fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
                  dir_fd=directory_fd)
@@ -118,24 +137,32 @@ def _publish_bundle(directory_fd: int, checkpoint: Checkpoint, listings: list[di
             stream.write(raw)
             stream.flush()
             os.fsync(fd)
-        os.replace(pending, BUNDLE_NAME, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.replace(pending, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
     except BaseException:
         os.unlink(pending, dir_fd=directory_fd)
         raise
     os.fsync(directory_fd)
 
 
-def replay_private_batch(directory: Path, fixtures: dict[tuple[str, str, int], dict], *,
+def replay_private_batch(directory: Path, fixtures: dict[tuple[str, str, int], object], *,
                          initialize: bool = False, max_pages: int = MAX_REQUESTS_PER_RUN,
-                         max_per_employer: int = MAX_PAGES_PER_EMPLOYER) -> ReplayResult:
+                         max_per_employer: int = MAX_PAGES_PER_EMPLOYER,
+                         input_digest: str | None = None,
+                         render_reports: Callable[[Checkpoint, list[dict[str, str]]],
+                                                  tuple[bytes, bytes]] | None = None) -> ReplayResult:
     """Run one synthetic batch and atomically commit progress with cumulative output.
 
     Each call holds a process lock and reloads the owner-only bundle. Explicit
     initialization requires an absent bundle; resume requires an existing one.
+    A bound workflow requires matching inputs on resume. Reports are rebuildable
+    views, published under the same lock after the bundle is synchronized.
     """
     try:
-        if (not directory.is_absolute() or "control" in directory.parts
-                or type(initialize) is not bool or (not initialize and not directory.is_dir())):
+        if (not directory.is_absolute() or any(part.casefold() == "control" for part in directory.parts)
+                or type(initialize) is not bool or (not initialize and not directory.is_dir())
+                or (input_digest is not None and
+                    (type(input_digest) is not str or not re.fullmatch(r"[0-9a-f]{64}", input_digest)))
+                or (render_reports is not None and input_digest is None)):
             raise ValueError(STORE_ERROR)
         with ExitStack() as stack:
             directory_fd = private_output_directory(directory, stack)
@@ -149,11 +176,24 @@ def replay_private_batch(directory: Path, fixtures: dict[tuple[str, str, int], d
                 else:
                     raise ValueError(STORE_ERROR)
             else:
-                checkpoint, listings = _load_bundle(directory_fd)
+                checkpoint, listings = _load_bundle(directory_fd, input_digest)
+            if render_reports is not None:
+                for name in REPORT_NAMES:
+                    try:
+                        with _private_file(directory_fd, name, os.O_RDONLY):
+                            if initialize:
+                                raise ValueError(STORE_ERROR)
+                    except FileNotFoundError:
+                        continue
             result = replay_batch(checkpoint, fixtures, max_pages=max_pages,
                                   max_per_employer=max_per_employer)
             listings.extend(result.listings)
-            _publish_bundle(directory_fd, result.checkpoint, listings)
+            if initialize or result.pages:
+                _publish_bundle(directory_fd, result.checkpoint, listings, input_digest)
+            if render_reports is not None:
+                payloads = render_reports(result.checkpoint, listings)
+                for name, payload in zip(REPORT_NAMES, payloads, strict=True):
+                    _publish_file(directory_fd, name, payload)
         return result
     except (OSError, ValueError, RecursionError):
         # Paths and parser input are private.

@@ -2,10 +2,11 @@
 """EJS-W1 shadow discovery CLI. Offline unless --live is given (Faz B gate; never used in Faz A).
 
   PYTHONPATH=src python scripts/shadow_discovery.py --watchlist <csv outside repo> --criteria <yaml outside repo> \
-      --out-dir <dir> [--sheet-labels <json>] [--fixture-dir <dir> | --live]
+      --out-dir <dir> [--sheet-labels <json>] [--fixture-dir <dir> | --live | --expansion-fixtures <json>]
 
 Without --live and without --fixture-dir the carrier is OFF: supported employers report ``no_carrier``.
 --fixture-dir replays ``<dir>/<api-host>/<tenant>/<offset>.json``. The first page has offset 0.
+--expansion-fixtures runs bounded W3.5 synthetic country replay with a durable private checkpoint.
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ejs.services.criteria_loader import load_criteria
 from ejs.services.discovery import DiscoveryError, classify_url
-from ejs.services.http_carrier import HttpCarrier, ReplayCarrier, urllib_transport
+from ejs.services.http_carrier import MAX_REQUESTS_PER_RUN, HttpCarrier, ReplayCarrier, urllib_transport
 from ejs.services.shadow_run import read_watchlist, render_markdown, run_shadow
 
 
@@ -205,10 +206,28 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--criteria", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--sheet-labels")
+    ap.add_argument("--expansion-init", action="store_true", help="initialize an unused W3.5 output directory")
+    ap.add_argument("--expansion-max-pages", type=int, help="lower the W3.5 batch page ceiling")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--fixture-dir")
     mode.add_argument("--live", action="store_true", help="Phase B: public GET for the four pilot employers")
+    mode.add_argument("--expansion-fixtures", help="W3.5: synthetic country-page JSON snapshot")
     a = ap.parse_args(argv)
+
+    if a.expansion_fixtures is not None:
+        if a.sheet_labels is not None:
+            ap.error("--sheet-labels cannot be used with --expansion-fixtures")
+        if a.expansion_max_pages is None:
+            a.expansion_max_pages = MAX_REQUESTS_PER_RUN
+        if not 1 <= a.expansion_max_pages <= MAX_REQUESTS_PER_RUN:
+            ap.error(f"--expansion-max-pages must be between 1 and {MAX_REQUESTS_PER_RUN}")
+        if __package__:
+            from .expansion_shadow import run_expansion
+        else:
+            from expansion_shadow import run_expansion
+        return run_expansion(a, ap)
+    if a.expansion_init or a.expansion_max_pages is not None:
+        ap.error("W3.5 options require --expansion-fixtures")
 
     criteria = load_criteria(a.criteria)
     try:
