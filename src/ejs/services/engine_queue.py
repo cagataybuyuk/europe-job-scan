@@ -154,6 +154,19 @@ def read_switch(root: Path) -> RuntimeSwitch:
     return RuntimeSwitch()
 
 
+def runtime_guard(root: Path) -> Callable[[str], None]:
+    """Point-of-use authorization for one engine root: re-reads ``control/`` on every call.
+
+    Raises unless ``STOP`` is absent and ``runtime.json`` is a valid, owner-only file that still
+    enables final submit. Missing, malformed, unsafe or unreadable control state denies
+    (``read_switch`` falls back to the disabled switch). Nothing is cached between calls.
+    """
+    def check(point: str) -> None:
+        if not switch_enabled(read_switch(root)):
+            raise QueueError("ENGINE_RUNTIME_AUTH_DENIED")
+    return check
+
+
 @contextmanager
 def _engine_lock(root: Path):
     fd = os.open(root / "engine.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -210,6 +223,7 @@ class EngineQueue:
         _require(type(ledger) is PolicySubmissionLedger and isinstance(cv_dir, Path) and callable(browser_factory))
         prepare_root(root)
         self.root, self.ledger, self.cv_dir = root, ledger, cv_dir
+        self._guard = runtime_guard(root)
         self.browser_factory, self.clock = browser_factory, clock
 
     def _result_path(self, raw: bytes) -> Path:
@@ -289,7 +303,6 @@ class EngineQueue:
         """Process every inbox manifest once, in name order. Returns codes only."""
         with _engine_lock(self.root):
             reports = self._recover()
-            switch = read_switch(self.root)
             inbox = sorted(p for p in (self.root / "inbox").iterdir() if _NAME.fullmatch(p.name))
             for path in inbox[:MAX_ITEMS_PER_RUN]:
                 claimed = self.root / "processing" / path.name
@@ -300,14 +313,13 @@ class EngineQueue:
                     reports.append(ItemReport(path.name, "SKIPPED_UNSAFE", "ENGINE_QUEUE_UNSAFE"))
                     continue
                 try:
-                    reports.append(self._process(claimed, switch))
+                    reports.append(self._process(claimed))
                 except Exception:
                     # Left in processing/: the next run reports it once, never re-runs it.
                     reports.append(ItemReport(path.name, "STUCK", "ENGINE_ITEM_FAILED"))
-                switch = read_switch(self.root)  # STOP takes effect between items
             return reports
 
-    def _process(self, path: Path, switch: RuntimeSwitch) -> ItemReport:
+    def _process(self, path: Path) -> ItemReport:
         try:
             raw = _read_private(path, MAX_MANIFEST_BYTES)
         except Exception:
@@ -331,8 +343,8 @@ class EngineQueue:
         browser = None
         try:
             browser = self.browser_factory(document)
-            result = PolicyApplicationRuntime(browser, self.ledger, clock=self.clock).run(
-                raw, expected_sha256=digest, cv_path=cv_path, switch=switch)
+            result = PolicyApplicationRuntime(browser, self.ledger, guard=self._guard, clock=self.clock).run(
+                raw, expected_sha256=digest, cv_path=cv_path, switch=read_switch(self.root))  # fresh read per item; STOP also re-read at every guard point
         except Exception:
             result = RunResult("BLOCKED", "ENGINE_BROWSER_UNAVAILABLE")
         finally:

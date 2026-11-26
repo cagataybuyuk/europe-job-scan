@@ -140,6 +140,8 @@ jobs:
           tests/test_policy_submission_ledger.py
           tests/test_policy_application_runtime.py
           tests/test_engine_queue.py
+          tests/test_w36_runtime_preparation.py
+          tests/test_runtime_guard.py
           tests/test_work_rights_evidence_gate.py
           tests/test_bound_work_rights_gate.py
           tests/test_application_action_preflight.py

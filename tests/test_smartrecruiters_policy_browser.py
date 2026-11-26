@@ -186,9 +186,13 @@ def session(chromium, *, html=None, ack=True, upload_name="Synthetic_CV.pdf"):
         context.close()
 
 
+def ALLOW(point):
+    """Explicit always-allow runtime guard (this suite does not exercise STOP)."""
+
+
 def run(browser, ledger, clock, doc, cv, *, wait=0.2):
     raw = encode(doc)
-    return PolicyApplicationRuntime(browser, ledger, clock=clock, owner_wait_seconds=wait).run(
+    return PolicyApplicationRuntime(browser, ledger, guard=ALLOW, clock=clock, owner_wait_seconds=wait).run(
         raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
 
 

@@ -11,6 +11,11 @@ Browser-agnostic orchestration of ONE prepared EJS-EXECUTION-MANIFEST-1:
     -> mark_started (committed BEFORE the click) -> submit once
     -> exact confirmation -> ledger.confirm
 
+Point-of-use authorization: ``guard(point)`` is mandatory and is called before the browser
+opens, before every field write, the CV upload and every page advance, after an owner
+challenge wait, before ``mark_started`` and immediately before the final dispatch. A guard
+that raises (or any unexpected error inside it) denies the next effect and fails closed.
+
 Before ``mark_started`` every failure releases the reservation (no click happened).
 After it, nothing is retried, released or replaced; an unverifiable outcome stays
 ``SUBMITTED_UNCONFIRMED``. Results carry fixed codes only, never candidate values.
@@ -26,7 +31,7 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Protocol
+from typing import Callable, Protocol
 import unicodedata
 from urllib.parse import urlsplit
 
@@ -149,8 +154,10 @@ def read_cv(path: Path, manifest: ExecutionManifest) -> bytes:
 
 class PolicyApplicationRuntime:
     def __init__(self, browser: PolicyFormBrowser, ledger: PolicySubmissionLedger, *,
-                 clock=_utc_now, owner_wait_seconds: float = 6 * 3600):
-        self.browser, self.ledger, self._clock = browser, ledger, clock
+                 guard: Callable[[str], None], clock=_utc_now, owner_wait_seconds: float = 6 * 3600):
+        if not callable(guard):
+            raise TypeError("POLICY_APP_GUARD_REQUIRED")  # no default: authorization is never optional
+        self.browser, self.ledger, self._clock, self._guard = browser, ledger, clock, guard
         self.owner_wait_seconds = owner_wait_seconds
         self._last: datetime | None = None
 
@@ -166,6 +173,13 @@ class PolicyApplicationRuntime:
         return now
 
     # ---- helpers ---------------------------------------------------------------------
+
+    def _authorized(self, point: str) -> None:
+        """Point-of-use runtime authorization. Any refusal or failure of the guard denies."""
+        try:
+            self._guard(point)
+        except Exception:
+            raise _Stop("POLICY_APP_RUNTIME_AUTH") from None
 
     def _ids(self, m: ExecutionManifest) -> dict:
         return dict(opportunity_key=m.opportunity_key, requisition_id=m.requisition_id,
@@ -230,6 +244,7 @@ class PolicyApplicationRuntime:
         self._owner_handoff = True
         solved = self.browser.wait_for_owner(self.owner_wait_seconds) is True
         _require(solved, "POLICY_APP_OWNER_CHALLENGE_UNRESOLVED")
+        self._authorized("after-owner-wait")  # may have changed during a long owner wait; row stays held
         self.ledger.resume(**self._ids(m), now=self.clock())
         # The owner had the page: from now on this runtime never releases the key.
         before = snap.get("url")
@@ -303,15 +318,18 @@ class PolicyApplicationRuntime:
         self._owner_handoff = False
         try:
             cv = read_cv(cv_path, m)
+            self._authorized("open")
             self.browser.open(m.apply_url)
             for step in range(m.step_count):
                 snap = self._settle_challenge(m, self._surface(m, step), step)
                 for field in self._filled(m, step):
+                    self._authorized("write:" + field.key)
                     self.browser.write(field.key, field.control, field.answer.value)
                     value = self.browser.readback(field.key, field.control)
                     _require(type(value) is type(field.answer.value) and value == field.answer.value,
                              "POLICY_APP_READBACK_MISMATCH")
                 if step == m.cv_upload_step:
+                    self._authorized("upload")
                     upload = self.browser.upload(m.cv_upload_key, cv, m.cv_filename)
                     _require(isinstance(upload, UploadResult) and upload.payload_sha256 == m.cv_sha256
                              and upload.payload_size == m.cv_size_bytes and upload.filename == m.cv_filename
@@ -324,14 +342,17 @@ class PolicyApplicationRuntime:
                 if step < m.step_count - 1 or m.pass_kind == "observe":
                     _require(snap.get("form_valid") is True and snap.get("next_visible") is True,
                              "POLICY_APP_FORM_NOT_READY")
+                    self._authorized("advance")
                     self.browser.advance()
             if m.pass_kind == "observe":
                 return self._observe(m, decision_time)
             _require(snap.get("form_valid") is True and snap.get("submit_visible") is True
                      and snap.get("next_visible") is False, "POLICY_APP_FORM_NOT_READY")
+            self._authorized("before-start")
             inspected_at = self.clock()
             self.ledger.mark_started(**self._ids(m), now=inspected_at)
             started = True
+            self._authorized("dispatch")  # last check; a denial here leaves the row Submitted / Unconfirmed
             observation = self.browser.submit_once()
             _require(isinstance(observation, SubmitObservation)
                      and observation.success_acknowledged is True and observation.confirmation_visible is True
