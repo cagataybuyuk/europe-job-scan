@@ -13,7 +13,9 @@ What this module adds:
 * ``request_details``: one GET per allowlisted URL through the injected carrier, nothing else.
 * ``verify_details``: identity/availability/requisition checks, section extraction (verbatim only), Function 04
   re-evaluation with the same approved criteria, and a verdict per candidate:
-  ``suitable`` | ``incomplete_evidence`` | ``confirmed_incompatible``.
+  ``candidate_for_review`` | ``incomplete_evidence`` | ``confirmed_incompatible``. Nothing is ever "suitable":
+  mandatory qualifications are not checked against verified candidate facts here (a Function 06 gate).
+* ``reserve_budget``: durable single-use request budget keyed by allowlist digest and by each detail URL.
 * ``build_handoff``: prioritized Function 06 hand-off. Non-executable: no authority of any kind.
 
 No candidate qualification and no employer requirement is inferred. Unknown stays Unknown.
@@ -21,11 +23,14 @@ No candidate qualification and no employer requirement is inferred. Unknown stay
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from fractions import Fraction
+from hashlib import sha256
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -53,7 +58,7 @@ MAX_LINE = 240
 AUTHORITY = {"execute": False, "submit": False, "form_access": False, "browser": False, "cv_upload": False,
              "function06_started": False, "label_is_not_authority": True}
 HANDOFF_PREREQUISITES = (
-    "owner_review_of_this_handoff", "fresh_employer_and_mandatory_eligibility_review",
+    "owner_review_of_this_handoff", "mandatory_qualifications_checked_against_verified_candidate_facts", "fresh_employer_and_mandatory_eligibility_review",
     "verified_candidate_facts_and_supported_answer_provenance", "observed_application_form",
     "execution_manifest_validation_and_independent_review", "separate_function_06_authorization")
 
@@ -61,10 +66,14 @@ _TENANT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}")
 _MANDATORY = re.compile(r"\b(?:must|required|requires?|mandatory|essential)\b", re.I)
 _OPTIONAL = re.compile(r"\b(?:plus|advantage|preferred|preferably|ideally|nice to have|desirable|bonus|optional|"
                        r"not required|not mandatory|beneficial|an asset)\b", re.I)
-_STATUS_ORDER = {"suitable": 0, "incomplete_evidence": 1, "confirmed_incompatible": 2}
+_STATUS_ORDER = {"candidate_for_review": 0, "incomplete_evidence": 1, "confirmed_incompatible": 2}
 _CONFIRMED_CLASSES = frozenset({"verified_blocked", "verified_below_threshold"})
 _ALLOWLIST_KEYS = frozenset({"schema", "mode", "executable", "submit_authorized", "authority", "request_policy",
                              "source", "selection", "targets", "approval"})
+
+
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+LIVE_ORIGIN, REPLAY_ORIGIN = "live_employer_response", "offline_replay_synthetic"
 
 
 class DetailVerificationError(ValueError):
@@ -132,17 +141,27 @@ def _bind(row: Mapping[str, Any], sequence: int) -> dict[str, Any]:
             "location": row["location"]}
 
 
-def build_allowlist(f04_report: Any, *, f04_report_sha256: str, limit: int = MAX_PILOT_REQUESTS) -> dict[str, Any]:
+def _lineage_problem(lineage: Any, f04_report: Mapping[str, Any]) -> bool:
+    return (not isinstance(lineage, dict) or set(lineage) != {"f02_source_file_sha256", "f02_projection_sha256"}
+            or any(not isinstance(v, str) or not _HEX64.fullmatch(v) for v in lineage.values())
+            or lineage["f02_projection_sha256"] != f04_report.get("source_report_sha256"))
+
+
+def build_allowlist(f04_report: Any, *, f04_report_sha256: str, lineage: Mapping[str, str],
+                    limit: int = MAX_PILOT_REQUESTS) -> dict[str, Any]:
     """Explicit, reviewable detail-request allowlist. Pure; no network.
 
     Selection follows Function 04's ``priority_rank`` (the explicit priority), not a score sort: the first
     ``limit`` ``preliminary_high`` rows. A high row that cannot be bound exactly is reported in
-    ``selection.unbound`` and is never replaced by a lower-priority row.
+    ``selection.unbound`` and is never replaced by a lower-priority row. ``lineage`` pins the verified original
+    Function 02 data the Function 04 report was produced from (see ``check_lineage``).
     """
     rows = validate_f04_report(f04_report)
+    if _lineage_problem(lineage, f04_report):
+        raise DetailVerificationError("LINEAGE_NOT_BOUND_TO_F04_REPORT")
     if type(limit) is not int or not 0 < limit <= MAX_PILOT_REQUESTS:
         raise DetailVerificationError("LIMIT_OUT_OF_RANGE")
-    if not isinstance(f04_report_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", f04_report_sha256):
+    if not isinstance(f04_report_sha256, str) or not _HEX64.fullmatch(f04_report_sha256):
         raise DetailVerificationError("F04_REPORT_SHA256")
     high = [r for r in rows if r["suitability"]["classification"] == SELECT_CLASSIFICATION]
     targets: list[dict[str, Any]] = []
@@ -165,11 +184,12 @@ def build_allowlist(f04_report: Any, *, f04_report_sha256: str, limit: int = MAX
         "submit_authorized": False, "authority": dict(AUTHORITY),
         "request_policy": {"method": "GET", "scheme": "https", "host": DETAIL_HOST, "max_requests": len(targets),
                            "min_interval_s": 1.0, "redirects": "refused", "retries": 0, "authentication": "none",
-                           "browser": False, "form_access": False, "each_url_at_most_once": True},
+                           "browser": False, "form_access": False, "each_url_at_most_once": True,
+                           "single_use_budget": True},
         "source": {"f04_schema": F04_SCHEMA, "f04_report_sha256": f04_report_sha256,
                    "rule_version": f04_report.get("rule_version"),
                    "policy_version": f04_report.get("policy_version"),
-                   "criteria_sha256": f04_report["criteria"].get("sha256")},
+                   "criteria_sha256": f04_report["criteria"].get("sha256"), "lineage": dict(lineage)},
         "selection": {"rule": "preliminary_high_in_f04_priority_rank_order", "limit": limit,
                       "high_rows_in_report": len(high), "selected": len(targets), "unbound": unbound},
         "targets": targets}
@@ -178,7 +198,7 @@ def build_allowlist(f04_report: Any, *, f04_report_sha256: str, limit: int = MAX
     return doc
 
 
-def verify_allowlist(doc: Any, f04_report: Any, *, f04_report_sha256: str) -> dict[str, Any]:
+def verify_allowlist(doc: Any, f04_report: Any, *, f04_report_sha256: str, lineage: Mapping[str, str]) -> dict[str, Any]:
     """The allowlist must equal what Function 04's report yields. Extra, altered or reordered targets are refused."""
     if not isinstance(doc, dict) or doc.get("schema") != SCHEMA_ALLOWLIST or set(doc) != _ALLOWLIST_KEYS:
         raise DetailVerificationError("ALLOWLIST_SHAPE")
@@ -187,42 +207,91 @@ def verify_allowlist(doc: Any, f04_report: Any, *, f04_report_sha256: str) -> di
     if (not isinstance(targets, list) or not isinstance(selection, dict) or len(targets) > MAX_PILOT_REQUESTS
             or type(selection.get("limit")) is not int):
         raise DetailVerificationError("ALLOWLIST_SHAPE")
-    expected = build_allowlist(f04_report, f04_report_sha256=f04_report_sha256, limit=selection["limit"])
+    expected = build_allowlist(f04_report, f04_report_sha256=f04_report_sha256, lineage=lineage,
+                               limit=selection["limit"])
     if allowlist_digest(doc) != allowlist_digest(expected):
         raise DetailVerificationError("ALLOWLIST_NOT_REPRODUCED_FROM_F04_REPORT")
     return expected
 
 
-def report_to_discovery(f04_report: Mapping[str, Any]) -> dict[str, Any]:
-    """Rebuild the Function 02 projection shape from a Function 04 report (all rows, so similarity groups hold)."""
-    from ejs.services.shadow_run import SCHEMA as DISCOVERY_SCHEMA
-    rows = [{**{k: r[k] for k in ROW_FIELDS}, "posting_id": r.get("posting_id"),
-             "similarity_key": r.get("similarity_key"), "discovery_evidence": r.get("discovery_evidence")}
-            for r in f04_report["vacancies"]]
-    return {"schema": DISCOVERY_SCHEMA, "mode": "shadow_no_submit", "projection": "f04_report_rebuilt",
-            "listings_kept": len(rows), "vacancies": rows}
+def check_lineage(f04_report: Mapping[str, Any], projection: Any, criteria: Criteria, *, criteria_sha256: str,
+                  expected_criteria_sha256: str, expected_rule_version: str, f02_source_sha256: str) -> dict[str, str]:
+    """Anchor the Function 04 report to the verified ORIGINAL Function 02 data, not to its own rows.
 
-
-def check_f04_reproducible(f04_report: Mapping[str, Any], criteria: Criteria, *, criteria_sha256: str,
-                           expected_criteria_sha256: str, expected_rule_version: str) -> None:
-    """The F04 report must be what these exact approved criteria produce from its own rows (no hand-edited ranks)."""
-    again = evaluate_report(report_to_discovery(f04_report), criteria, criteria_sha256=criteria_sha256,
+    ``projection`` is the Function 02 report the owner pinned by digest (``f02_source_sha256`` is the digest of
+    its exact bytes, checked by the caller against the independently recorded value). Re-running Function 04 on it
+    with the approved criteria must reproduce the given report exactly, including ``source_report_sha256``.
+    """
+    again = evaluate_report(projection, criteria, criteria_sha256=criteria_sha256,
                             expected_criteria_sha256=expected_criteria_sha256,
                             expected_rule_version=expected_rule_version)
     if again["criteria"]["approval"] != APPROVED_CRITERIA_STATUS:
         raise DetailVerificationError("CRITERIA_NOT_APPROVED")
+    if not isinstance(f02_source_sha256, str) or not _HEX64.fullmatch(f02_source_sha256):
+        raise DetailVerificationError("F02_SOURCE_SHA256")
+    if f04_report.get("source_report_sha256") != again["source_report_sha256"]:
+        raise DetailVerificationError("F04_REPORT_NOT_FROM_PINNED_F02_DATA")
     old = [(r["priority_rank"], r["tenant"], r.get("posting_id"), r["suitability"]) for r in f04_report["vacancies"]]
     new = [(r["priority_rank"], r["tenant"], r.get("posting_id"), r["suitability"]) for r in again["vacancies"]]
     if json.dumps(old, sort_keys=True) != json.dumps(new, sort_keys=True):
         raise DetailVerificationError("F04_REPORT_NOT_REPRODUCIBLE")
+    return {"f02_source_file_sha256": f02_source_sha256, "f02_projection_sha256": again["source_report_sha256"]}
 
 
-# ------------------------------------------------------------------------------------------- requests
-def request_details(allowlist: Mapping[str, Any], carrier: HttpCarrier, *,
-                    now: Callable[[], datetime]) -> list[dict[str, Any]]:
+# ------------------------------------------------------------------------------- durable single-use budget
+def _create_exclusive(path: Path, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def reserve_budget(budget_dir: Path, allowlist: Mapping[str, Any], *, now: Callable[[], datetime],
+                   out_dir: Path) -> Path:
+    """Publish the single-use request reservation BEFORE any request. Never released automatically.
+
+    One file per allowlist digest and one per detail URL, each created exclusively (atomic across processes and
+    output directories). If any already exists the budget is consumed (by a finished, interrupted or uncertain run)
+    and nothing is requested. Files this call created are removed only on that refusal, before any request.
+    A later crash or interruption leaves them in place: the attempt counts as consumed and is never retried
+    automatically. Only the owner may clear them, after reading the attempt journal.
+    """
+    digest = allowlist_digest(allowlist)
+    names = [f"allowlist-{digest}.json"] + [f"url-{sha256(t['detail_url'].encode()).hexdigest()}.json"
+                                            for t in allowlist["targets"]]
+    record = (json.dumps({"schema": "EJS-DETAIL-BUDGET-1", "allowlist_sha256": digest,
+                          "requests_reserved": len(allowlist["targets"]), "reserved_at": _iso(now()),
+                          "pid": os.getpid(), "out_dir": str(out_dir),
+                          "state": "reserved_single_use_not_released_automatically"},
+                         sort_keys=True, indent=1) + "\n").encode()
+    created: list[Path] = []
+    try:
+        for name in names:
+            _create_exclusive(budget_dir / name, record)
+            created.append(budget_dir / name)
+    except FileExistsError:
+        for path in created:
+            path.unlink()
+        raise DetailVerificationError("BUDGET_ALREADY_CONSUMED") from None
+    fd = os.open(budget_dir, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return budget_dir / names[0]
+
+
+# ------------------------------------------------------------------------------------------------ requests
+def request_details(allowlist: Mapping[str, Any], carrier: HttpCarrier, *, now: Callable[[], datetime],
+                    on_start: Callable[[dict], None] | None = None,
+                    on_finish: Callable[[dict, bytes | None], None] | None = None) -> list[dict[str, Any]]:
     """One GET per allowlisted URL, in allowlist order, through the carrier. Never anything else.
 
-    A failing employer stops (carrier rule); remaining targets of that employer are recorded as not requested.
+    ``on_start`` runs (and must succeed) before each request, ``on_finish`` right after the response arrives and
+    before it is analyzed, so an interruption leaves a started-but-unfinished record (an uncertain attempt).
+    A failing employer stops (carrier rule). A response that is unreadable, oversized, or not bound to the
+    allowlisted identity also stops that employer at once; its remaining targets are recorded as not attempted.
     """
     targets = allowlist["targets"]
     if len(targets) > MAX_PILOT_REQUESTS:
@@ -231,6 +300,7 @@ def request_details(allowlist: Mapping[str, Any], carrier: HttpCarrier, *,
     if len(approved) != len(targets):
         raise DetailVerificationError("DUPLICATE_TARGET")
     requested: set[str] = set()
+    halted: set[str] = set()
     observations: list[dict[str, Any]] = []
     for target in targets:
         box: dict[str, bytes] = {}
@@ -242,21 +312,51 @@ def request_details(allowlist: Mapping[str, Any], carrier: HttpCarrier, *,
             box["raw"] = carrier(url)
             return box["raw"]
 
-        carrier.begin_employer(target["tenant"])
-        before = carrier.total
         w2: dict[str, Any] = {"tenant": target["tenant"], "posting_id": target["posting_id"]}
-        outcome, status = "ok", None
+        obs: dict[str, Any] = {"target": target, "outcome": "ok", "http_status": None, "attempted": 0,
+                               "requested_at": None, "observed_at": None, "duration_ms": None,
+                               "response_bytes": None, "response_sha256": None, "raw": None, "w2": w2}
+        if target["tenant"] in halted:
+            obs["outcome"] = "employer_stopped_invalid_response"
+            obs["observed_at"] = _iso(now())
+            obs["facts"] = analyze(obs)
+            observations.append(obs)
+            continue
+        carrier.begin_employer(target["tenant"])
+        before_total, before_log = carrier.total, len(carrier.log)
+        started = now()
+        obs["requested_at"] = _iso(started)
+        if on_start:
+            on_start({"event": "attempt_started", "sequence": target["sequence"], "detail_url": target["detail_url"],
+                      "requested_at": obs["requested_at"]})
         try:
             observe_posting_detail(w2, guarded)
         except DetailVerificationError:
             raise
         except DiscoveryError as exc:
-            outcome, status = exc.kind, getattr(exc, "status", None)
+            obs["outcome"] = exc.kind
         except Exception as exc:  # noqa: BLE001 - recorded, never retried
-            outcome = f"error_{type(exc).__name__}"
-        observations.append({"target": target, "outcome": outcome, "http_status": status,
-                             "attempted": carrier.total - before, "observed_at": _iso(now()),
-                             "raw": box.get("raw"), "w2": w2})
+            obs["outcome"] = f"error_{type(exc).__name__}"
+        finished = now()
+        obs["attempted"] = carrier.total - before_total
+        if obs["attempted"] and len(carrier.log) > before_log:
+            entry = carrier.log[-1]
+            obs["http_status"], obs["response_bytes"] = entry["status"], entry["bytes"]
+        obs["raw"] = box.get("raw")
+        if obs["raw"] is not None:
+            obs["response_sha256"] = sha256(obs["raw"]).hexdigest()
+        obs["observed_at"] = _iso(finished)
+        obs["duration_ms"] = max(0, int((finished - started).total_seconds() * 1000))
+        if on_finish:
+            on_finish({"event": "attempt_finished", "sequence": target["sequence"],
+                       "detail_url": target["detail_url"], "outcome": obs["outcome"],
+                       "http_status": obs["http_status"], "response_bytes": obs["response_bytes"],
+                       "response_sha256": obs["response_sha256"], "requested_at": obs["requested_at"],
+                       "completed_at": obs["observed_at"], "duration_ms": obs["duration_ms"]}, obs["raw"])
+        obs["facts"] = analyze(obs)
+        if obs["raw"] is not None and obs["facts"]["identity"] != "bound":
+            halted.add(target["tenant"])                    # invalid, unreadable or unbound: no further requests
+        observations.append(obs)
     logged = [e["url"] for e in carrier.log if e["url"]]
     if len(set(logged)) != len(logged) or not set(logged) <= approved:
         raise DetailVerificationError("UNAPPROVED_OR_DUPLICATE_REQUEST_LOGGED")
@@ -344,9 +444,18 @@ def _verdict(observation: Mapping[str, Any], facts: Mapping[str, Any], entry: Ma
         return {"status": "incomplete_evidence", "reasons": [f"identity_{facts['identity']}:{r}"
                                                              for r in facts["identity_reasons"]] or ["identity_unbound"]}
     s = entry["suitability"]
-    confirmed = list(s["confirmed_incompatibilities"])
-    if confirmed or s["classification"] in _CONFIRMED_CLASSES:
+    # Exclusions come only from approved K2 hard blockers stated in the posting, a closed posting, or the approved
+    # engine's own verified_blocked / verified_below_threshold classes. Compensation below target is scored by the
+    # engine, not a blocker. Contradictory employer statements never become a confirmed exclusion.
+    contradictory = "contradiction" in s["reason_codes"] or s["reason_code"] == "contradiction"
+    confirmed = [c for c in s["confirmed_incompatibilities"]
+                 if c != "confirmed:compensation_below_target" and not (contradictory and c.startswith("confirmed:blocker:"))]
+    if confirmed or (not contradictory and s["classification"] in _CONFIRMED_CLASSES):
         return {"status": "confirmed_incompatible", "reasons": confirmed or [s["classification"]]}
+    if contradictory:
+        reasons.append("contradictory_evidence_requires_review")
+    if "confirmed:compensation_below_target" in s["confirmed_incompatibilities"]:
+        reasons.append("compensation_below_target_scored_not_a_blocker")
     if facts["availability"] != "active":
         reasons.append("availability_unverified")
     if not facts["requisition_id"]:
@@ -356,20 +465,23 @@ def _verdict(observation: Mapping[str, Any], facts: Mapping[str, Any], entry: Ma
     if s["classification"] != "verified_apply_candidate":
         reasons.append(f"f04_{s['classification']}")
     reasons += [f"review_flag:{f}" for f in s["review_flags"]]
+    notes = [r for r in reasons if r == "compensation_below_target_scored_not_a_blocker"]
+    reasons = [r for r in reasons if r not in notes]
     if reasons:
-        return {"status": "incomplete_evidence", "reasons": reasons}
-    return {"status": "suitable", "reasons": ["f04_verified_apply_candidate_with_bound_active_requisition"]}
+        return {"status": "incomplete_evidence", "reasons": reasons + notes}
+    return {"status": "candidate_for_review", "notes": notes,
+            "reasons": ["f04_verified_apply_candidate_with_bound_active_requisition",
+                        "mandatory_qualifications_not_checked_against_verified_candidate_facts"]}
 
 
-def verify_details(f04_report: Mapping[str, Any], allowlist: Mapping[str, Any],
-                   observations: list[dict[str, Any]], criteria: Criteria, *, criteria_sha256: str,
+def verify_details(projection: Any, observations: list[dict[str, Any]], criteria: Criteria, *, criteria_sha256: str,
                    expected_criteria_sha256: str, expected_rule_version: str) -> dict[str, Any]:
-    """Re-evaluate with the approved Function 04 criteria and the identity-bound details; no new evidence invented."""
-    facts = [analyze(o) for o in observations]
+    """Re-evaluate the verified Function 02 projection with the approved criteria and the identity-bound details."""
+    facts = [o["facts"] for o in observations]
     details: dict[tuple[str, str], VacancyDetail] = {
         (o["target"]["tenant"], o["target"]["posting_id"]): f["vacancy_detail"]
         for o, f in zip(observations, facts) if f["vacancy_detail"] is not None}
-    result = evaluate_report(report_to_discovery(f04_report), criteria, details=details,
+    result = evaluate_report(projection, criteria, details=details,
                              criteria_sha256=criteria_sha256, expected_criteria_sha256=expected_criteria_sha256,
                              expected_rule_version=expected_rule_version)
     if result["criteria"]["approval"] != APPROVED_CRITERIA_STATUS or result["details_rejected"]:
@@ -388,9 +500,11 @@ def verify_details(f04_report: Mapping[str, Any], allowlist: Mapping[str, Any],
             "posting_id": target["posting_id"], "canonical_url": target["canonical_url"],
             "detail_url": target["detail_url"], "company": target["company"], "role": target["role"],
             "location": target["location"],
-            "request": {"outcome": obs["outcome"], "http_status": obs["http_status"],
-                        "attempted": obs["attempted"], "observed_at": obs["observed_at"]},
-            "evidence": {"raw_sha256": suit["detail_sha256"] if suit else None,
+            "request": {"outcome": obs["outcome"], "http_status": obs["http_status"], "attempted": obs["attempted"],
+                        "requested_at": obs["requested_at"], "observed_at": obs["observed_at"],
+                        "duration_ms": obs["duration_ms"], "response_bytes": obs["response_bytes"],
+                        "response_sha256": obs["response_sha256"]},
+            "evidence": {"raw_sha256": obs["response_sha256"],
                          "raw_bytes": len(obs["raw"]) if obs["raw"] is not None else None},
             "identity": {"status": fact["identity"], "reasons": fact["identity_reasons"]},
             "availability": fact["availability"], "requisition_id": fact["requisition_id"],
@@ -416,8 +530,10 @@ def _compact(s: Mapping[str, Any] | None) -> dict[str, Any] | None:
 def build_report(allowlist: Mapping[str, Any], verification: Mapping[str, Any], carrier: HttpCarrier, *,
                  criteria_sha256: str, allowlist_sha256: str, mode: str, started_at: str) -> dict[str, Any]:
     log = [{k: e[k] for k in ("url", "status", "bytes")} for e in carrier.log]
+    live = mode == "live_allowlisted_get"
     return {"schema": SCHEMA_REPORT, "mode": "detail_verification_no_submit", "transport_mode": mode,
-            "executable": False, "submit_authorized": False, "authority": dict(AUTHORITY),
+            "evidence_origin": LIVE_ORIGIN if live else REPLAY_ORIGIN, "real_evidence": live,
+            "function06_eligible": live, "executable": False, "submit_authorized": False, "authority": dict(AUTHORITY),
             "policy_version": POLICY_VERSION, "started_at": started_at,
             "source": {**allowlist["source"], "allowlist_sha256": allowlist_sha256,
                        "criteria_sha256_verified": criteria_sha256},
@@ -427,7 +543,7 @@ def build_report(allowlist: Mapping[str, Any], verification: Mapping[str, Any], 
             "candidates": verification["candidates"],
             "not_verified": [
                 "No candidate qualification or employer requirement is inferred; only explicit employer wording counts.",
-                "A suitable verdict is a label for Function 06 review, not execution or submission authority.",
+                "candidate_for_review is provisional: mandatory qualifications are not checked against verified candidate facts, and the label is not execution or submission authority.",
                 "scope and career_upside stay Unknown without a reviewer rating that cites a reference."]}
 
 
@@ -447,19 +563,23 @@ def build_handoff(report: Mapping[str, Any]) -> dict[str, Any]:
                     "ats": c["ats"], "region": c["region"], "tenant": c["tenant"], "posting_id": c["posting_id"],
                     "canonical_url": c["canonical_url"], "requisition_id": c["requisition_id"],
                     "company": c["company"], "role": c["role"], "location": c["location"],
-                    "detail_sha256": c["evidence"]["raw_sha256"], "observed_at": c["request"]["observed_at"],
+                    "detail_sha256": c["evidence"]["raw_sha256"], "observed_at": c["request"]["observed_at"], "evidence_origin": report["evidence_origin"],
                     "classification": s["classification"] if s else None,
                     "decision_label": s["decision_label"] if s else None, "score": s["score"] if s else None,
                     "missing_evidence": s["missing_evidence"] if s else [],
                     "review_flags": s["review_flags"] if s else [],
                     "mandatory_qualification_lines": (c["sections"] or {}).get("mandatory_qualification_lines", []),
-                    "candidate_qualification_match": "not_performed"})
-    first = next((c for c in out if c["status"] == "suitable"), None)
+                    "candidate_qualification_match": "not_performed_requires_verified_candidate_facts"})
+    first = next((c for c in out if c["status"] == "candidate_for_review"), None)
     return {"schema": SCHEMA_HANDOFF, "mode": "function06_handoff_non_executable", "executable": False,
             "submit_authorized": False, "authority": dict(AUTHORITY), "source_report_schema": report["schema"],
-            "source": report["source"], "first_suitable_candidate": first,
-            "next_step": ("owner_review_then_separate_function_06_authorization" if first else
-                          "no_suitable_candidate_yet:resolve_evidence_gaps_or_widen_shortlist_with_owner_approval"),
+            "source": report["source"], "evidence_origin": report["evidence_origin"],
+            "real_evidence": report["real_evidence"], "function06_eligible": report["function06_eligible"],
+            "first_candidate_for_review": first,
+            "next_step": ("synthetic_replay_output_is_not_real_evidence:do_not_use_for_function_06"
+                          if not report["real_evidence"] else
+                          "owner_review_then_qualification_check_against_verified_candidate_facts" if first else
+                          "no_candidate_for_review_yet:resolve_evidence_gaps_or_widen_shortlist_with_owner_approval"),
             "prerequisites_before_function_06": list(HANDOFF_PREREQUISITES), "candidates": out,
             "confirmed_incompatible": [{"tenant": c["tenant"], "posting_id": c["posting_id"],
                                        "canonical_url": c["canonical_url"], "reasons": c["verdict"]["reasons"]}

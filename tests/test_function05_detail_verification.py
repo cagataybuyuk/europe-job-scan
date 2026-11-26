@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import socket
+import threading
 import stat
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -15,12 +16,12 @@ import pytest
 
 from ejs.services import detail_verification as dv
 from ejs.services.detail_verification import (AUTHORITY, DETAIL_HOST, DetailVerificationError, build_allowlist,
-                                               build_handoff, build_report, check_f04_reproducible, detail_url,
-                                               request_details, verify_allowlist, verify_details)
+                                               build_handoff, build_report, check_lineage, detail_url,
+                                               request_details, reserve_budget, verify_allowlist, verify_details)
 from ejs.services.discovery import DiscoveryError
 from ejs.services.http_carrier import (REQUEST_HEADERS, HostNotAllowedError, HttpCarrier, ReplayCarrier,
                                        urllib_transport)
-from ejs.services.suitability import evaluate_report
+from ejs.services.suitability import canonical_sha256, evaluate_report
 from ejs.services.suitability_evidence import detail_from_smartrecruiters
 from tests.test_function04_suitability import criteria, criteria_text, report
 
@@ -28,6 +29,7 @@ TENANT = "Acme"
 SHA = sha256(criteria_text().encode()).hexdigest()
 RULE = criteria().rule_version
 F04_SHA = "b" * 64
+F02_FILE_SHA = "a" * 64
 NOW = datetime(2026, 11, 26, 12, 0, 0, tzinfo=timezone.utc)
 APPLY_TEXT = ("<p>Visa sponsorship is available.</p><p>Working language is English.</p>"
               "<p>Salary: €4,500 per month net.</p>")
@@ -58,15 +60,27 @@ def row(i: int, role: str = "Senior Business Analyst", *, country: str | None = 
                                    "countries": [country] if country else []}}
 
 
-def f04_report(rows: list[dict]) -> dict:
-    return evaluate_report(report(*rows), criteria(), criteria_sha256=SHA, expected_criteria_sha256=SHA,
-                           expected_rule_version=RULE)
+class F04(dict):
+    """A Function 04 report that remembers the (verified original) Function 02 projection it came from."""
+    projection: dict
+
+
+def f04_report(rows: list[dict]) -> F04:
+    projection = report(*rows)
+    out = F04(evaluate_report(projection, criteria(), criteria_sha256=SHA, expected_criteria_sha256=SHA,
+                              expected_rule_version=RULE))
+    out.projection = projection
+    return out
+
+
+def lineage_of(f04: dict) -> dict:
+    return {"f02_source_file_sha256": F02_FILE_SHA, "f02_projection_sha256": f04["source_report_sha256"]}
 
 
 def world(highs: int = 5, *, extra: list[dict] | None = None) -> tuple[dict, dict]:
     rows = [row(i) for i in range(1, highs + 1)] + [row(50, "Data Analyst"), row(60, "Accountant")] + (extra or [])
     f04 = f04_report(rows)
-    return f04, build_allowlist(f04, f04_report_sha256=F04_SHA)
+    return f04, build_allowlist(f04, f04_report_sha256=F04_SHA, lineage=lineage_of(f04))
 
 
 def sr(i: int, *, active=True, ref="REQ-1", text=APPLY_TEXT, tenant=TENANT, posting=None, posting_url="default",
@@ -124,7 +138,7 @@ def run(f04: dict, allow: dict, responses: dict, *, max_requests: int | None = N
     else:
         carrier = ReplayCarrier(transport=net, clock=clock, max_requests=max_requests or n, max_pages=5, allowed_hosts=hosts)
     observations = request_details(allow, carrier, now=lambda: NOW)
-    verification = verify_details(f04, allow, observations, criteria(), criteria_sha256=SHA,
+    verification = verify_details(f04.projection, observations, criteria(), criteria_sha256=SHA,
                                   expected_criteria_sha256=SHA, expected_rule_version=RULE)
     return net, carrier, observations, verification, sleeps
 
@@ -154,7 +168,7 @@ def test_priority_order_wins_over_the_w2_score_sort():
     # Equal scores: W2 would order by posting id (smallest first). Function 04 ranks the Ireland row last (geography
     # tie-break), so the explicit Function 04 priority drops it from a five-row shortlist.
     f04 = f04_report([row(1, country="IE")] + [row(i) for i in range(2, 8)])
-    allow = build_allowlist(f04, f04_report_sha256=F04_SHA)
+    allow = build_allowlist(f04, f04_report_sha256=F04_SHA, lineage=lineage_of(f04))
     chosen = [t["posting_id"] for t in allow["targets"]]
     assert pid(1) not in chosen and chosen == [pid(i) for i in range(2, 7)]
     ranks = {v["posting_id"]: v["priority_rank"] for v in f04["vacancies"]}
@@ -186,7 +200,8 @@ def test_allowlist_is_non_executable_reviewable_and_digest_bound():
         ("GET", "https", DETAIL_HOST, 0, "refused", "none", 1.0, True)
     assert allow["approval"]["status"] == "awaiting_owner_approval"
     assert allow["approval"]["allowlist_sha256"] == dv.allowlist_digest(allow)
-    again = build_allowlist(world()[0], f04_report_sha256=F04_SHA)
+    f04b = world()[0]
+    again = build_allowlist(f04b, f04_report_sha256=F04_SHA, lineage=lineage_of(f04b))
     assert json.dumps(again, sort_keys=True) == json.dumps(allow, sort_keys=True)
 
 
@@ -199,7 +214,8 @@ def test_allowlist_is_non_executable_reviewable_and_digest_bound():
 ])
 def test_unbindable_high_row_is_reported_and_not_replaced_by_a_lower_priority_row(kwargs, reason):
     rows = [row(1, **kwargs)] + [row(i) for i in range(2, 4)] + [row(50, "Data Analyst")]
-    allow = build_allowlist(f04_report(rows), f04_report_sha256=F04_SHA)
+    f04b = f04_report(rows)
+    allow = build_allowlist(f04b, f04_report_sha256=F04_SHA, lineage=lineage_of(f04b))
     assert [u["reason"] for u in allow["selection"]["unbound"]] == [reason]
     assert [t["posting_id"] for t in allow["targets"]] == [pid(2), pid(3)]
     assert pid(50) not in {t["posting_id"] for t in allow["targets"]}
@@ -216,13 +232,14 @@ def test_f04_report_must_be_approved_ordered_and_authority_free():
     for bad, code in ((unapproved, "F04_CRITERIA_NOT_APPROVED"), (broken, "F04_PRIORITY_ORDER_BROKEN"),
                       (powered, "F04_REPORT_AUTHORITY"), (wrong, "F04_REPORT_SCHEMA")):
         with pytest.raises(DetailVerificationError, match=code):
-            build_allowlist(bad, f04_report_sha256=F04_SHA)
+            build_allowlist(bad, f04_report_sha256=F04_SHA, lineage=lineage_of(f04))
 
 
 @pytest.mark.parametrize("limit", [0, 6, -1, True, "5"])
 def test_limit_is_bounded_to_five(limit):
     with pytest.raises(DetailVerificationError, match="LIMIT_OUT_OF_RANGE"):
-        build_allowlist(world()[0], f04_report_sha256=F04_SHA, limit=limit)
+        f04b = world()[0]
+        build_allowlist(f04b, f04_report_sha256=F04_SHA, lineage=lineage_of(f04b), limit=limit)
 
 
 # ---------------------------------------------------------------- 2. no unapproved targets or duplicate requests
@@ -248,12 +265,12 @@ def _tampered(mutate):
 def test_tampered_allowlist_is_refused_before_any_request(mutate):
     f04, doc = _tampered(mutate)
     with pytest.raises(DetailVerificationError):
-        verify_allowlist(doc, f04, f04_report_sha256=F04_SHA)
+        verify_allowlist(doc, f04, f04_report_sha256=F04_SHA, lineage=lineage_of(f04))
 
 
 def test_verify_allowlist_accepts_the_exact_allowlist():
     f04, allow = world()
-    assert verify_allowlist(allow, f04, f04_report_sha256=F04_SHA) == allow
+    assert verify_allowlist(allow, f04, f04_report_sha256=F04_SHA, lineage=lineage_of(f04)) == allow
 
 
 def test_request_details_refuses_duplicates_and_oversize_allowlists_without_any_request():
@@ -294,19 +311,21 @@ def test_each_allowlisted_url_is_requested_exactly_once_with_get_semantics():
 
 
 # ------------------------------------------------------------------------ 3. detail verification outcomes
-def test_active_identity_bound_posting_with_requisition_is_suitable():
+def test_active_identity_bound_posting_with_requisition_is_candidate_for_review():
     f04, allow = world(highs=1)
     net, _, observations, ver, _ = run(f04, allow, {url_of(1): ok(sr(1))})
     c = ver["candidates"][0]
     raw = observations[0]["raw"]
     assert c["identity"] == {"status": "bound", "reasons": []}
     assert (c["availability"], c["requisition_id"]) == ("active", "REQ-1")
-    assert c["verdict"]["status"] == "suitable"
+    assert c["verdict"]["status"] == "candidate_for_review"
     assert c["reevaluation"]["classification"] == "verified_apply_candidate"
     assert c["evidence"] == {"raw_sha256": sha256(raw).hexdigest(), "raw_bytes": len(raw)}
-    assert c["request"] == {"outcome": "ok", "http_status": None, "attempted": 1, "observed_at": "2026-11-26T12:00:00Z"}
+    assert c["request"] == {"outcome": "ok", "http_status": 200, "attempted": 1, "requested_at": "2026-11-26T12:00:00Z",
+                            "observed_at": "2026-11-26T12:00:00Z", "duration_ms": 0, "response_bytes": len(raw),
+                            "response_sha256": sha256(raw).hexdigest()}
     assert c["canonical_url"] == f"https://jobs.smartrecruiters.com/{TENANT}/{pid(1)}"
-    assert ver["verdict_counts"] == {"suitable": 1, "incomplete_evidence": 0, "confirmed_incompatible": 0}
+    assert ver["verdict_counts"] == {"candidate_for_review": 1, "incomplete_evidence": 0, "confirmed_incompatible": 0}
 
 
 def test_responsibilities_and_mandatory_qualifications_are_employer_wording_only():
@@ -338,7 +357,7 @@ def test_inactive_posting_is_a_confirmed_incompatibility():
     (b"not json", "detail_unreadable"),
     (b"", "detail_size"),
 ])
-def test_identity_mismatch_is_never_evaluated_and_never_suitable(raw, reason):
+def test_identity_mismatch_is_never_evaluated_and_never_candidate_for_review(raw, reason):
     f04, allow = world(highs=1)
     _, _, _, ver, _ = run(f04, allow, {url_of(1): ok(raw)})
     c = ver["candidates"][0]
@@ -349,7 +368,7 @@ def test_identity_mismatch_is_never_evaluated_and_never_suitable(raw, reason):
 
 
 @pytest.mark.parametrize("ref", [None, "", "bad ref!", 12345])
-def test_missing_or_invalid_requisition_id_is_never_suitable(ref):
+def test_missing_or_invalid_requisition_id_is_never_candidate_for_review(ref):
     f04, allow = world(highs=1)
     _, _, _, ver, _ = run(f04, allow, {url_of(1): ok(sr(1, ref=ref))})
     c = ver["candidates"][0]
@@ -398,7 +417,7 @@ def test_unknown_or_ambiguous_sponsorship_stays_incomplete_never_incompatible(te
     assert c["reevaluation"]["ratings"]["sponsorship"] is None
 
 
-def test_w2_eligibility_condition_keeps_a_candidate_out_of_suitable():
+def test_w2_eligibility_condition_keeps_a_candidate_out_of_candidate_for_review():
     f04, allow = world(highs=1)
     text = APPLY_TEXT + "<p>Candidates must have the right to work in the Netherlands</p>"
     _, _, _, ver, _ = run(f04, allow, {url_of(1): ok(sr(1, text=text))})
@@ -419,7 +438,8 @@ def test_http_failure_stops_the_employer_with_no_retry_and_no_further_requests(a
     assert first["verdict"]["status"] == "incomplete_evidence"
     assert first["verdict"]["reasons"] == [f"detail_not_obtained:{kind}"] and first["request"]["attempted"] == 1
     assert all(c["request"] == {"outcome": "employer_stopped", "http_status": None, "attempted": 0,
-                                "observed_at": "2026-11-26T12:00:00Z"} for c in rest)
+                                "requested_at": "2026-11-26T12:00:00Z", "observed_at": "2026-11-26T12:00:00Z",
+                                "duration_ms": 0, "response_bytes": None, "response_sha256": None} for c in rest)
     assert all(c["verdict"]["status"] == "incomplete_evidence" and c["reevaluation"] is None for c in ver["candidates"])
 
 
@@ -437,7 +457,7 @@ def test_request_budget_exhaustion_makes_no_extra_request():
     third = ver["candidates"][2]
     assert third["request"]["outcome"] == "request_budget_exceeded" and third["request"]["attempted"] == 0
     assert third["verdict"]["status"] == "incomplete_evidence"
-    assert [c["verdict"]["status"] for c in ver["candidates"][:2]] == ["suitable", "suitable"]
+    assert [c["verdict"]["status"] for c in ver["candidates"][:2]] == ["candidate_for_review", "candidate_for_review"]
 
 
 # --------------------------------------------------------------------------- carrier restrictions reused
@@ -470,7 +490,7 @@ def test_reevaluation_matches_function_04_with_the_same_criteria_and_leaves_inpu
     texts = {1: APPLY_TEXT, 2: "<p>Nothing relevant.</p>"}
     _, _, observations, ver, _ = run(f04, allow, {url_of(i): ok(sr(i, text=texts[i])) for i in (1, 2)})
     assert json.dumps(f04, sort_keys=True) == before
-    direct = evaluate_report(dv.report_to_discovery(f04), criteria(),
+    direct = evaluate_report(f04.projection, criteria(),
                              details={(TENANT, pid(i)): detail_from_smartrecruiters(observations[i - 1]["raw"], TENANT, pid(i))
                                       for i in (1, 2)},
                              criteria_sha256=SHA, expected_criteria_sha256=SHA, expected_rule_version=RULE)
@@ -482,21 +502,35 @@ def test_reevaluation_matches_function_04_with_the_same_criteria_and_leaves_inpu
     assert ver["reevaluation_summary"]["details_applied"] == 2
 
 
-def test_f04_report_reproducibility_check_rejects_a_hand_edited_report():
+def lineage_call(f04, projection, *, expected_sha=SHA):
+    return check_lineage(f04, projection, criteria(), criteria_sha256=SHA, expected_criteria_sha256=expected_sha,
+                         expected_rule_version=RULE, f02_source_sha256=F02_FILE_SHA)
+
+
+def test_lineage_check_binds_the_f04_report_to_the_pinned_original_f02_data():
     f04 = f04_report([row(i) for i in range(1, 4)])
-    check_f04_reproducible(f04, criteria(), criteria_sha256=SHA, expected_criteria_sha256=SHA, expected_rule_version=RULE)
+    assert lineage_call(f04, f04.projection) == lineage_of(f04)
     edited = copy.deepcopy(f04)
     edited["vacancies"][0]["suitability"]["classification"] = "preliminary_medium"
     with pytest.raises(DetailVerificationError, match="F04_REPORT_NOT_REPRODUCIBLE"):
-        check_f04_reproducible(edited, criteria(), criteria_sha256=SHA, expected_criteria_sha256=SHA,
-                               expected_rule_version=RULE)
+        lineage_call(edited, f04.projection)
     with pytest.raises(DetailVerificationError, match="CRITERIA_NOT_APPROVED"):
-        check_f04_reproducible(f04, criteria(), criteria_sha256=SHA, expected_criteria_sha256="d" * 64,
-                               expected_rule_version=RULE)
+        lineage_call(f04, f04.projection, expected_sha="d" * 64)
+
+
+def test_a_self_consistent_forged_f04_report_from_other_data_is_refused():
+    original = f04_report([row(i) for i in range(1, 4)])
+    forged = f04_report([row(i) for i in range(1, 4)] + [row(9, "Business Analyst")])      # extra row, own digest
+    assert forged["source_report_sha256"] != original["source_report_sha256"]
+    lineage_call(forged, forged.projection)                                                 # consistent with itself
+    with pytest.raises(DetailVerificationError, match="F04_REPORT_NOT_FROM_PINNED_F02_DATA"):
+        lineage_call(forged, original.projection)                                           # but not with the pinned data
+    with pytest.raises(DetailVerificationError, match="LINEAGE_NOT_BOUND_TO_F04_REPORT"):
+        build_allowlist(forged, f04_report_sha256=F04_SHA, lineage=lineage_of(original))
 
 
 # ---------------------------------------------------------------------------------------- Function 06 hand-off
-def test_handoff_orders_suitable_before_incomplete_and_lists_confirmed_incompatible_apart():
+def test_handoff_orders_candidates_for_review_before_incomplete_and_lists_confirmed_incompatible_apart():
     f04, allow = world()
     responses = {url_of(1): ok(sr(1, active=False)), url_of(2): ok(sr(2, ref=None)), url_of(3): ok(sr(3)),
                  url_of(4): ok(sr(4, text="<p>We do not offer visa sponsorship.</p>")),
@@ -506,13 +540,13 @@ def test_handoff_orders_suitable_before_incomplete_and_lists_confirmed_incompati
                        mode="offline_replay", started_at="2026-11-26T12:00:00Z")
     hand = build_handoff(rep)
     assert [c["posting_id"] for c in hand["candidates"]][0] == pid(3)
-    assert [c["status"] for c in hand["candidates"]] == ["suitable", "incomplete_evidence", "incomplete_evidence"]
+    assert [c["status"] for c in hand["candidates"]] == ["candidate_for_review", "incomplete_evidence", "incomplete_evidence"]
     assert {c["posting_id"] for c in hand["candidates"]} == {pid(2), pid(3), pid(5)}
     assert {c["posting_id"] for c in hand["confirmed_incompatible"]} == {pid(1), pid(4)}
-    assert hand["first_suitable_candidate"]["posting_id"] == pid(3)
-    assert hand["first_suitable_candidate"]["requisition_id"] == "REQ-1"
+    assert hand["first_candidate_for_review"]["posting_id"] == pid(3)
+    assert hand["first_candidate_for_review"]["requisition_id"] == "REQ-1"
     assert [c["handoff_rank"] for c in hand["candidates"]] == [1, 2, 3]
-    assert rep["verdict_counts"] == {"suitable": 1, "incomplete_evidence": 2, "confirmed_incompatible": 2}
+    assert rep["verdict_counts"] == {"candidate_for_review": 1, "incomplete_evidence": 2, "confirmed_incompatible": 2}
 
 
 def test_handoff_is_non_executable_and_carries_no_authority_or_candidate_inference():
@@ -524,17 +558,17 @@ def test_handoff_is_non_executable_and_carries_no_authority_or_candidate_inferen
         assert doc["executable"] is False and doc["submit_authorized"] is False
         assert doc["authority"] == AUTHORITY and not any(v for k, v in doc["authority"].items() if k != "label_is_not_authority")
     hand = build_handoff(rep)
-    assert all(c["candidate_qualification_match"] == "not_performed" for c in hand["candidates"])
+    assert all(c["candidate_qualification_match"] == "not_performed_requires_verified_candidate_facts" for c in hand["candidates"])
     assert "separate_function_06_authorization" in hand["prerequisites_before_function_06"]
     assert rep["requests"]["methods"] == ["GET"] and rep["requests"]["redirects_followed"] == 0
 
 
-def test_handoff_without_a_suitable_candidate_names_the_next_step_and_invents_none():
+def test_handoff_without_a_candidate_for_review_names_the_next_step_and_invents_none():
     f04, allow = world(highs=2)
     _, carrier, _, ver, _ = run(f04, allow, {url_of(1): ok(sr(1, ref=None)), url_of(2): ok(sr(2, active=False))})
     hand = build_handoff(build_report(allow, ver, carrier, criteria_sha256=SHA, allowlist_sha256="a" * 64,
-                                      mode="offline_replay", started_at="s"))
-    assert hand["first_suitable_candidate"] is None and hand["next_step"].startswith("no_suitable_candidate_yet")
+                                      mode="live_allowlisted_get", started_at="s"))
+    assert hand["first_candidate_for_review"] is None and hand["next_step"].startswith("no_candidate_for_review_yet")
     assert [c["status"] for c in hand["candidates"]] == ["incomplete_evidence"]
 
 
@@ -563,8 +597,11 @@ def files(tmp_path):
     f04 = f04_report(rows)
     f04_path = tmp_path / "suitability-report.json"
     f04_path.write_text(json.dumps(f04, sort_keys=True, indent=1))
+    f02_path = tmp_path / "f02-report.json"
+    f02_path.write_text(json.dumps(f04.projection, sort_keys=True))
     common = ["--f04-report", str(f04_path), "--criteria", str(crit), "--expected-criteria-sha256", SHA,
-              "--expected-rule-version", RULE]
+              "--expected-rule-version", RULE, "--f02-report", str(f02_path), "--expected-f02-sha256",
+              sha256(f02_path.read_bytes()).hexdigest()]
     return tmp_path, common, f04
 
 
@@ -597,8 +634,8 @@ def test_cli_prepare_then_offline_verify_end_to_end(tmp_path, files, capsys):
     assert cli.main(argv, now=fake_now, clock=Clock(), sleep=lambda s: None) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["mode"] == "offline_replay" and summary["requests_attempted"] == 5
-    assert summary["verdicts"] == {"confirmed_incompatible": 0, "incomplete_evidence": 1, "suitable": 4}
-    assert summary["first_suitable"]["posting_id"] == pid(1)
+    assert summary["verdicts"] == {"confirmed_incompatible": 0, "incomplete_evidence": 1, "candidate_for_review": 4}
+    assert summary["first_candidate_for_review"]["posting_id"] == pid(1)
 
     assert stat.S_IMODE(os.stat(out).st_mode) == 0o700
     for name in ("detail-verification-report.json", "f06-handoff.json", "evidence-manifest.json"):
@@ -613,7 +650,7 @@ def test_cli_prepare_then_offline_verify_end_to_end(tmp_path, files, capsys):
         # The raw store is directly usable as Function 04's --details-dir input.
         assert detail_from_smartrecruiters(stored, entry["tenant"], entry["posting_id"]).detail_sha256 == entry["sha256"]
     handoff = json.loads((out / "f06-handoff.json").read_text())
-    assert handoff["executable"] is False and handoff["first_suitable_candidate"]["posting_id"] == pid(1)
+    assert handoff["executable"] is False and handoff["first_candidate_for_review"]["posting_id"] == pid(1)
 
     assert cli.main(argv, now=fake_now, clock=Clock(), sleep=lambda s: None) == 2          # no overwrite
     out2 = base / "result2"
@@ -632,7 +669,7 @@ def test_cli_replay_without_a_saved_body_is_incomplete_and_requests_nothing_live
     assert cli.main(["verify", *common, "--allowlist", str(allow_path), "--replay-dir", str(replay),
                      "--out-dir", str(out)], now=fake_now, clock=Clock(), sleep=lambda s: None) == 0
     summary = json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert summary["verdicts"]["suitable"] == 0 and summary["first_suitable"] is None
+    assert summary["verdicts"]["candidate_for_review"] == 0 and summary["first_candidate_for_review"] is None
     assert summary["requests_attempted"] == 1                                              # employer stopped after the 404
 
 
@@ -659,13 +696,26 @@ def test_cli_live_with_the_approved_digest_requests_only_the_allowlisted_urls_on
     net = Net({url_of(i): ok(sr(i)) for i in range(1, 6)})
     sleeps: list[float] = []
     out = base / "live"
+    budget = base / "budget"
     assert cli.main(["verify", *common, "--allowlist", str(allow_path), "--live", "--approve-allowlist-sha256", digest,
-                     "--out-dir", str(out)], live_transport=net, now=fake_now, clock=Clock(), sleep=sleeps.append) == 0
+                     "--budget-dir", str(budget), "--out-dir", str(out)], live_transport=net, now=fake_now,
+                    clock=Clock(), sleep=sleeps.append) == 0
     assert [u for u, _ in net.calls] == [url_of(i) for i in range(1, 6)]
     assert all(h == REQUEST_HEADERS for _, h in net.calls) and len(sleeps) == 4 and min(sleeps) > 0.99
     report = json.loads((out / "detail-verification-report.json").read_text())
     assert report["transport_mode"] == "live_allowlisted_get" and report["requests"]["attempted"] == 5
     assert report["requests"]["approved"] == 5 and report["requests"]["retries"] == 0
+    assert report["evidence_origin"] == "live_employer_response" and report["real_evidence"] is True
+    assert sorted(p.name for p in budget.iterdir()).count(f"allowlist-{digest}.json") == 1 and len(list(budget.iterdir())) == 6
+    events = [json.loads(line) for line in (out / "attempt-journal.jsonl").read_text().splitlines()]
+    assert [e["event"] for e in events] == ["run_started"] + ["attempt_started", "attempt_finished"] * 5 + ["run_finished"]
+    assert all(e["http_status"] == 200 and e["response_sha256"] and e["response_bytes"] for e in events
+               if e["event"] == "attempt_finished")
+    # second run of the same approval, new output directory: budget consumed, nothing requested
+    assert cli.main(["verify", *common, "--allowlist", str(allow_path), "--live", "--approve-allowlist-sha256", digest,
+                     "--budget-dir", str(budget), "--out-dir", str(base / "live-again")], live_transport=net,
+                    now=fake_now, clock=Clock(), sleep=sleeps.append) == 2
+    assert len(net.calls) == 5 and not (base / "live-again" / "raw").exists()
 
 
 def test_cli_refuses_tampered_allowlist_wrong_criteria_and_foreign_reports_before_any_request(tmp_path, files):
@@ -707,3 +757,254 @@ def test_cli_prepare_refuses_overwrite_and_missing_digest_arguments(tmp_path, fi
     assert cli.main(["prepare", *common, "--out-dir", str(base / "allow")]) == 2
     with pytest.raises(SystemExit):                                  # digest and rule version are mandatory arguments
         cli.main(["prepare", "--f04-report", common[1], "--criteria", common[3], "--out-dir", str(base / "x")])
+
+
+# ============================================================================== review fixes (pre-live QA)
+def approved_live(cli, base, common, capsys=None):
+    allow_path = prepare(cli, base, common)
+    if capsys:
+        capsys.readouterr()
+    return allow_path, dv.allowlist_digest(json.loads(allow_path.read_text()))
+
+
+def live_argv(common, allow_path, digest, budget, out):
+    return ["verify", *common, "--allowlist", str(allow_path), "--live", "--approve-allowlist-sha256", digest,
+            "--budget-dir", str(budget), "--out-dir", str(out)]
+
+
+def kwargs(net):
+    return dict(live_transport=net, now=fake_now, clock=Clock(), sleep=lambda s: None)
+
+
+# ---- 1. durable single-use budget ---------------------------------------------------------------------
+def test_budget_is_single_use_across_output_dirs_and_overlapping_allowlists(tmp_path):
+    f04, allow = world(highs=3)
+    other = copy.deepcopy(allow)
+    other["targets"] = other["targets"][1:]                                   # different digest, overlapping URLs
+    budget = tmp_path / "budget"
+    budget.mkdir(mode=0o700)
+    path = reserve_budget(budget, allow, now=lambda: NOW, out_dir=tmp_path / "o1")
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600 and len(list(budget.iterdir())) == 4
+    for again in (allow, other):
+        with pytest.raises(DetailVerificationError, match="BUDGET_ALREADY_CONSUMED"):
+            reserve_budget(budget, again, now=lambda: NOW, out_dir=tmp_path / "o2")
+    assert len(list(budget.iterdir())) == 4                                   # refusal left nothing of its own behind
+    fresh = copy.deepcopy(allow)
+    fresh["targets"] = [dict(allow["targets"][0], detail_url=url_of(77), posting_id=pid(77))]
+    reserve_budget(budget, fresh, now=lambda: NOW, out_dir=tmp_path / "o3")   # a different URL is a different budget
+
+
+def test_concurrent_reservations_admit_exactly_one_process(tmp_path):
+    f04, allow = world(highs=5)
+    budget = tmp_path / "budget"
+    budget.mkdir(mode=0o700)
+    barrier, results = threading.Barrier(8), []
+
+    def worker(n):
+        barrier.wait()
+        try:
+            reserve_budget(budget, allow, now=lambda: NOW, out_dir=tmp_path / f"o{n}")
+            results.append("won")
+        except DetailVerificationError:
+            results.append("refused")
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert results.count("won") == 1 and results.count("refused") == 7
+
+
+def test_interrupted_live_attempt_consumes_the_budget_keeps_evidence_and_is_never_retried(tmp_path, files):
+    base, common, _ = files
+    cli = load_cli()
+    allow_path, digest = approved_live(cli, base, common)
+
+    class Interrupted(Net):
+        def __call__(self, url, headers, timeout):
+            if len(self.calls) == 2:
+                self.calls.append((url, dict(headers)))
+                raise KeyboardInterrupt                                    # process dies mid-request
+            return super().__call__(url, headers, timeout)
+
+    net = Interrupted({url_of(i): ok(sr(i)) for i in range(1, 6)})
+    budget, out = base / "budget", base / "out1"
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(live_argv(common, allow_path, digest, budget, out), **kwargs(net))
+    assert len(net.calls) == 3                                             # two answered, third interrupted, no retry
+    events = [json.loads(line) for line in (out / "attempt-journal.jsonl").read_text().splitlines()]
+    assert [e["event"] for e in events] == ["run_started"] + ["attempt_started", "attempt_finished"] * 2 + ["attempt_started"]
+    for entry in events:                                                   # answered bodies were stored immediately
+        if entry["event"] == "attempt_finished":
+            assert sha256((out / entry["stored_as"]).read_bytes()).hexdigest() == entry["response_sha256"]
+    assert not (out / "detail-verification-report.json").exists()
+    # the reservation stays consumed: neither the same nor a fresh output directory may run again
+    for name in ("out1", "out2"):
+        assert cli.main(live_argv(common, allow_path, digest, budget, base / name), **kwargs(net)) == 2
+    assert len(net.calls) == 3
+
+
+def test_live_requires_a_budget_dir_separate_from_the_output_dir_and_asks_nothing_otherwise(tmp_path, files):
+    base, common, _ = files
+    cli = load_cli()
+    allow_path, digest = approved_live(cli, base, common)
+    net = Net({url_of(i): ok(sr(i)) for i in range(1, 6)})
+    no_budget = ["verify", *common, "--allowlist", str(allow_path), "--live", "--approve-allowlist-sha256", digest,
+                 "--out-dir", str(base / "o1")]
+    assert cli.main(no_budget, **kwargs(net)) == 2
+    inside = base / "o2"
+    assert cli.main(live_argv(common, allow_path, digest, inside / "budget", inside), **kwargs(net)) == 2
+    assert net.calls == [] and not (base / "o1").exists()
+
+
+# ---- 2. stop the employer on an invalid response ----------------------------------------------------------
+@pytest.mark.parametrize("bad", [sr(1, posting=pid(2)), sr(1, tenant="Other"), b"not json", b"", b"[]",
+                                 sr(1, posting_url=f"https://jobs.smartrecruiters.com/Other/{pid(1)}")])
+def test_invalid_or_unbound_response_stops_the_employer_immediately(bad):
+    f04, allow = world()
+    net, carrier, _, ver, _ = run(f04, allow, {url_of(i): ok(sr(i)) for i in range(1, 6)} | {url_of(1): ok(bad)})
+    assert len(net.calls) == 1 and carrier.total == 1
+    first, *rest = ver["candidates"]
+    assert first["identity"]["status"] != "bound" and first["request"]["attempted"] == 1
+    assert all(c["request"]["outcome"] == "employer_stopped_invalid_response" and c["request"]["attempted"] == 0
+               and c["verdict"]["reasons"] == ["detail_not_obtained:employer_stopped_invalid_response"] for c in rest)
+
+
+def test_a_later_invalid_response_stops_the_requests_after_it_not_before_it():
+    f04, allow = world()
+    net, _, _, ver, _ = run(f04, allow, {url_of(i): ok(sr(i)) for i in range(1, 6)} | {url_of(3): ok(sr(3, posting=pid(9)))})
+    assert len(net.calls) == 3
+    assert [c["request"]["attempted"] for c in ver["candidates"]] == [1, 1, 1, 0, 0]
+    assert [c["verdict"]["status"] for c in ver["candidates"]][:2] == ["candidate_for_review"] * 2
+
+
+# ---- 3. actual status, timing, bytes, digest; evidence on failure -------------------------------------------
+def test_request_metadata_is_the_actual_response_not_a_default():
+    f04, allow = world(highs=2)
+    ticks = iter(range(100))
+    net = Net({url_of(1): ok(sr(1)), url_of(2): (503, b"")})
+    carrier = ReplayCarrier(transport=net, clock=Clock(), max_requests=2, max_pages=5, allowed_hosts=frozenset({DETAIL_HOST}))
+    obs = request_details(allow, carrier, now=lambda: datetime(2026, 11, 26, 12, 0, next(ticks), tzinfo=timezone.utc))
+    good, bad = obs
+    raw = sr(1)
+    assert (good["http_status"], good["response_bytes"], good["response_sha256"]) == (200, len(raw), sha256(raw).hexdigest())
+    assert good["requested_at"] == "2026-11-26T12:00:00Z" and good["observed_at"] == "2026-11-26T12:00:01Z"
+    assert good["duration_ms"] == 1000 and good["attempted"] == 1
+    assert (bad["http_status"], bad["response_bytes"], bad["response_sha256"], bad["raw"]) == (503, 0, None, None)
+    assert bad["outcome"] == "http_503" and bad["attempted"] == 1
+
+
+def test_sinks_see_every_attempt_before_and_after_the_response():
+    f04, allow = world(highs=2)
+    events = []
+    net = Net({url_of(1): ok(sr(1)), url_of(2): (500, b"")})
+    carrier = ReplayCarrier(transport=net, clock=Clock(), max_requests=2, max_pages=5, allowed_hosts=frozenset({DETAIL_HOST}))
+    request_details(allow, carrier, now=lambda: NOW, on_start=lambda r: events.append(("start", r["sequence"], len(net.calls))),
+                    on_finish=lambda r, raw: events.append(("finish", r["sequence"], r["http_status"], raw is not None)))
+    assert events == [("start", 1, 0), ("finish", 1, 200, True), ("start", 2, 1), ("finish", 2, 500, False)]
+
+
+# ---- 4. nothing is definitively suitable; contradictions and compensation are not exclusions ---------------
+def test_no_candidate_is_ever_classified_suitable_and_the_missing_check_is_stated():
+    f04, allow = world()
+    _, carrier, _, ver, _ = run(f04, allow, {url_of(i): ok(sr(i)) for i in range(1, 6)})
+    assert set(ver["verdict_counts"]) == {"candidate_for_review", "incomplete_evidence", "confirmed_incompatible"}
+    c = ver["candidates"][0]
+    assert c["verdict"]["status"] == "candidate_for_review"
+    assert "mandatory_qualifications_not_checked_against_verified_candidate_facts" in c["verdict"]["reasons"]
+    rep = build_report(allow, ver, carrier, criteria_sha256=SHA, allowlist_sha256="a" * 64, mode="live_allowlisted_get",
+                       started_at="s")
+    hand = build_handoff(rep)
+    assert "suitable" not in json.dumps(hand) .replace("not_suitable", "")
+    assert all(x["candidate_qualification_match"] == "not_performed_requires_verified_candidate_facts"
+               for x in hand["candidates"])
+    assert "mandatory_qualifications_checked_against_verified_candidate_facts" in hand["prerequisites_before_function_06"]
+    assert hand["candidates"][0]["mandatory_qualification_lines"] == ["You must have 3 years of ERP experience."]
+
+
+def test_contradictory_employer_statements_never_cause_a_confirmed_exclusion():
+    f04, allow = world(highs=1)
+    text = "<p>We do not offer visa sponsorship.</p><p>Visa sponsorship is available.</p>"
+    _, _, _, ver, _ = run(f04, allow, {url_of(1): ok(sr(1, text=text))})
+    c = ver["candidates"][0]
+    assert c["reevaluation"]["reason_code"] == "contradiction"
+    assert c["verdict"]["status"] == "incomplete_evidence"
+    assert "contradictory_evidence_requires_review" in c["verdict"]["reasons"]
+
+
+def test_closed_posting_is_still_confirmed_even_when_the_text_contradicts_itself():
+    f04, allow = world(highs=1)
+    text = "<p>We do not offer visa sponsorship.</p><p>Visa sponsorship is available.</p>"
+    _, _, _, ver, _ = run(f04, allow, {url_of(1): ok(sr(1, text=text, active=False))})
+    assert ver["candidates"][0]["verdict"] == {"status": "confirmed_incompatible", "reasons": ["confirmed:vacancy_closed"]}
+
+
+def test_below_target_compensation_is_scored_not_turned_into_a_hard_blocker():
+    f04, allow = world(highs=1)
+    text = "<p>Visa sponsorship is available.</p><p>Working language is English.</p><p>Salary: €2,000 per month net.</p>"
+    _, _, _, ver, _ = run(f04, allow, {url_of(1): ok(sr(1, text=text))})
+    c = ver["candidates"][0]
+    assert "confirmed:compensation_below_target" in c["reevaluation"]["confirmed_incompatibilities"]
+    assert c["reevaluation"]["ratings"]["compensation_living"] == 0                    # the engine scores it
+    assert c["verdict"]["status"] == "candidate_for_review"
+    assert c["verdict"]["notes"] == ["compensation_below_target_scored_not_a_blocker"]
+
+
+def test_only_approved_k2_blockers_exclude():
+    criteria_blockers = set(criteria().hard_blockers)
+    f04, allow = world(highs=1)
+    _, _, _, ver, _ = run(f04, allow, {url_of(1): ok(sr(1, text="<p>We do not offer visa sponsorship.</p>"))})
+    reasons = ver["candidates"][0]["verdict"]["reasons"]
+    assert reasons == ["confirmed:blocker:explicit-no-sponsorship"] and "explicit-no-sponsorship" in criteria_blockers
+
+
+# ---- 6. lineage and synthetic-versus-real labelling ------------------------------------------------------------
+def test_cli_refuses_a_wrong_f02_pin_or_a_f04_report_from_other_f02_data_before_any_request(tmp_path, files):
+    base, common, f04 = files
+    cli = load_cli()
+    bad_pin = [*common]
+    bad_pin[bad_pin.index("--expected-f02-sha256") + 1] = "0" * 64
+    assert cli.main(["prepare", *bad_pin, "--out-dir", str(base / "o1")]) == 2
+    other = f04_report([row(i) for i in range(1, 4)])                         # genuine-looking but other F02 data
+    forged = base / "forged-f04.json"
+    forged.write_text(json.dumps(other, sort_keys=True))
+    swapped = [*common]
+    swapped[1] = str(forged)
+    assert cli.main(["prepare", *swapped, "--out-dir", str(base / "o2")]) == 2
+    assert not (base / "o1").exists() and not (base / "o2").exists()
+
+
+def test_allowlist_digest_covers_the_f02_lineage(tmp_path, files):
+    base, common, f04 = files
+    cli = load_cli()
+    doc = json.loads(prepare(cli, base, common).read_text())
+    assert doc["source"]["lineage"]["f02_projection_sha256"] == f04["source_report_sha256"]
+    assert doc["source"]["lineage"]["f02_source_file_sha256"] == common[common.index("--expected-f02-sha256") + 1]
+    tampered = copy.deepcopy(doc)
+    tampered["source"]["lineage"]["f02_source_file_sha256"] = "9" * 64
+    assert dv.allowlist_digest(tampered) != dv.allowlist_digest(doc)
+    with pytest.raises(DetailVerificationError):
+        verify_allowlist(tampered, f04, f04_report_sha256=sha256((base / "suitability-report.json").read_bytes()).hexdigest(),
+                         lineage=lineage_of(f04))
+
+
+def test_replay_output_is_labelled_synthetic_and_never_function_06_eligible(tmp_path, files, capsys):
+    base, common, _ = files
+    cli = load_cli()
+    allow_path = prepare(cli, base, common)
+    replay = base / "replay"
+    replay.mkdir()
+    for i in range(1, 6):
+        (replay / f"{TENANT}__{pid(i)}.json").write_bytes(sr(i))
+    out = base / "result"
+    assert cli.main(["verify", *common, "--allowlist", str(allow_path), "--replay-dir", str(replay), "--out-dir", str(out)],
+                    now=fake_now, clock=Clock(), sleep=lambda s: None) == 0
+    report = json.loads((out / "detail-verification-report.json").read_text())
+    hand = json.loads((out / "f06-handoff.json").read_text())
+    manifest = json.loads((out / "evidence-manifest.json").read_text())
+    for doc in (report, hand):
+        assert (doc["evidence_origin"], doc["real_evidence"], doc["function06_eligible"]) == (
+            "offline_replay_synthetic", False, False)
+    assert hand["next_step"].startswith("synthetic_replay_output_is_not_real_evidence")
+    assert manifest["evidence_origin"] == "offline_replay_synthetic"
+    assert all(c["evidence_origin"] == "offline_replay_synthetic" for c in hand["candidates"])
+    assert not (base / "budget").exists()                                            # replay never touches a budget

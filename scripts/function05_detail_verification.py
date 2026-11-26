@@ -8,12 +8,20 @@
              (``--replay-dir``, fully offline). Re-evaluates with the approved criteria and writes an owner-only
              report, a non-executable Function 06 hand-off and the raw evidence with SHA-256 hashes.
 
+Both commands bind the run to the verified ORIGINAL Function 02 data: the owner pins the SHA-256 of the Function 02
+file Function 04 was run on, and Function 04 is regenerated from it with the approved criteria and must match the given
+report exactly. ``--live`` additionally needs ``--budget-dir``: a durable single-use reservation (one file per allowlist
+digest and per detail URL, created before any request, never released automatically, so an interrupted or uncertain
+attempt stays consumed and is never retried). Every attempt is journaled (fsync) before and after the request.
+Replay output is labelled synthetic and is never Function 06 eligible.
+
 Output stays outside the repository (0700 directory, 0600 files, no overwrite). Exit codes: 0 written, 2 refused.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -24,8 +32,9 @@ from urllib.parse import urlsplit
 
 from ejs.services.criteria_loader import CriteriaError, parse_criteria_text
 from ejs.services.detail_verification import (DETAIL_HOST, DetailVerificationError, allowlist_digest, build_allowlist,
-                                               build_handoff, build_report, check_f04_reproducible, request_details,
-                                               verify_allowlist, verify_details)
+                                               build_handoff, build_report, check_lineage, request_details,
+                                               reserve_budget, verify_allowlist, verify_details)
+from ejs.services.expansion_shadow import SCHEMA as EXPANSION_SCHEMA, project_for_application_bridge
 from ejs.services.http_carrier import HttpCarrier, ReplayCarrier, urllib_transport
 from ejs.services.owner_only_files import OutputDirError, prepare_output_dir, write_private_file
 
@@ -33,6 +42,7 @@ ALLOWLIST_NAME = "detail-allowlist.json"
 REPORT_NAME = "detail-verification-report.json"
 HANDOFF_NAME = "f06-handoff.json"
 EVIDENCE_NAME = "evidence-manifest.json"
+JOURNAL_NAME = "attempt-journal.jsonl"
 
 
 def _dump(value) -> bytes:
@@ -41,8 +51,8 @@ def _dump(value) -> bytes:
 
 def _load_inputs(args):
     """One read per file: the bytes that are hashed are the bytes that are parsed."""
-    if not args.expected_criteria_sha256 or not args.expected_rule_version:
-        raise DetailVerificationError("EXPECTED_DIGEST_AND_RULE_VERSION_REQUIRED")
+    if not args.expected_criteria_sha256 or not args.expected_rule_version or not args.expected_f02_sha256:
+        raise DetailVerificationError("EXPECTED_DIGESTS_AND_RULE_VERSION_REQUIRED")
     criteria_bytes = args.criteria.read_bytes()
     criteria_sha = sha256(criteria_bytes).hexdigest()
     if criteria_sha != args.expected_criteria_sha256:
@@ -58,7 +68,17 @@ def _load_inputs(args):
     f04_sha = sha256(f04_bytes).hexdigest()
     if isinstance(f04, dict) and isinstance(f04.get("criteria"), dict) and f04["criteria"].get("sha256") != criteria_sha:
         raise DetailVerificationError("F04_REPORT_USED_DIFFERENT_CRITERIA")
-    return criteria, criteria_sha, f04, f04_sha
+    f02_bytes = args.f02_report.read_bytes()                 # the original Function 02 data, pinned by the owner
+    f02_sha = sha256(f02_bytes).hexdigest()
+    if f02_sha != args.expected_f02_sha256:
+        raise DetailVerificationError("F02_DIGEST_MISMATCH")
+    projection = json.loads(f02_bytes)
+    if isinstance(projection, dict) and projection.get("schema") == EXPANSION_SCHEMA:
+        projection = project_for_application_bridge(projection)          # exactly what function04_suitability does
+    lineage = check_lineage(f04, projection, criteria, criteria_sha256=criteria_sha,
+                            expected_criteria_sha256=args.expected_criteria_sha256,
+                            expected_rule_version=args.expected_rule_version, f02_source_sha256=f02_sha)
+    return criteria, criteria_sha, f04, f04_sha, projection, lineage
 
 
 def _replay_transport(directory: Path):
@@ -71,28 +91,47 @@ def _replay_transport(directory: Path):
     return transport
 
 
-def _store_evidence(out_dir: Path, observations: list[dict]) -> bytes:
-    raw_dir = prepare_output_dir(out_dir / "raw")
-    entries = []
-    for o in observations:
-        t = o["target"]
-        name = f"{t['tenant']}__{t['posting_id']}.json"          # same layout Function 04's --details-dir reads
-        if o["raw"] is not None:
-            write_private_file(raw_dir, name, o["raw"])
-        entries.append({"tenant": t["tenant"], "posting_id": t["posting_id"], "detail_url": t["detail_url"],
-                        "observed_at": o["observed_at"], "http_status": o["http_status"], "outcome": o["outcome"],
-                        "bytes": len(o["raw"]) if o["raw"] is not None else None,
-                        "sha256": sha256(o["raw"]).hexdigest() if o["raw"] is not None else None,
-                        "stored_as": f"raw/{name}" if o["raw"] is not None else None})
-    return _dump({"schema": "EJS-DETAIL-EVIDENCE-1", "entries": entries})
+class _Journal:
+    """Append-only, fsynced attempt journal plus immediate raw-body storage. Never rewritten or deleted."""
+
+    def __init__(self, out_dir: Path, header: dict):
+        self.raw_dir = prepare_output_dir(out_dir / "raw")
+        self._fd = os.open(out_dir / JOURNAL_NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        self.event(header)
+
+    def event(self, record: dict) -> None:
+        os.write(self._fd, (json.dumps(record, sort_keys=True) + "\n").encode())
+        os.fsync(self._fd)
+
+    def start(self, record: dict) -> None:
+        self.event(record)
+
+    def finish(self, record: dict, raw: bytes | None) -> None:
+        stored = None
+        if raw is not None:
+            parts = urlsplit(record["detail_url"]).path.split("/")        # /v1/companies/<tenant>/postings/<id>
+            name = f"{parts[3]}__{parts[5]}.json"          # same layout Function 04's --details-dir reads
+            write_private_file(self.raw_dir, name, raw)
+            stored = f"raw/{name}"
+        self.event({**record, "stored_as": stored})
+
+    def close(self) -> None:
+        os.close(self._fd)
+
+
+def _evidence_manifest(observations: list[dict], origin: str) -> bytes:
+    entries = [{"tenant": o["target"]["tenant"], "posting_id": o["target"]["posting_id"],
+                "detail_url": o["target"]["detail_url"], "outcome": o["outcome"], "attempted": o["attempted"],
+                "http_status": o["http_status"], "requested_at": o["requested_at"], "observed_at": o["observed_at"],
+                "duration_ms": o["duration_ms"], "bytes": o["response_bytes"], "sha256": o["response_sha256"],
+                "stored_as": (f"raw/{o['target']['tenant']}__{o['target']['posting_id']}.json"
+                              if o["raw"] is not None else None)} for o in observations]
+    return _dump({"schema": "EJS-DETAIL-EVIDENCE-1", "evidence_origin": origin, "entries": entries})
 
 
 def _prepare(args) -> int:
-    criteria, criteria_sha, f04, f04_sha = _load_inputs(args)
-    check_f04_reproducible(f04, criteria, criteria_sha256=criteria_sha,
-                           expected_criteria_sha256=args.expected_criteria_sha256,
-                           expected_rule_version=args.expected_rule_version)
-    allowlist = build_allowlist(f04, f04_report_sha256=f04_sha, limit=args.limit)
+    criteria, criteria_sha, f04, f04_sha, projection, lineage = _load_inputs(args)
+    allowlist = build_allowlist(f04, f04_report_sha256=f04_sha, lineage=lineage, limit=args.limit)
     out_dir = prepare_output_dir(args.out_dir)
     if (out_dir / ALLOWLIST_NAME).exists():
         raise OutputDirError("OUTPUT_EXISTS")
@@ -109,19 +148,19 @@ def _prepare(args) -> int:
 
 
 def _verify(args, *, live_transport, clock, sleep, now) -> int:
-    criteria, criteria_sha, f04, f04_sha = _load_inputs(args)
-    check_f04_reproducible(f04, criteria, criteria_sha256=criteria_sha,
-                           expected_criteria_sha256=args.expected_criteria_sha256,
-                           expected_rule_version=args.expected_rule_version)
+    criteria, criteria_sha, f04, f04_sha, projection, lineage = _load_inputs(args)
     doc = json.loads(args.allowlist.read_bytes())
-    verify_allowlist(doc, f04, f04_report_sha256=f04_sha)
+    verify_allowlist(doc, f04, f04_report_sha256=f04_sha, lineage=lineage)
     digest = allowlist_digest(doc)
     targets = len(doc["targets"])
     if not targets:
         raise DetailVerificationError("NO_TARGETS")
+    budget_dir = None
     if args.live:
         if args.approve_allowlist_sha256 != digest:
             raise DetailVerificationError("LIVE_REQUIRES_OWNER_QUOTED_ALLOWLIST_DIGEST")
+        if args.budget_dir is None:
+            raise DetailVerificationError("LIVE_REQUIRES_BUDGET_DIR")
         carrier = HttpCarrier(enabled=True, transport=live_transport, clock=clock, sleep=sleep, max_requests=targets,
                               max_pages=targets, min_interval_s=1.0, allowed_hosts=frozenset({DETAIL_HOST}))
         mode = "live_allowlisted_get"
@@ -130,26 +169,40 @@ def _verify(args, *, live_transport, clock, sleep, now) -> int:
                                 max_pages=targets, allowed_hosts=frozenset({DETAIL_HOST}))
         mode = "offline_replay"
     out_dir = prepare_output_dir(args.out_dir)
-    names = (REPORT_NAME, HANDOFF_NAME, EVIDENCE_NAME)
+    names = (REPORT_NAME, HANDOFF_NAME, EVIDENCE_NAME, JOURNAL_NAME)
     if any((out_dir / n).exists() for n in names) or (out_dir / "raw").exists():
         raise OutputDirError("OUTPUT_EXISTS")
+    if args.live:
+        budget_dir = prepare_output_dir(args.budget_dir)
+        if budget_dir == out_dir or budget_dir in out_dir.parents or out_dir in budget_dir.parents:
+            raise DetailVerificationError("BUDGET_DIR_MUST_BE_SEPARATE_FROM_OUT_DIR")
+        reserve_budget(budget_dir, doc, now=now, out_dir=out_dir)       # durable, before any request, never released
+    origin = "live_employer_response" if args.live else "offline_replay_synthetic"
     started = now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    observations = request_details(doc, carrier, now=now)
-    verification = verify_details(f04, doc, observations, criteria, criteria_sha256=criteria_sha,
-                                  expected_criteria_sha256=args.expected_criteria_sha256,
-                                  expected_rule_version=args.expected_rule_version)
-    report = build_report(doc, verification, carrier, criteria_sha256=criteria_sha, allowlist_sha256=digest,
-                          mode=mode, started_at=started)
-    handoff = build_handoff(report)
-    evidence = _store_evidence(out_dir, observations)
-    write_private_file(out_dir, EVIDENCE_NAME, evidence)
+    journal = _Journal(out_dir, {"event": "run_started", "mode": mode, "evidence_origin": origin,
+                                 "allowlist_sha256": digest, "requests_approved": targets, "started_at": started,
+                                 "budget_reserved": budget_dir is not None})
+    try:
+        observations = request_details(doc, carrier, now=now, on_start=journal.start, on_finish=journal.finish)
+        verification = verify_details(projection, observations, criteria, criteria_sha256=criteria_sha,
+                                      expected_criteria_sha256=args.expected_criteria_sha256,
+                                      expected_rule_version=args.expected_rule_version)
+        report = build_report(doc, verification, carrier, criteria_sha256=criteria_sha, allowlist_sha256=digest,
+                              mode=mode, started_at=started)
+        handoff = build_handoff(report)
+        journal.event({"event": "run_finished", "requests_attempted": carrier.total})
+    finally:
+        journal.close()                       # on interruption the journal keeps started-without-finished records
+    write_private_file(out_dir, EVIDENCE_NAME, _evidence_manifest(observations, origin))
     write_private_file(out_dir, REPORT_NAME, _dump(report))
     write_private_file(out_dir, HANDOFF_NAME, _dump(handoff))
-    first = handoff["first_suitable_candidate"]
-    print(json.dumps({"mode": mode, "requests_attempted": carrier.total, "requests_approved": targets,
-                      "verdicts": report["verdict_counts"], "handoff_candidates": len(handoff["candidates"]),
-                      "first_suitable": ({k: first[k] for k in ("tenant", "posting_id", "canonical_url", "requisition_id")}
-                                         if first else None), "next_step": handoff["next_step"]}, sort_keys=True))
+    first = handoff["first_candidate_for_review"]
+    print(json.dumps({"mode": mode, "evidence_origin": origin, "requests_attempted": carrier.total,
+                      "requests_approved": targets, "verdicts": report["verdict_counts"],
+                      "handoff_candidates": len(handoff["candidates"]),
+                      "first_candidate_for_review": ({k: first[k] for k in ("tenant", "posting_id", "canonical_url",
+                                                                           "requisition_id")} if first else None),
+                      "next_step": handoff["next_step"]}, sort_keys=True))
     return 0
 
 
@@ -164,6 +217,9 @@ def main(argv: list[str] | None = None, *, live_transport: Callable = urllib_tra
         p.add_argument("--criteria", type=Path, required=True)
         p.add_argument("--expected-criteria-sha256", required=True)
         p.add_argument("--expected-rule-version", required=True)
+        p.add_argument("--f02-report", type=Path, required=True,
+                       help="the exact Function 02 file Function 04 was run on (original verified data)")
+        p.add_argument("--expected-f02-sha256", required=True, help="independently recorded SHA-256 of that file")
         p.add_argument("--out-dir", type=Path, required=True, help="absolute owner-only directory outside the repo")
     sub.choices["prepare"].add_argument("--limit", type=int, default=5)
     v = sub.choices["verify"]
@@ -172,6 +228,7 @@ def main(argv: list[str] | None = None, *, live_transport: Callable = urllib_tra
     mode.add_argument("--replay-dir", type=Path, help="offline: <tenant>__<posting_id>.json files")
     mode.add_argument("--live", action="store_true", help="read each allowlisted endpoint once (needs the digest)")
     v.add_argument("--approve-allowlist-sha256", help="allowlist_sha256 the owner approved; required with --live")
+    v.add_argument("--budget-dir", type=Path, help="persistent owner-only single-use budget directory; required with --live")
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":

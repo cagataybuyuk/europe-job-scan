@@ -25,7 +25,7 @@ reviewed priority. A test (`test_priority_order_wins_over_the_w2_score_sort`) pi
 | --- | --- |
 | `src/ejs/services/detail_verification.py` | Selection, allowlist, guarded requests, identity/availability/requisition checks, section extraction, F04 re-evaluation, verdicts, Function 06 hand-off. |
 | `scripts/function05_detail_verification.py` | `prepare` (offline) and `verify` (`--replay-dir` offline, or `--live` gated by the allowlist digest). Owner-only output outside the repo. |
-| `tests/test_function05_detail_verification.py` | 76 offline acceptance tests (core CI job). |
+| `tests/test_function05_detail_verification.py` | 98 offline acceptance tests (core CI job). |
 
 ### Flow
 
@@ -42,11 +42,12 @@ reviewed priority. A test (`test_priority_order_wins_over_the_w2_score_sort`) pi
 4. **Request.** `request_details` makes one carrier call per target in allowlist order. A guard rejects any URL that is
    not the target's allowlisted URL or was already requested (zero requests happen in that case), and the carrier log is
    checked afterwards. Before any request the allowlist is **recomputed** from the Function 04 report and must be identical
-   (`ALLOWLIST_NOT_REPRODUCED_FROM_F04_REPORT` otherwise), and the Function 04 report itself must be reproducible from the
-   approved criteria (`F04_REPORT_NOT_REPRODUCIBLE`).
+   (`ALLOWLIST_NOT_REPRODUCED_FROM_F04_REPORT` otherwise). Live runs also need the single-use budget below. After each
+   response, an unreadable, oversized, identity-mismatched or `postingUrl`-mismatched body stops that employer **at once**;
+   its remaining targets are recorded `employer_stopped_invalid_response`, not attempted.
 5. **Verify.** Identity (id and company identifier must match; optional `postingUrl` must be the same tenant and posting),
    availability (`active` true / false / unknown), requisition id (`refNumber`, W2 rule). Mismatch or unreadable body: the
-   body is **not** evaluated.
+   body is **not** evaluated and the employer stops (step 4).
 6. **Extract.** Employer wording only: `jobDescription` lines, `qualifications` lines and, among those, the lines with an
    explicit must/required/mandatory cue and no optional wording. Language, sponsorship, work rights and compensation come
    from the Function 04 extractor (explicit statements; hedged, negated, conditional or absent stays Unknown). Nothing about
@@ -54,25 +55,52 @@ reviewed priority. A test (`test_priority_order_wins_over_the_w2_score_sort`) pi
 7. **Re-evaluate.** `evaluate_report` over all rows of the Function 04 report (so similarity groups still count) with the
    identity-bound details. Same approved criteria, digest and rule version.
 8. **Verdict** per candidate:
-   * `confirmed_incompatible`: the posting states a hard blocker (explicit no sponsorship, unrestricted right to work required
-     while the candidate is not authorized, unmet mandatory language, junior with both sources), is inactive, or the
-     compensation is confirmed below target, or Function 04 classes it `verified_blocked` / `verified_below_threshold`.
-   * `suitable`: Function 04 `verified_apply_candidate` **and** identity bound **and** active **and** requisition id present
-     **and** no W2 eligibility condition **and** no review flag.
+   * `confirmed_incompatible`: only an approved K2 hard blocker stated in the posting (explicit no sponsorship, unrestricted
+     right to work required while the candidate is not authorized, unmet mandatory language, junior with both sources), an
+     inactive posting, or the approved engine's own `verified_blocked` / `verified_below_threshold` class. **No new hard
+     blocker:** below-target compensation is scored by the engine (rating 0) and shown as the note
+     `compensation_below_target_scored_not_a_blocker`, never an exclusion. **Contradictory** employer statements
+     (e.g. refusal and offer of sponsorship in the same posting) never become a confirmed exclusion; they are
+     `incomplete_evidence` with `contradictory_evidence_requires_review`. A closed posting stays confirmed.
+   * `candidate_for_review` (provisional): Function 04 `verified_apply_candidate` **and** identity bound **and** active
+     **and** requisition id present **and** no W2 eligibility condition **and** no review flag. **Never "suitable":**
+     mandatory qualifications are not checked against verified candidate facts in Function 05
+     (`mandatory_qualifications_not_checked_against_verified_candidate_facts`); that check is a Function 06 prerequisite and
+     the employer's mandatory qualification lines are carried in the hand-off for it.
    * `incomplete_evidence`: everything else, with reason codes (request failed or not made, identity mismatch, availability
-     or requisition unverified, ambiguous sponsorship, review flags, `f04_verified_needs_review`, ...). Unknown stays Unknown;
-     an incomplete candidate is never promoted or excluded.
-9. **Hand-off.** `EJS-F06-HANDOFF-1`: non-executable, all authority flags false, `first_suitable_candidate` (or null with a
+     or requisition unverified, ambiguous sponsorship, contradictory evidence, review flags, ...). Unknown stays Unknown; an
+     incomplete candidate is never promoted or excluded.
+9. **Hand-off.** `EJS-F06-HANDOFF-1`: non-executable, all authority flags false, `first_candidate_for_review` (or null with a
    named next step), candidates ordered suitable first then by re-evaluated priority, confirmed-incompatible candidates listed
-   apart, and the prerequisites Function 06 still needs (owner review, fresh eligibility review, verified candidate facts,
-   observed form, execution manifest validation, separate authorization).
+   apart, and the prerequisites Function 06 still needs (owner review, qualification check against verified candidate
+   facts, fresh eligibility review, observed form, execution manifest validation, separate authorization). Output carries
+   `evidence_origin`: `live_employer_response` (real, `function06_eligible: true`) or `offline_replay_synthetic` (never
+   real evidence, `function06_eligible: false`, next step says so).
+
+### Single-use budget, input lineage and attempt evidence (pre-live review fixes)
+
+* **Budget.** `--live` needs `--budget-dir` (a persistent owner-only directory, separate from `--out-dir`). Before any
+  request, `reserve_budget` creates, exclusively (`O_CREAT|O_EXCL`, fsync), one file per allowlist digest and one per
+  detail URL. If any exists the run is refused with zero requests, regardless of output directory, allowlist or concurrent
+  process (an 8-thread test admits exactly one). Nothing releases a reservation: a crash, interruption or uncertain attempt
+  stays consumed and is never retried automatically. Only the owner may clear files in the budget directory, after reading
+  the attempt journal. Same pattern as Function 02: reservation published durably before the request.
+* **Lineage.** `prepare` and `verify` take `--f02-report` and `--expected-f02-sha256`: the exact Function 02 file Function 04
+  was run on and the owner's independently recorded digest of it. Function 04 is regenerated from that pinned data with the
+  approved criteria and must equal the given report row for row, including `source_report_sha256`. A self-consistent report
+  made from other data is refused (`F04_REPORT_NOT_FROM_PINNED_F02_DATA`). The lineage is part of the digest-approved
+  allowlist, and the re-evaluation runs over the pinned projection, not over the report's own rows.
+* **Attempt evidence.** `attempt-journal.jsonl` (fsync per line, never rewritten): `attempt_started` is written before each
+  request, `attempt_finished` right after the response with actual HTTP status, request time, completion time, duration,
+  byte count and SHA-256 of the body; the raw body is stored immediately, before analysis. An interruption leaves a started
+  record without a finished one (uncertain) and the evidence collected so far.
 
 ### Evidence preservation
 
 `raw/<tenant>__<posting_id>.json` (0600, same layout Function 04's `--details-dir` reads), `evidence-manifest.json`
-(URL, observation timestamp UTC, HTTP status, byte count, SHA-256, stored path), the report repeats the SHA-256 and the
-request log. Everything lives in the owner-only output directory outside the repository. Nothing private (CV, candidate
-facts, form data) is read or written.
+(URL, request and observation timestamps UTC, HTTP status, byte count, SHA-256, stored path, evidence origin), and the report
+repeats status, timing, bytes and digest per request plus the carrier log. Everything lives in the owner-only output
+directory outside the repository. Nothing private (CV, candidate facts, form data) is read or written.
 
 ## Phase 3: offline acceptance criteria
 
@@ -92,10 +120,15 @@ facts, form data) is read or written.
 | 12 | Function 04 re-evaluation, same criteria, inputs untouched | Met (equals a direct `evaluate_report` call) | `test_reevaluation_matches_function_04_...`, reproducibility test |
 | 13 | No unapproved target, no duplicate request, no submission authority | Met | tamper cases (10), duplicate/oversize refusal, guard test, hand-off authority tests, source scan, network-denied fixture |
 | 14 | Carrier restrictions reused (HTTPS, GET, no redirects, no auth, no retry, >= 1 s, caps, allowed host) | Met | `test_real_carrier_enforces_...`, `test_live_transport_...`, header equality in request test |
-| 15 | Live path gated | Met | CLI tests: no digest, wrong digest, empty digest: exit 2, zero requests; approved digest: only allowlisted URLs, once each |
+| 15 | Live path gated | Met | CLI tests: no digest, wrong digest, empty digest, no budget dir: exit 2, zero requests; approved digest: only allowlisted URLs, once each |
+| 17 | Durable single-use budget, concurrent and cross-directory safe, interruption consumes it | Met | budget tests, interrupted-run test (3 calls, no retry, rerun refused) |
+| 18 | Invalid/unreadable/mismatched response stops the employer at once | Met | `test_invalid_or_unbound_response_stops_the_employer_immediately` (6 cases) |
+| 19 | Actual status, timing, bytes, digest; evidence kept on interruption | Met | request-metadata, sink-order and journal tests |
+| 20 | Never "suitable"; contradictions and compensation are not exclusions; only approved K2 blockers exclude | Met | five tests under review fixes |
+| 21 | Lineage bound to pinned original F02 data; synthetic replay labelled and ineligible | Met | lineage, forged-report and replay-label tests |
 | 16 | Prioritized, non-executable Function 06 hand-off | Met | three hand-off tests |
 
-Validation (offline): 76 Function 05 tests; focused regressions (Function 04, W2 bridge, discovery, expansion live/replay)
+Validation (offline): 98 Function 05 tests; focused regressions (Function 04, W2 bridge, discovery, expansion live/replay)
 356 passed. Full-suite result is in the PR description.
 
 ## Phase 4: bounded live pilot (prepared, not executed)
@@ -109,42 +142,56 @@ Validation (offline): 76 Function 05 tests; focused regressions (Function 04, W2
 
 ### Step 1: owner generates the sanitized shortlist (offline, no request)
 
+Set the two values that only the owner has, then run the command. `F02_REPORT` is the exact file that was passed to
+`function04_suitability.py --report` (inside `function02-acceptance-20261126`); `F02_SHA` is the SHA-256 the owner recorded
+for that file at the Function 02 handoff (not a value computed now from the file).
+
 ```sh
+F02_REPORT="$HOME/Local/Projeler/EJS/.ejs-local/function02-acceptance-20261126/<file passed to function04 --report>"
+F02_SHA="<recorded SHA-256 of that file>"
 cd ~/Local/Projeler/EJS/ejs-function-05-detail-verification && PYTHONPATH=src /Users/cagataybuyuk/europe-job-scan/.venv/bin/python \
   scripts/function05_detail_verification.py prepare \
   --f04-report "$HOME/Local/Projeler/EJS/.ejs-local/f04-suitability-20261126-125406/suitability-report.json" \
   --criteria "$HOME/Local/Projeler/EJS/.ejs-local/w1-pilot/criteria.approved.yaml" \
   --expected-criteria-sha256 57faeefb94441abe9f659f8ce636b35c42cbe1b2411e67035ef296d485191f73 \
   --expected-rule-version EJS-W1-PILOT-20261125-v1 \
+  --f02-report "$F02_REPORT" --expected-f02-sha256 "$F02_SHA" \
   --out-dir "$HOME/Local/Projeler/EJS/.ejs-local/f05-allowlist-20261126"
 ```
 
-It verifies the criteria digest and rule version, checks that the Function 04 report is what those criteria reproduce,
-writes `detail-allowlist.json` (owner-only) and prints: `expected_request_count`, `allowlist_sha256`, each target's
-`f04_priority_rank`, tenant, posting id, canonical URL and detail URL, and any `unbound` high rows. It makes no network call.
-Paste the printed output on Issue #79 for approval.
+It verifies the criteria digest and rule version and the F02 pin, regenerates Function 04 from the pinned F02 data and
+requires the F04 report to match exactly, writes `detail-allowlist.json` (owner-only) and prints: `expected_request_count`,
+`allowlist_sha256`, each target's `f04_priority_rank`, tenant, posting id, canonical URL and detail URL, and any `unbound`
+high rows. It makes no network call. A refusal code (`F02_DIGEST_MISMATCH`, `F04_REPORT_NOT_FROM_PINNED_F02_DATA`, ...)
+means the pilot must not proceed; report it unchanged. Paste the printed output on Issue #79 for approval.
 
 ### Step 2 (only after separate owner approval of that exact output): the bounded read
 
 ```sh
 cd ~/Local/Projeler/EJS/ejs-function-05-detail-verification && PYTHONPATH=src /Users/cagataybuyuk/europe-job-scan/.venv/bin/python \
   scripts/function05_detail_verification.py verify --live --approve-allowlist-sha256 <allowlist_sha256 the owner approved> \
+  --budget-dir "$HOME/Local/Projeler/EJS/.ejs-local/f05-budget" \
   --f04-report <same> --criteria <same> --expected-criteria-sha256 <same> --expected-rule-version <same> \
+  --f02-report "$F02_REPORT" --expected-f02-sha256 "$F02_SHA" \
   --allowlist "$HOME/Local/Projeler/EJS/.ejs-local/f05-allowlist-20261126/detail-allowlist.json" \
   --out-dir "$HOME/Local/Projeler/EJS/.ejs-local/f05-detail-20261126"
 ```
 
-Offline rehearsal with saved bodies: replace `--live --approve-allowlist-sha256 ...` with `--replay-dir <dir of tenant__posting.json>`.
-The live command refuses without the exact digest (exit 2, zero requests). It prints verdict counts and the first suitable
-candidate identity; the report, hand-off and raw evidence stay in the owner-only directory.
+Use one persistent `--budget-dir` for the whole pilot; it is the single-use record, so keep it outside any output directory.
+Offline rehearsal with saved bodies: replace `--live --approve-allowlist-sha256 ... --budget-dir ...` with
+`--replay-dir <dir of tenant__posting.json>`; its output is labelled `offline_replay_synthetic` and is never real evidence.
+The live command refuses without the exact digest or a budget directory, or when the budget is already consumed (exit 2,
+zero requests). It prints verdict counts and the first candidate for review; the report, hand-off, attempt journal and raw
+evidence stay in the owner-only directory.
 
 ### Stop conditions
 
-Any HTTP error, redirect, 429/403, body above 5 MB, identity or schema surprise stops that employer (no retry). Do not rerun
-a failed pilot without a new approval. Function 06 does not start from this hand-off.
+Any HTTP error, redirect, 429/403, body above 5 MB, or unreadable/unbound response stops that employer (no retry). A consumed
+budget is never reset automatically; the owner decides after reading `attempt-journal.jsonl`. Function 06 does not start
+from this hand-off.
 
 ## Status
 
 Function 05 offline acceptance: complete. Live pilot: ready, **not approved, not executed**. Real shortlist, real verdict
-counts and any first suitable candidate: not available until the owner runs step 1 (and, after approval, step 2).
+counts and any first candidate for review: not available until the owner runs step 1 (and, after approval, step 2).
 Employer-confirmed autonomous applications remain 0.
