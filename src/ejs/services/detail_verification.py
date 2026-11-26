@@ -195,9 +195,20 @@ def build_allowlist(f04_report: Any, *, f04_report_sha256: str, lineage: Mapping
             dims = row["suitability"].get("dimensions")
             geo = dims.get("geography") if isinstance(dims, dict) else None
             countries = geo.get("countries") if isinstance(geo, dict) else None
-            if (isinstance(geo, dict) and geo.get("status") in ("tier_1", "other")
-                    and isinstance(countries, list) and countries
-                    and all(isinstance(code, str) and code in allowed for code in countries)):
+            evidence = row.get("discovery_evidence")
+            raw = evidence.get("countries") if isinstance(evidence, dict) else None
+            if (f04_report.get("source_projection") != "verified_live_country_feed"
+                    or not isinstance(evidence, dict) or evidence.get("observation") != "live_country_feed"
+                    or not isinstance(raw, list) or not raw
+                    or any(type(code) is not str or code not in allowed for code in raw)
+                    or len(set(raw)) != len(raw)
+                    or not isinstance(countries, list) or countries != sorted(raw)
+                    or not isinstance(geo, dict) or geo.get("status") not in ("tier_1", "other")
+                    or not _TENANT.fullmatch(row["tenant"])):
+                continue
+            expected_feed = (f"https://{DETAIL_HOST}/v1/companies/{row['tenant']}/postings"
+                             f"?country={raw[0].lower()}&offset=0&limit=100")
+            if evidence.get("feed_url") == expected_feed:
                 scoped.append(row)
         eligible = scoped
     if medium_offset is not None and medium_offset >= len(eligible):

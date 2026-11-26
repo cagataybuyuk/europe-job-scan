@@ -59,7 +59,10 @@ def row(i: int, role: str = "Senior Business Analyst", *, country: str | list[st
             f"https://jobs.smartrecruiters.com/{tenant}/{pid(i)}", "ats_kind": ats, "source": "employer_watchlist",
             "tenant": tenant, "region": region, "posting_id": pid(i), "identity_status": "known",
             "similarity_key": f"acme|{role.casefold()}|city{i}",
-            "discovery_evidence": {"observation": "live_country_feed", "feed_url": "https://x",
+            "discovery_evidence": {"observation": "live_country_feed",
+                                   "feed_url": (f"https://api.smartrecruiters.com/v1/companies/{tenant}/postings"
+                                                f"?country={(country if isinstance(country, str) else (country or [''])[0]).lower()}"
+                                                "&offset=0&limit=100"),
                                    "countries": [country] if isinstance(country, str) else (country or [])}}
 
 
@@ -597,11 +600,22 @@ def files(tmp_path):
     rows = [row(i) for i in range(1, 6)] + [row(50, "Data Analyst"), row(60, "Accountant")]
     crit = tmp_path / "criteria.yaml"
     crit.write_text(criteria_text())
-    f04 = f04_report(rows)
+    # Synthetic transport test fixture in the original F02 artifact shape.
+    from ejs.services.expansion_shadow import SCHEMA as EXPANSION_SCHEMA, project_for_application_bridge
+    f02 = {"schema": EXPANSION_SCHEMA, "transport_mode": "live_country_feed",
+           "execution_authorized": False, "listings_kept": len(rows), "vacancies": rows,
+           "coverage": {"status": "completed", "pairs": [
+               {"tenant": TENANT, "country": "NL", "status": "completed"}]},
+           "snapshot_consistency": {"atomic_snapshot": False, "first_page_rechecks": [
+               {"tenant": TENANT, "country": "NL", "status": "stable"}]}}
+    projection = project_for_application_bridge(f02)
+    f04 = F04(evaluate_report(projection, criteria(), criteria_sha256=SHA,
+                             expected_criteria_sha256=SHA, expected_rule_version=RULE))
+    f04.projection = projection
     f04_path = tmp_path / "suitability-report.json"
     f04_path.write_text(json.dumps(f04, sort_keys=True, indent=1))
     f02_path = tmp_path / "f02-report.json"
-    f02_path.write_text(json.dumps(f04.projection, sort_keys=True))
+    f02_path.write_text(json.dumps(f02, sort_keys=True))
     common = ["--f04-report", str(f04_path), "--criteria", str(crit), "--expected-criteria-sha256", SHA,
               "--expected-rule-version", RULE, "--f02-report", str(f02_path), "--expected-f02-sha256",
               sha256(f02_path.read_bytes()).hexdigest()]
@@ -1551,3 +1565,42 @@ def test_cli_unscoped_allowlist_is_offline_only_even_with_quoted_digest(files):
                      "--out-dir", str(base / "live")], live_transport=net, now=fake_now,
                     clock=Clock(), sleep=lambda _: None) == 2
     assert net.calls == [] and not (base / "budget").exists() and not (base / "live").exists()
+
+
+@pytest.mark.parametrize("change", [
+    {"observation": "synthetic_country_replay"}, {"observation": "public_listing_feed"},
+    {"feed_url": None}, {"feed_url": "https://x"}, {"countries": ["NL", None]},
+    {"countries": ["NL", ""]}, {"countries": ["NL", "NL"]}, {"countries": "NL"},
+    {"countries": ["nl"]}, {"countries": ["NL", "ZZ"]},
+])
+def test_scoped_selection_refuses_partial_or_synthetic_country_evidence(change):
+    listing = row(1)
+    listing["discovery_evidence"].update(change)
+    f04 = f04_report([listing])
+    allow = build_allowlist(f04, f04_report_sha256=F04_SHA, lineage=lineage_of(f04), pilot_countries=["NL"])
+    assert allow["targets"] == [] and allow["selection"]["scope_excluded"] == 1
+
+
+def test_scoped_selection_requires_verified_projection_label():
+    f04 = f04_report([row(1)])
+    f04["source_projection"] = "offline_expansion"
+    allow = build_allowlist(f04, f04_report_sha256=F04_SHA, lineage=lineage_of(f04), pilot_countries=["NL"])
+    assert allow["targets"] == []
+
+
+def test_cli_live_refuses_direct_projection_even_with_matching_pins(files):
+    base, common, f04 = files
+    cli = load_cli()
+    path = base / "direct-projection.json"
+    path.write_text(json.dumps(f04.projection, sort_keys=True))
+    args = list(common)
+    args[args.index("--f02-report") + 1] = str(path)
+    args[args.index("--expected-f02-sha256") + 1] = sha256(path.read_bytes()).hexdigest()
+    allow_path = prepare(cli, base, args)
+    digest = dv.allowlist_digest(json.loads(allow_path.read_text()))
+    net = Net({url_of(i): ok(sr(i)) for i in range(1, 6)})
+    assert cli.main(["verify", *args, "--allowlist", str(allow_path), "--live",
+                     "--approve-allowlist-sha256", digest, "--budget-dir", str(base / "budget"),
+                     "--out-dir", str(base / "live")], live_transport=net, now=fake_now,
+                    clock=Clock(), sleep=lambda _: None) == 2
+    assert net.calls == [] and not (base / "budget").exists()

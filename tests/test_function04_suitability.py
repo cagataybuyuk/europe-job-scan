@@ -779,3 +779,21 @@ def test_fo_normalization_preserves_generic_existing_role_track_matching():
     c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", 'primary: "Dynamics 365"'))
     item = by_posting(evaluate_report(report(row("1", "Dynamics 365 F&O Consultant")), c))["1"]
     assert item["classification"] == "preliminary_high"
+
+
+@pytest.mark.parametrize("criterion,title", [
+    ("D365FO", "Microsoft Dynamics 365 F&O Consultant"),
+    ("Dynamics365 F/O", "D365 FO Consultant"),
+    ("D365 F&O", "D365FO Consultant"),
+    ("D365 FO", "Microsoft Dynamics365 Finance and Operations Consultant"),
+])
+def test_fo_aliases_are_symmetric_for_explicit_compact_spellings(criterion, title):
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", f'primary: "{criterion}"'))
+    assert by_posting(evaluate_report(report(row("1", title)), c))["1"]["classification"] == "preliminary_high"
+
+
+@pytest.mark.parametrize("title", ["D365FOps Consultant", "D365 FO/O Consultant",
+                                  "D365 F/O&Other Consultant", "D365FO+Other Consultant"])
+def test_fo_marker_does_not_match_partial_product_tokens(title):
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", 'primary: "D365 F&O"'))
+    assert by_posting(evaluate_report(report(row("1", title)), c))["1"]["classification"] == "preliminary_low"

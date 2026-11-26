@@ -84,7 +84,10 @@ def _load_inputs(args):
     if f02_sha != args.expected_f02_sha256:
         raise DetailVerificationError("F02_DIGEST_MISMATCH")
     projection = json.loads(f02_bytes)
-    if isinstance(projection, dict) and projection.get("schema") == EXPANSION_SCHEMA:
+    original_expansion = isinstance(projection, dict) and projection.get("schema") == EXPANSION_SCHEMA
+    if getattr(args, "live", False) and not original_expansion:
+        raise DetailVerificationError("LIVE_REQUIRES_ORIGINAL_VERIFIED_EXPANSION_REPORT")
+    if original_expansion:
         projection = project_for_application_bridge(projection)          # exactly what function04_suitability does
     lineage = check_lineage(f04, projection, criteria, criteria_sha256=criteria_sha,
                             expected_criteria_sha256=args.expected_criteria_sha256,

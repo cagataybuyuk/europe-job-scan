@@ -51,8 +51,9 @@ _TOKEN = re.compile(r"[a-z0-9+#]+")
 # Only adjacent, explicitly identified Finance & Operations variants. Do not infer
 # F&O from Dynamics 365, CE, CRM, Power Platform, AX or an isolated FO token.
 _FO_ROLE = re.compile(
-    r"(?<![a-z0-9+#])(?:d365|dynamics\s+365)\s+"
-    r"(?:f\s*[&/]\s*o|fo|finance\s+(?:and|&)\s+operations)(?![a-z0-9+#])"
+    r"(?<![a-z0-9+#])(?:(?:d365|dynamics\s*365)\s+"
+    r"(?:f\s*[&/]\s*o|fo|finance\s+(?:and|&)\s+operations)|d365fo)"
+    r"(?![a-z0-9+#/&])"
 )
 
 
@@ -145,7 +146,10 @@ def _tokens(text: str) -> frozenset[str]:
 
 def _role_tokens(text: str) -> frozenset[str]:
     """Canonicalize only exact F&O product spellings for role matching."""
-    return _tokens(_FO_ROLE.sub("d365fo", _fold(text)))
+    folded = _fold(text)
+    remainder, count = _FO_ROLE.subn(" ", folded)
+    # The marker cannot be emitted by _TOKEN from ordinary title text.
+    return _tokens(remainder) | (frozenset({"@d365_fo@"}) if count else frozenset())
 
 
 def _role_match(title: frozenset[str], normalized_title: frozenset[str],

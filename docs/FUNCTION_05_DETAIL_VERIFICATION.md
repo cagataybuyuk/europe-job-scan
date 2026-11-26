@@ -83,7 +83,7 @@ For new live runs, `prepare` must receive explicit `--pilot-country ISO2` argume
 (repeat for each approved country, e.g. `--pilot-country NL --pilot-country IE`).
 Only uppercase codes supported by F04's country canonicalizer are accepted; a
 country must also be configured in the approved criteria to qualify a listing.
-The complete nonempty provenance country set must be inside the selected scope.
+The complete nonempty raw provenance country list must consist of exact, unique in-scope codes, match the derived geography, carry a live-country-feed observation and the matching canonical feed URL. Live verification requires the independently pinned original expansion report, not a standalone projection or synthetic replay.
 Unknown, mixed outside-scope and unconfigured provenance are skipped for this
 pilot, not removed from the F04 report. Filtering precedes high/medium window
 selection; scoped counts describe the filtered window population. The sorted
