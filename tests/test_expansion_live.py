@@ -8,9 +8,12 @@ import pytest
 from ejs.services.application_bridge import prepare_application_report
 from ejs.services.criteria_loader import load_criteria
 from ejs.services.expansion_replay import (
-    COUNTRIES, RESEARCH, initial_checkpoint, live_page, live_page_url, live_replay_batch, replay_batch,
+    COUNTRIES, LIVE_BUNDLE_MAX_REQUESTS, LIVE_MAX_REQUESTS, RESEARCH, LiveObservation, begin_invocation,
+    effective_rechecks, empty_evidence, initial_checkpoint, live_page, live_page_url, live_replay_batch,
+    recheck_first_page, record_invocation, remaining_requests, replay_batch, settle_in_flight,
+    spent_requests, validate_evidence,
 )
-from ejs.services.expansion_shadow import build_expansion_report
+from ejs.services.expansion_shadow import build_expansion_report, project_for_application_bridge
 from ejs.services.http_carrier import HttpCarrier, HttpStatusError
 from scripts import expansion_replay_store as store, shadow_discovery as cli
 from tests.unit.phase1a_support import CRITERIA_YAML
@@ -180,41 +183,206 @@ def test_batch_never_exceeds_five_pages_per_employer_or_60_total():
     assert result.pages == 5 and result.checkpoint.cursors[0].offset == 500
 
 
-def test_report_carries_live_evidence_and_request_counts(tmp_path):
-    criteria = load_criteria(_write(tmp_path / "c.yaml", CRITERIA_YAML))
-    pages = {(KPMG, "nl", 0): feed("NL", total=1, ids=("a",))}
-    result, c = run(initial_checkpoint(), Feed(pages), {(KPMG, "NL")})
-    markets = {tenant: "Synthetic market" for _, tenant, _, _ in RESEARCH}
-    report = build_expansion_report(result.checkpoint, list(result.listings), markets, criteria,
-                                    live_requests=dict(c.per_employer))
-    assert report["transport_mode"] == "live_country_feed" and report["network_requests"] == 1
-    assert report["requests_scope"] == "this_invocation" and report["execution_authorized"] is False
-    vacancy = report["vacancies"][0]
-    assert vacancy["discovery_evidence"] == {"observation": "live_country_feed",
-                                             "feed_url": live_page_url(KPMG, "NL", 0), "countries": ["NL"]}
-    assert report["coverage"]["counts"]["completed"] == 1 and report["coverage"]["counts"]["incomplete"] == 242
 
-
-def test_report_is_downstream_compatible_only_through_an_explicit_projection(tmp_path):
-    criteria = load_criteria(_write(tmp_path / "c.yaml", CRITERIA_YAML))
-    pages = {(KPMG, "nl", 0): feed("NL", total=1, ids=("744000000000001",))}
-    result, c = run(initial_checkpoint(), Feed(pages), {(KPMG, "NL")})
-    markets = {tenant: "Synthetic market" for _, tenant, _, _ in RESEARCH}
-    report = build_expansion_report(result.checkpoint, list(result.listings), markets, criteria,
-                                    live_requests=dict(c.per_employer))
-    with pytest.raises(ValueError, match="discovery_schema"):
-        prepare_application_report(report)           # direct hand-off stays refused
-    projected = {**report, "schema": "EJS-SHADOW-REPORT-2"}
-    prepared = prepare_application_report(projected)
-    candidate = prepared["candidates"][0]
-    assert (candidate["tenant"], candidate["posting_id"], candidate["location"]) == (KPMG, "744000000000001",
-                                                                                      "Synthetic city, NL")
-    assert candidate["readiness"] == "missing_evidence" and prepared["executable"] is False
+MARKETS = {tenant: "Synthetic market" for _, tenant, _, _ in RESEARCH}
+STABLE_KPMG_NL = {"tenant": KPMG, "country": "NL", "status": "stable", "reason": "synthetic"}
 
 
 def _write(path, text):
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def live_report(tmp_path, pages, approved, *, max_pages=60, rechecks=()):
+    """Report built directly from a live batch and durable-shaped evidence."""
+    criteria = load_criteria(_write(tmp_path / "c.yaml", CRITERIA_YAML))
+    result, c = run(initial_checkpoint(), Feed(pages), approved, max_pages=max_pages)
+    evidence = record_invocation(begin_invocation(empty_evidence(), 5),
+                                 LiveObservation(requests=tuple(c.log), rechecks=tuple(rechecks)))
+    return build_expansion_report(result.checkpoint, list(result.listings), MARKETS, criteria,
+                                  evidence=evidence, approved=frozenset(approved))
+
+
+def test_report_carries_live_evidence_and_cumulative_request_accounting(tmp_path):
+    report = live_report(tmp_path, {(KPMG, "nl", 0): feed("NL", total=1, ids=("a",))}, {(KPMG, "NL")},
+                         rechecks=[STABLE_KPMG_NL])
+    assert report["transport_mode"] == "live_country_feed" and report["network_requests"] == 1
+    assert report["requests_scope"] == "bundle_cumulative" and report["execution_authorized"] is False
+    assert report["request_accounting"] == {
+        "scope": "bundle_cumulative", "budget": 5, "spent": 1, "remaining": 4, "uncertain_reserved": 0,
+        "invocations": [{"seq": 1, "status": "completed", "reserved": 5, "requests": 1}]}
+    assert report["request_log"][0]["invocation"] == 1
+    assert report["employers"][0]["requests"] == 1
+    assert report["vacancies"][0]["discovery_evidence"] == {
+        "observation": "live_country_feed", "feed_url": live_page_url(KPMG, "NL", 0), "countries": ["NL"]}
+
+
+def test_approved_scope_coverage_is_separate_from_research_coverage(tmp_path):
+    report = live_report(tmp_path, {(KPMG, "nl", 0): feed("NL", total=1, ids=("a",))}, {(KPMG, "NL")})
+    coverage = report["coverage"]
+    assert coverage["status"] == "completed" and coverage["measured_over"] == "approved_scope"
+    assert coverage["counts"] == {"completed": 1, "incomplete": 0, "blocked": 0, "failed": 0, "not_approved": 242}
+    assert coverage["research_scope"] == {"total_pairs": 243, "approved_pairs": 1, "completed_pairs": 1,
+                                          "not_approved_pairs": 242, "research_coverage_complete": False}
+    assert sum(p["status"] == "not_approved" for p in coverage["pairs"]) == 242
+    employers = {e["tenant"]: e["status"] for e in report["employers"]}
+    assert employers[KPMG] == "completed" and employers[DEVO] == "not_approved"
+    assert "incomplete" not in employers.values()
+
+
+def test_pending_failed_and_unapproved_pairs_still_report_honestly(tmp_path):
+    pages = {(KPMG, "nl", 0): feed("NL", total=150, ids=[f"k{n}" for n in range(100)]),
+             (DEVO, "nl", 0): 503}
+    report = live_report(tmp_path, pages, {(KPMG, "NL"), (DEVO, "NL"), (DEVO, "IE")})
+    assert report["coverage"]["status"] == "failed"
+    assert report["coverage"]["counts"] == {"completed": 0, "incomplete": 0, "blocked": 1, "failed": 2,
+                                            "not_approved": 240}     # KPMG page 2 is missing (404): failed
+    assert report["coverage"]["research_scope"]["research_coverage_complete"] is False
+
+
+def test_synthetic_report_keeps_its_original_coverage_shape():
+    criteria = load_criteria(_write_tmp(CRITERIA_YAML))
+    report = build_expansion_report(initial_checkpoint(), [], MARKETS, criteria)
+    assert report["coverage"]["counts"] == {"completed": 0, "incomplete": 243, "blocked": 0, "failed": 0}
+    assert "research_scope" not in report["coverage"] and report["network_requests"] == 0
+
+
+def _write_tmp(text):
+    import tempfile, pathlib
+    path = pathlib.Path(tempfile.mkdtemp()) / "c.yaml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+# --- durable evidence (pure) --------------------------------------------------------------------
+
+def request(status=200):
+    return {"url": live_page_url(KPMG, "NL", 0), "status": status, "bytes": 10}
+
+
+def test_evidence_accounting_charges_interrupted_invocations_their_whole_reservation():
+    e = begin_invocation(empty_evidence(), 4)
+    assert spent_requests(e) == 4 and remaining_requests(e) == 1          # in flight counts before any reply
+    settled = settle_in_flight(e)
+    assert settled["in_flight"] is None and settled["invocations"][0]["status"] == "interrupted_unverified"
+    assert spent_requests(settled) == 4 and remaining_requests(settled) == 1
+    validate_evidence(settled)
+    done = record_invocation(begin_invocation(empty_evidence(), 4), LiveObservation(requests=(request(),)))
+    assert spent_requests(done) == 1 and remaining_requests(done) == 4
+    with pytest.raises(ValueError):
+        begin_invocation(settled, 2)                                       # more than what is left
+
+
+def test_drift_and_unreadable_are_sticky_in_effective_rechecks():
+    def check(status):
+        return {"tenant": KPMG, "country": "NL", "status": status, "reason": status}
+
+    e = empty_evidence()
+    for status in ("drift", "stable"):
+        e = record_invocation(begin_invocation(e, 1), LiveObservation(rechecks=(check(status),)))
+    assert effective_rechecks(e)[(KPMG, "NL")]["status"] == "drift"
+    e = empty_evidence()
+    for status in ("not_checked", "stable"):
+        e = record_invocation(begin_invocation(e, 1), LiveObservation(rechecks=(check(status),)))
+    assert effective_rechecks(e)[(KPMG, "NL")]["status"] == "stable"
+    e = record_invocation(begin_invocation(e, 1), LiveObservation(rechecks=(check("unreadable"),)))
+    assert effective_rechecks(e)[(KPMG, "NL")]["status"] == "unreadable"
+
+
+@pytest.mark.parametrize("tamper", [
+    lambda e: e["invocations"][0].update(seq=2),
+    lambda e: e["invocations"][0].update(requests=[request()] * 3, reserved=2),
+    lambda e: e["invocations"][0].update(status="interrupted_unverified"),     # interrupted cannot list requests
+    lambda e: e.update(budget=6),
+    lambda e: e.update(in_flight={"seq": 5, "reserved": 1}),
+    lambda e: e["rechecks"].append({"seq": 9, "tenant": KPMG, "country": "NL", "status": "stable", "reason": "x"}),
+    lambda e: e["rechecks"].append({"seq": 1, "tenant": "Rituals1", "country": "NL", "status": "stable",
+                                    "reason": "x"}),
+    lambda e: e["invocations"][0]["requests"][0].update(status=None),
+    lambda e: e.update(extra=1),
+])
+def test_tampered_evidence_is_rejected(tamper):
+    e = record_invocation(begin_invocation(empty_evidence(), 4), LiveObservation(requests=(request(),)))
+    validate_evidence(e)
+    import copy
+    e = copy.deepcopy(e)
+    tamper(e)
+    with pytest.raises(ValueError):
+        validate_evidence(e)
+
+
+# --- projection ---------------------------------------------------------------------------------
+
+def test_verified_rows_pass_the_unchanged_bridge_and_exclusions_are_counted(tmp_path):
+    pages = {(KPMG, "nl", 0): feed("NL", total=1, ids=("744000000000001",))}
+    report = live_report(tmp_path, pages, {(KPMG, "NL")}, rechecks=[STABLE_KPMG_NL])
+    with pytest.raises(ValueError, match="discovery_schema"):
+        prepare_application_report(report)           # direct hand-off stays refused
+    projected = project_for_application_bridge(report)
+    assert projected["excluded_rows"] == {"count": 0, "reasons": {}} and projected["atomic_snapshot"] is False
+    prepared = prepare_application_report(projected)
+    candidate = prepared["candidates"][0]
+    assert (candidate["tenant"], candidate["posting_id"], candidate["location"]) == (KPMG, "744000000000001",
+                                                                                      "Synthetic city, NL")
+    assert candidate["readiness"] == "missing_evidence"
+    assert prepared["executable"] is False and prepared["submit_authorized"] is False
+
+
+def test_rows_from_a_pending_pair_never_reach_the_projection(tmp_path):
+    pages = {(KPMG, "nl", 0): feed("NL", total=150, ids=[f"k{n:03d}" for n in range(100)])}
+    report = live_report(tmp_path, pages, {(KPMG, "NL")}, max_pages=1,
+                         rechecks=[STABLE_KPMG_NL])                                  # even with a stable check
+    assert report["listings_kept"] == 100 and report["coverage"]["counts"]["incomplete"] == 1
+    projected = project_for_application_bridge(report)
+    assert projected["listings_kept"] == 0 and projected["vacancies"] == []
+    assert projected["excluded_rows"] == {"count": 100, "reasons": {"provenance_pair_not_completed": 100}}
+    assert prepare_application_report(projected)["candidate_count"] == 0
+
+
+def test_cross_country_duplicate_with_an_unverified_pair_is_excluded(tmp_path):
+    pages = {(KPMG, "nl", 0): feed("NL", total=2, ids=("a", "n")),
+             (KPMG, "ie", 0): feed("IE", total=3, ids=("a", "b"))}                  # IE pending; "a" seen in both
+    report = live_report(tmp_path, pages, {(KPMG, "NL"), (KPMG, "IE")}, rechecks=[STABLE_KPMG_NL])
+    by_id = {v["posting_id"]: v["discovery_evidence"]["countries"] for v in report["vacancies"]}
+    assert by_id == {"a": ["NL", "IE"], "n": ["NL"], "b": ["IE"]}
+    projected = project_for_application_bridge(report)
+    assert [v["posting_id"] for v in projected["vacancies"]] == ["n"]
+    assert projected["excluded_rows"] == {"count": 2, "reasons": {"provenance_pair_not_completed": 2}}
+
+
+def test_rows_without_a_stable_recheck_or_with_drift_are_excluded(tmp_path):
+    pages = {(KPMG, "nl", 0): feed("NL", total=2, ids=("a", "b"))}
+    for rechecks, reason in (([], "provenance_pair_recheck_not_stable"),
+                             ([{**STABLE_KPMG_NL, "status": "not_checked"}], "provenance_pair_recheck_not_stable"),
+                             ([{**STABLE_KPMG_NL, "status": "drift"}], "provenance_pair_recheck_not_stable")):
+        report = live_report(tmp_path, pages, {(KPMG, "NL")}, rechecks=rechecks)
+        projected = project_for_application_bridge(report)
+        assert projected["listings_kept"] == 0 and projected["excluded_rows"]["reasons"] == {reason: 2}
+
+
+def test_rows_from_a_failed_pair_are_excluded(tmp_path):
+    pages = {(KPMG, "nl", 0): feed("NL", total=150, ids=[f"k{n:03d}" for n in range(100)]),
+             (KPMG, "nl", 100): 503}
+    report = live_report(tmp_path, pages, {(KPMG, "NL")}, rechecks=[STABLE_KPMG_NL])
+    assert report["coverage"]["status"] == "failed"
+    assert project_for_application_bridge(report)["excluded_rows"]["count"] == 100
+
+
+@pytest.mark.parametrize("tamper", [
+    lambda r: r.update(transport_mode="offline_expansion"),
+    lambda r: r.update(execution_authorized=True),
+    lambda r: r["snapshot_consistency"].update(atomic_snapshot=True),
+    lambda r: r.update(listings_kept=r["listings_kept"] + 1),
+    lambda r: r["vacancies"][0]["discovery_evidence"].update(observation="synthetic_country_replay"),
+    lambda r: r.pop("snapshot_consistency"),
+    lambda r: r.update(schema="EJS-SHADOW-REPORT-2"),
+])
+def test_projection_refuses_unverified_reports(tmp_path, tamper):
+    report = live_report(tmp_path, {(KPMG, "nl", 0): feed("NL", total=1, ids=("a",))}, {(KPMG, "NL")},
+                         rechecks=[STABLE_KPMG_NL])
+    tamper(report)
+    with pytest.raises(ValueError, match="EXPANSION_PROJECTION_REFUSED"):
+        project_for_application_bridge(report)
 
 
 # --- durable workflow (store + CLI) -------------------------------------------------------------
@@ -236,6 +404,7 @@ def cli_args(cli_inputs, out, *extra):
 def test_default_live_scope_is_exactly_the_owner_approved_pilot():
     from ejs.services.expansion_replay import LIVE_APPROVED_PAIRS
     assert LIVE_APPROVED_PAIRS == {("KPMGNederland", "NL")}
+    assert LIVE_BUNDLE_MAX_REQUESTS == LIVE_MAX_REQUESTS == 5
 
 
 def test_cli_refuses_without_an_approved_scope_before_any_request(cli_inputs, monkeypatch):
@@ -261,23 +430,41 @@ def test_live_options_are_mutually_exclusive_with_other_modes(cli_inputs):
 
 
 APPROVED = frozenset({(KPMG, "NL"), (DEVO, "NL"), (DEVO, "IE")})
+PILOT = frozenset({(KPMG, "NL")})
 
 
-def run_cli(cli_inputs, out, transport, *extra, init=False):
+def run_cli(cli_inputs, out, transport, *extra, init=False, max_pages=None):
     import scripts.expansion_shadow as es
     parser = cli.argparse.ArgumentParser()
     ns = cli.argparse.Namespace(
         watchlist=str(cli_inputs[0]), criteria=str(cli_inputs[1]), out_dir=str(out), expansion_live=True,
-        expansion_init=init, expansion_max_pages=cli.MAX_REQUESTS_PER_RUN, expansion_fixtures=None, sheet_labels=None)
+        expansion_init=init, expansion_max_pages=max_pages or cli.MAX_REQUESTS_PER_RUN, expansion_fixtures=None, sheet_labels=None)
     return es.run_expansion(ns, parser, transport=transport, clock=lambda: 0.0, sleep=lambda s: None)
+
+
+def scope(monkeypatch, pairs):
+    import scripts.expansion_shadow as es
+    import ejs.services.expansion_replay as er
+    monkeypatch.setattr(er, "LIVE_APPROVED_PAIRS", pairs)
+    monkeypatch.setattr(es, "LIVE_APPROVED_PAIRS", pairs)
 
 
 @pytest.fixture
 def approved(monkeypatch):
-    import scripts.expansion_shadow as es
-    import ejs.services.expansion_replay as er
-    monkeypatch.setattr(er, "LIVE_APPROVED_PAIRS", APPROVED)
-    monkeypatch.setattr(es, "LIVE_APPROVED_PAIRS", APPROVED)
+    scope(monkeypatch, APPROVED)
+
+
+@pytest.fixture
+def pilot(monkeypatch):
+    scope(monkeypatch, PILOT)
+
+
+def report_of(out):
+    return json.loads((out / store.REPORT_NAMES[0]).read_bytes())
+
+
+def bundle_of(out):
+    return json.loads((out / store.BUNDLE_NAME).read_bytes())
 
 
 DAY1 = {(KPMG, "nl", 0): feed("NL", total=2, ids=("a", "b")),
@@ -285,112 +472,155 @@ DAY1 = {(KPMG, "nl", 0): feed("NL", total=2, ids=("a", "b")),
         (DEVO, "ie", 0): feed("IE", total=1, ids=("c",), tenant=DEVO)}
 
 
-def test_restart_after_interruption_equals_uninterrupted_run(cli_inputs, approved):
-    full = cli_inputs[2] / "full"
-    assert run_cli(cli_inputs, full, Feed(DAY1), init=True) == 3        # unapproved pairs stay incomplete
-    interrupted = cli_inputs[2] / "interrupted"
-    boom = Feed({**DAY1, (DEVO, "nl", 0): 500})
-    assert run_cli(cli_inputs, interrupted, boom, init=True) == 1       # Devoteam failed, KPMG kept
-    report = json.loads((interrupted / store.REPORT_NAMES[0]).read_bytes())
-    assert report["coverage"]["counts"]["failed"] == 1
-    assert {e["tenant"]: e["status"] for e in report["employers"]}[KPMG] == "incomplete"
-    assert report["listings_kept"] == 2                                  # KPMG progress survived the failure
-    # a rerun neither re-requests completed pairs nor retries the failed tenant
-    retry = Feed(DAY1)
-    assert run_cli(cli_inputs, interrupted, retry) == 1
-    assert retry.urls == []
-    final = json.loads((full / store.REPORT_NAMES[0]).read_bytes())
-    assert final["listings_parsed"] == 4 and final["listings_kept"] == 3 and final["listings_duplicate"] == 1
-    assert {v["posting_id"] for v in final["vacancies"]} == {"a", "b", "c"}
-    # 3 pages + 3 first-page rechecks would be 6, so the 5-request ceiling leaves the last recheck unchecked
-    assert [c["status"] for c in final["snapshot_consistency"]["first_page_rechecks"]] == [
-        "stable", "stable", "not_checked"]
-    assert final["network_requests"] == 5 and final["transport_mode"] == "live_country_feed"
-    # every owner-only file, no candidate data
-    for path in full.iterdir():
-        assert path.stat().st_mode & 0o077 == 0
+def two_pages(second_total=150):
+    ids = [f"k{n:03d}" for n in range(150)]
+    return {(KPMG, "nl", 0): feed("NL", total=150, ids=ids[:100]),
+            (KPMG, "nl", 100): feed("NL", offset=100, total=second_total, ids=ids[100:])}
 
 
-def test_failed_second_page_commits_first_page_progress_only_once(cli_inputs, approved):
-    out = cli_inputs[2] / "out"
-    pages = {**DAY1, (KPMG, "nl", 0): feed("NL", total=150, ids=[f"k{n:03d}" for n in range(100)]),
-             (KPMG, "nl", 100): feed("NL", offset=100, total=150, ids=[f"k{n:03d}" for n in range(100, 150)])}
-    cli_args_first = Feed({**pages, (KPMG, "nl", 100): 500})
-    run_cli(cli_inputs, out, cli_args_first, init=True)                  # page 2 fails mid-pair
-    bundle = json.loads((out / store.BUNDLE_NAME).read_bytes())
-    assert len(bundle["listings"]) == 101                                # 100 KPMG + 1 Devoteam committed
-    assert cli_args_first.urls.count(live_page_url(KPMG, "NL", 100)) == 1
+def test_pilot_scope_reads_two_pages_and_one_recheck_and_is_complete_for_its_scope(cli_inputs, pilot):
+    out, feed_ = cli_inputs[2] / "pilot", Feed(two_pages())
+    assert run_cli(cli_inputs, out, feed_, init=True) == 0           # approved scope done: not "incomplete"
+    report = report_of(out)
+    assert [urlparse(u).query for u in feed_.urls] == [
+        "country=nl&offset=0&limit=100", "country=nl&offset=100&limit=100", "country=nl&offset=0&limit=100"]
+    assert [r["status"] for r in report["request_log"]] == [200, 200, 200] and report["network_requests"] == 3
+    assert report["request_accounting"]["remaining"] == 2
+    assert [c["status"] for c in report["snapshot_consistency"]["first_page_rechecks"]] == ["stable"]
+    assert report["snapshot_consistency"]["atomic_snapshot"] is False
+    assert report["listings_kept"] == 150 and report["coverage"]["status"] == "completed"
+    assert report["coverage"]["research_scope"]["not_approved_pairs"] == 242
+    assert report["coverage"]["research_scope"]["research_coverage_complete"] is False
+    assert project_for_application_bridge(report)["listings_kept"] == 150
 
 
-def test_daily_runs_use_separate_snapshots_and_never_touch_earlier_days(cli_inputs, approved):
-    day1, day2 = cli_inputs[2] / "2026-11-27", cli_inputs[2] / "2026-11-28"
-    run_cli(cli_inputs, day1, Feed(DAY1), init=True)
-    before = {p.name: p.read_bytes() for p in day1.iterdir() if p.name != store._LOCK_NAME}
-    changed = {**DAY1, (KPMG, "nl", 0): feed("NL", total=3, ids=("a", "b", "z"))}
-    run_cli(cli_inputs, day2, Feed(changed), init=True)
-    assert {p.name: p.read_bytes() for p in day1.iterdir() if p.name != store._LOCK_NAME} == before
-    ids = lambda d: {v["posting_id"] for v in json.loads((d / store.REPORT_NAMES[0]).read_bytes())["vacancies"]}
-    assert ids(day2) - ids(day1) == {"z"}
-    with pytest.raises(SystemExit):             # re-initializing an existing day is refused
-        run_cli(cli_inputs, day1, Feed(DAY1), init=True)
+def test_resume_without_requests_keeps_request_log_rechecks_and_accounting(cli_inputs, pilot):
+    out = cli_inputs[2] / "pilot"
+    run_cli(cli_inputs, out, Feed(two_pages()), init=True)
+    first, bundle_before = report_of(out), bundle_of(out)
+    silent = Feed({})
+    assert run_cli(cli_inputs, out, silent) == 0
+    assert silent.urls == []
+    again = report_of(out)
+    for key in ("request_log", "request_accounting", "network_requests", "snapshot_consistency", "vacancies",
+                "coverage"):
+        assert again[key] == first[key], key
+    assert bundle_of(out) == bundle_before                          # nothing rewritten, nothing lost
+    assert project_for_application_bridge(again)["listings_kept"] == 150   # projection survives a resume
 
 
-def test_process_killed_mid_batch_commits_nothing_and_resume_matches_clean_run(cli_inputs, approved):
+def test_drift_stays_visible_after_resume_and_never_becomes_success(cli_inputs, pilot):
+    calls = {"n": 0}
+
+    class Moving(Feed):
+        def __call__(self, url, headers, timeout):
+            calls["n"] += 1
+            if calls["n"] == 3:                      # the recheck sees a shifted first page
+                return 200, feed("NL", total=151, ids=[f"k{n:03d}" for n in range(100)])
+            return super().__call__(url, headers, timeout)
+
+    out = cli_inputs[2] / "moving"
+    assert run_cli(cli_inputs, out, Moving(two_pages()), init=True) == 1
+    first = report_of(out)
+    assert first["snapshot_consistency"]["first_page_rechecks"][0]["reason"] == "total_changed"
+    silent = Feed({})
+    assert run_cli(cli_inputs, out, silent) == 1                   # resume: still failing, no new request
+    assert silent.urls == []
+    again = report_of(out)
+    assert again["snapshot_consistency"]["first_page_rechecks"] == first["snapshot_consistency"]["first_page_rechecks"]
+    assert again["snapshot_consistency"]["recheck_history"][0]["status"] == "drift"
+    projected = project_for_application_bridge(again)
+    assert projected["listings_kept"] == 0 and projected["excluded_rows"]["count"] == 150
+
+
+def test_later_stable_recheck_cannot_erase_earlier_drift(cli_inputs, pilot):
+    out = cli_inputs[2] / "sticky"
+    run_cli(cli_inputs, out, Feed({(KPMG, "nl", 0): feed("NL", total=1, ids=("a",))}), init=True)
+    path = out / store.BUNDLE_NAME
+    data = json.loads(path.read_bytes())
+    data["evidence"]["rechecks"] = [{"seq": 1, "tenant": KPMG, "country": "NL", "status": "drift", "reason": "total_changed"},
+                                    {"seq": 1, "tenant": KPMG, "country": "NL", "status": "stable", "reason": "later"}]
+    path.write_bytes((json.dumps(data, separators=(",", ":")) + "\n").encode())
+    assert run_cli(cli_inputs, out, Feed({})) == 1
+    assert report_of(out)["snapshot_consistency"]["first_page_rechecks"][0]["status"] == "drift"
+
+
+def test_bundle_budget_is_cumulative_across_invocations_and_fails_closed(cli_inputs, pilot):
+    ids = [f"i{n:04d}" for n in range(450)]
+    pages = {(KPMG, "nl", o): feed("NL", offset=o, total=450, ids=ids[o:o + 100]) for o in range(0, 450, 100)}
+    out = cli_inputs[2] / "budget"
+    first, second, third = Feed(pages), Feed(pages), Feed(pages)
+    assert run_cli(cli_inputs, out, first, init=True) == 3        # 4 pages (reserve 1 for a recheck), pair pending
+    assert len(first.urls) == 4 and report_of(out)["request_accounting"]["remaining"] == 1
+    assert run_cli(cli_inputs, out, second) == 0                  # last page completes the pair; no budget to recheck
+    assert len(second.urls) == 1
+    report = report_of(out)
+    assert report["network_requests"] == 5 and report["request_accounting"]["remaining"] == 0
+    assert [c["status"] for c in report["snapshot_consistency"]["first_page_rechecks"]] == ["not_checked"]
+    assert run_cli(cli_inputs, out, third) == 0
+    assert third.urls == []                                       # budget spent: nothing more, no error
+    assert project_for_application_bridge(report_of(out))["excluded_rows"]["count"] == 450   # unverified, excluded
+
+
+def test_unchecked_pair_is_rechecked_by_a_later_invocation_without_losing_history(cli_inputs, pilot):
+    out = cli_inputs[2] / "later"
+    pages = {(KPMG, "nl", 0): feed("NL", total=2, ids=("a", "b"))}
+    assert run_cli(cli_inputs, out, Feed(pages), init=True, max_pages=1) == 0
+    first = report_of(out)
+    assert [c["status"] for c in first["snapshot_consistency"]["first_page_rechecks"]] == ["not_checked"]
+    assert project_for_application_bridge(first)["listings_kept"] == 0
+    second = Feed(pages)
+    assert run_cli(cli_inputs, out, second) == 0
+    assert [urlparse(u).query for u in second.urls] == ["country=nl&offset=0&limit=100"]   # only the recheck
+    report = report_of(out)
+    assert [c["status"] for c in report["snapshot_consistency"]["first_page_rechecks"]] == ["stable"]
+    assert [c["status"] for c in report["snapshot_consistency"]["recheck_history"]] == ["not_checked", "stable"]
+    assert report["network_requests"] == 2 and report["request_accounting"]["remaining"] == 3
+    assert project_for_application_bridge(report)["listings_kept"] == 2
+    third = Feed(pages)
+    run_cli(cli_inputs, out, third)
+    assert third.urls == []                                         # verified pairs are never re-requested
+
+
+def test_process_killed_mid_invocation_is_charged_its_whole_reservation(cli_inputs, pilot):
     class Killed(Feed):
         def __call__(self, url, headers, timeout):
             if len(self.urls) == 1:
                 raise KeyboardInterrupt
             return super().__call__(url, headers, timeout)
 
-    killed_dir, clean_dir = cli_inputs[2] / "killed", cli_inputs[2] / "clean"
+    out = cli_inputs[2] / "killed"
     with pytest.raises(KeyboardInterrupt):
-        run_cli(cli_inputs, killed_dir, Killed(DAY1), init=True)
-    assert not (killed_dir / store.BUNDLE_NAME).exists()                  # nothing half-committed
-    run_cli(cli_inputs, killed_dir, Feed(DAY1), init=True)                # fresh start is allowed again
-    run_cli(cli_inputs, clean_dir, Feed(DAY1), init=True)
-    read = lambda d: (d / store.BUNDLE_NAME).read_bytes()
-    assert read(killed_dir) == read(clean_dir)
-
-
-# --- pilot decisions: 5-request ceiling, drift recheck, minimal W2 projection --------------------
-
-from ejs.services.expansion_replay import LIVE_MAX_REQUESTS, recheck_first_page
-from ejs.services.expansion_shadow import project_for_application_bridge
-
-PILOT = frozenset({(KPMG, "NL")})
-
-
-@pytest.fixture
-def pilot(monkeypatch):
-    import scripts.expansion_shadow as es
-    import ejs.services.expansion_replay as er
-    monkeypatch.setattr(er, "LIVE_APPROVED_PAIRS", PILOT)
-    monkeypatch.setattr(es, "LIVE_APPROVED_PAIRS", PILOT)
-
-
-def two_pages(second_total=150, second_ids=None):
-    ids = [f"k{n:03d}" for n in range(150)]
-    return {(KPMG, "nl", 0): feed("NL", total=150, ids=ids[:100]),
-            (KPMG, "nl", 100): feed("NL", offset=100, total=second_total, ids=second_ids or ids[100:])}
-
-
-def report_of(out):
-    return json.loads((out / store.REPORT_NAMES[0]).read_bytes())
-
-
-def test_pilot_makes_exactly_pages_plus_one_recheck_and_never_more_than_five(cli_inputs, pilot):
-    out, feed_ = cli_inputs[2] / "pilot", Feed(two_pages())
-    status = run_cli(cli_inputs, out, feed_, init=True)
+        run_cli(cli_inputs, out, Killed(two_pages()), init=True)
+    assert bundle_of(out)["evidence"]["in_flight"] == {"seq": 1, "reserved": 5}   # durable before the first GET
+    assert bundle_of(out)["listings"] == []
+    after = Feed(two_pages())
+    assert run_cli(cli_inputs, out, after) == 3                    # pair still pending, budget gone
+    assert after.urls == []                                        # uncertain attempts were charged in full
     report = report_of(out)
-    assert LIVE_MAX_REQUESTS == 5
-    assert len(feed_.urls) == 3 == report["network_requests"]
-    assert [urlparse(u).query for u in feed_.urls] == [
-        "country=nl&offset=0&limit=100", "country=nl&offset=100&limit=100", "country=nl&offset=0&limit=100"]
-    assert [r["status"] for r in report["request_log"]] == [200, 200, 200]
-    checks = report["snapshot_consistency"]["first_page_rechecks"]
-    assert [c["status"] for c in checks] == ["stable"] and report["snapshot_consistency"]["atomic_snapshot"] is False
-    assert report["listings_kept"] == 150 and report["coverage"]["counts"]["completed"] == 1
-    assert status == 3                       # 242 pairs outside the approved scope stay incomplete
+    assert report["request_accounting"]["uncertain_reserved"] == 5 and report["request_accounting"]["remaining"] == 0
+    assert report["request_accounting"]["invocations"] == [
+        {"seq": 1, "status": "interrupted_unverified", "reserved": 5, "requests": 0}]
+    assert bundle_of(out)["evidence"]["in_flight"] is None
+
+
+def test_a_live_bundle_without_evidence_or_with_tampered_evidence_is_refused(cli_inputs, pilot):
+    out = cli_inputs[2] / "x"
+    run_cli(cli_inputs, out, Feed(two_pages()), init=True)
+    path = out / store.BUNDLE_NAME
+    original = path.read_bytes()
+    data = json.loads(original)
+    for tamper in (lambda d: d.pop("evidence"),
+                   lambda d: d["evidence"]["invocations"][0]["requests"].extend([request()] * 3)):
+        broken = json.loads(original)
+        tamper(broken)
+        path.write_bytes((json.dumps(broken, separators=(",", ":")) + "\n").encode())
+        silent = Feed({})
+        with pytest.raises(SystemExit):
+            run_cli(cli_inputs, out, silent)
+        assert silent.urls == []                                    # refused before any request
+    path.write_bytes(original)
+    assert run_cli(cli_inputs, out, Feed({})) == 0
 
 
 def test_requests_never_exceed_five_even_when_every_call_fails(cli_inputs, pilot):
@@ -425,55 +655,51 @@ def test_drift_between_pages_stops_the_pair_and_the_run_exits_nonzero(cli_inputs
     assert run_cli(cli_inputs, out, Feed(two_pages(second_total=151)), init=True) == 1
     report = report_of(out)
     assert report["coverage"]["counts"]["failed"] == 1 and report["listings_kept"] == 100
-    with pytest.raises(ValueError, match="EXPANSION_PROJECTION_REFUSED"):
-        project_for_application_bridge(report)
+    assert project_for_application_bridge(report)["listings_kept"] == 0
 
 
-def test_recheck_drift_exits_nonzero_and_blocks_projection(cli_inputs, pilot):
-    pages = two_pages()
-    first = pages[(KPMG, "nl", 0)]
-    calls = {"n": 0}
-
-    class Moving(Feed):
-        def __call__(self, url, headers, timeout):
-            calls["n"] += 1
-            if calls["n"] == 3:                      # the recheck sees a shifted first page
-                return 200, feed("NL", total=151, ids=[f"k{n:03d}" for n in range(100)])
-            return super().__call__(url, headers, timeout)
-
-    out = cli_inputs[2] / "moving"
-    assert run_cli(cli_inputs, out, Moving(pages), init=True) == 1
-    report = report_of(out)
-    assert report["snapshot_consistency"]["first_page_rechecks"][0]["reason"] == "total_changed"
-    with pytest.raises(ValueError, match="EXPANSION_PROJECTION_REFUSED"):
-        project_for_application_bridge(report)
-
-
-def test_verified_projection_feeds_the_unchanged_bridge(cli_inputs, pilot):
-    out = cli_inputs[2] / "ok"
-    pages = {(KPMG, "nl", 0): feed("NL", total=2, ids=("744000000000001", "744000000000002"))}
-    run_cli(cli_inputs, out, Feed(pages), init=True)
-    projected = project_for_application_bridge(report_of(out))
-    assert projected["atomic_snapshot"] is False and projected["coverage_status"] == "incomplete"
-    prepared = prepare_application_report(projected)
-    assert [c["posting_id"] for c in prepared["candidates"]] == ["744000000000001", "744000000000002"]
-    assert prepared["executable"] is False and prepared["submit_authorized"] is False
-    assert {c["readiness"] for c in prepared["candidates"]} == {"missing_evidence"}
+def test_restart_after_interruption_equals_uninterrupted_run(cli_inputs, approved):
+    full = cli_inputs[2] / "full"
+    assert run_cli(cli_inputs, full, Feed(DAY1), init=True) == 0         # approved scope complete
+    interrupted = cli_inputs[2] / "interrupted"
+    assert run_cli(cli_inputs, interrupted, Feed({**DAY1, (DEVO, "nl", 0): 500}), init=True) == 1
+    report = report_of(interrupted)
+    assert report["coverage"]["counts"]["failed"] == 1 and report["listings_kept"] == 2
+    assert {e["tenant"]: e["status"] for e in report["employers"]}[KPMG] == "completed"
+    retry = Feed(DAY1)
+    assert run_cli(cli_inputs, interrupted, retry) == 1                  # failed tenant stays blocked
+    assert retry.urls == []
+    assert report_of(interrupted)["request_log"] == report["request_log"]
+    final = report_of(full)
+    assert final["listings_parsed"] == 4 and final["listings_kept"] == 3 and final["listings_duplicate"] == 1
+    assert {v["posting_id"] for v in final["vacancies"]} == {"a", "b", "c"}
+    # 3 pages + 3 first-page rechecks would be 6, so the 5-request ceiling leaves the last recheck unchecked
+    state = {(c["tenant"], c["country"]): c["status"] for c in final["snapshot_consistency"]["first_page_rechecks"]}
+    assert state == {(KPMG, "NL"): "stable", (DEVO, "NL"): "stable", (DEVO, "IE"): "not_checked"}
+    assert final["network_requests"] == 5 and final["transport_mode"] == "live_country_feed"
+    for path in full.iterdir():
+        assert path.stat().st_mode & 0o077 == 0
 
 
-@pytest.mark.parametrize("tamper", [
-    lambda r: r.update(transport_mode="offline_expansion"),
-    lambda r: r.update(execution_authorized=True),
-    lambda r: r["snapshot_consistency"].update(atomic_snapshot=True),
-    lambda r: r.update(listings_kept=r["listings_kept"] + 1),
-    lambda r: r["vacancies"][0]["discovery_evidence"].update(observation="synthetic_country_replay"),
-    lambda r: r.pop("snapshot_consistency"),
-    lambda r: r["snapshot_consistency"].update(first_page_rechecks=[]),   # e.g. report rebuilt after a resume
-])
-def test_projection_refuses_unverified_reports(cli_inputs, pilot, tamper):
-    out = cli_inputs[2] / "t"
-    run_cli(cli_inputs, out, Feed({(KPMG, "nl", 0): feed("NL", total=1, ids=("a",))}), init=True)
-    report = report_of(out)
-    tamper(report)
-    with pytest.raises(ValueError, match="EXPANSION_PROJECTION_REFUSED"):
-        project_for_application_bridge(report)
+def test_failed_second_page_commits_first_page_progress_only_once(cli_inputs, approved):
+    out = cli_inputs[2] / "out"
+    ids = [f"k{n:03d}" for n in range(150)]
+    pages = {**DAY1, (KPMG, "nl", 0): feed("NL", total=150, ids=ids[:100]),
+             (KPMG, "nl", 100): feed("NL", offset=100, total=150, ids=ids[100:])}
+    first = Feed({**pages, (KPMG, "nl", 100): 500})
+    run_cli(cli_inputs, out, first, init=True)                           # page 2 fails mid-pair
+    assert len(bundle_of(out)["listings"]) == 101                        # 100 KPMG + 1 Devoteam committed
+    assert first.urls.count(live_page_url(KPMG, "NL", 100)) == 1
+
+
+def test_daily_runs_use_separate_snapshots_and_never_touch_earlier_days(cli_inputs, approved):
+    day1, day2 = cli_inputs[2] / "2026-11-27", cli_inputs[2] / "2026-11-28"
+    run_cli(cli_inputs, day1, Feed(DAY1), init=True)
+    before = {p.name: p.read_bytes() for p in day1.iterdir() if p.name != store._LOCK_NAME}
+    changed = {**DAY1, (KPMG, "nl", 0): feed("NL", total=3, ids=("a", "b", "z"))}
+    run_cli(cli_inputs, day2, Feed(changed), init=True)               # a new day starts with its own budget
+    assert {p.name: p.read_bytes() for p in day1.iterdir() if p.name != store._LOCK_NAME} == before
+    ids = lambda d: {v["posting_id"] for v in report_of(d)["vacancies"]}
+    assert ids(day2) - ids(day1) == {"z"}
+    with pytest.raises(SystemExit):             # re-initializing an existing day is refused
+        run_cli(cli_inputs, day1, Feed(DAY1), init=True)

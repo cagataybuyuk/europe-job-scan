@@ -11,21 +11,30 @@ submits, writes forms, uploads candidate data or touches runtime, STOP, ledger o
 | `expansion_replay.live_page` | Converts a provider-shaped response into the existing replay page shape. The feed carries no tenant or country metadata and reports lowercase country codes, so tenant and country come from the request. A posting is relabelled only when it equals the requested country or tenant ignoring case. Everything else is rejected by the unchanged `_page` validator. The provider's offset, limit and total echo are kept and checked. |
 | `expansion_replay.live_replay_batch` | Same validation, 5/60 ceilings, tenant isolation and checkpoint semantics as `replay_batch` (both share `_replay`). Reads through an injected `HttpCarrier`. Requests only pairs in `LIVE_APPROVED_PAIRS`. A carrier that is tighter than the batch ceilings stops the batch without failing any pair. |
 | `LIVE_APPROVED_PAIRS` | **Pilot pair only:** `KPMGNederland` / `NL` (owner decision 26 Nov 2026). Any other pair needs a new reviewed approval. Per tenant the approved set must be a prefix of `COUNTRIES`, because checkpoint validation requires countries of one tenant to advance in order. Other shapes raise `EXPANSION_LIVE_SCOPE_INVALID`. |
-| `replay_private_batch(replay=...)` | The durable store accepts a replay callable, so the live path reuses the same owner-only lock, atomic bundle and report publication. |
-| `shadow_discovery.py --expansion-live` | Mutually exclusive with `--live`, `--fixture-dir` and `--expansion-fixtures`. Exits with `EXPANSION_LIVE_SCOPE_NOT_APPROVED` before any request while `LIVE_APPROVED_PAIRS` is empty. |
-| `build_expansion_report(live_requests=...)` | Marks `transport_mode: live_country_feed`, records the real feed URL as evidence and the per-employer request count of the invocation (`requests_scope: this_invocation`). `execution_authorized` stays `false`. |
+| `replay_private_batch(live=...)` | The durable store accepts a live callable, so the live path reuses the same owner-only lock, atomic bundle and report publication. It also persists request accounting and recheck evidence (see F02-01 below). |
+| `shadow_discovery.py --expansion-live` | Mutually exclusive with `--live`, `--fixture-dir` and `--expansion-fixtures`. Reads only `LIVE_APPROVED_PAIRS` (the pilot pair). With an empty set it exits with `EXPANSION_LIVE_SCOPE_NOT_APPROVED` before any request. |
+| `build_expansion_report(evidence=..., approved=...)` | Marks `transport_mode: live_country_feed`, records the real feed URL as evidence and builds request accounting and rechecks from the bundle's durable evidence only. `execution_authorized` stays `false`. |
 
 Added after owner decisions of 26 Nov 2026 (pilot `KPMGNederland` / `NL`, at most 5 public GET attempts,
 failures included, 1 s interval, no redirects, no authentication, no internal postings):
 
 | Area | Change |
 | --- | --- |
-| `LIVE_MAX_REQUESTS = 5` | Hard per-invocation ceiling. The CLI builds the carrier with it, so failed attempts count and nothing retries. |
+| `LIVE_MAX_REQUESTS = 5` | Hard per-invocation ceiling. The CLI builds the carrier from the invocation's durable reservation, so failed attempts count and nothing retries. |
 | `recheck_first_page` | After a pair completes, offset 0 is read once more. A changed `totalFound` or changed first-page identities is reported as `drift`; an unreadable page as `unreadable`; an exhausted budget as `not_checked`. One request is reserved for it. Any `drift` or `unreadable` check makes the run exit `1`. |
 | Pagination drift inside a run | Already fail-closed: changed total, wrong offset echo, repeated or overlapping IDs reject the page and block the tenant. |
 | `snapshot_consistency` | Every live report states `atomic_snapshot: false`. Completeness means observed pages and totals only. A stable recheck does not prove unobserved pages did not move. |
-| `request_log` | Each report lists URL, status and size of every request of the invocation. |
-| `project_for_application_bridge` | Minimal verified view for the unchanged W2 bridge (`schema`, `listings_kept`, `vacancies`, plus provenance fields). Refuses synthetic or executable reports, failed pairs, non-stable rechecks and count mismatches with `EXPANSION_PROJECTION_REFUSED`. |
+| `request_log` | Each report lists URL, status, size and invocation number of every request ever made for the bundle. |
+| `project_for_application_bridge` | Minimal view for the unchanged W2 bridge (`schema`, `listings_kept`, `vacancies`, plus provenance fields). Row-level: see F02-02 below. Refuses synthetic or executable reports, atomic-snapshot claims and count mismatches with `EXPANSION_PROJECTION_REFUSED`. |
+
+Added after the independent review of PR #133 (head `0d92791`):
+
+| Finding | Change |
+| --- | --- |
+| **F02-01** durable evidence | The private bundle gains an `evidence` section, written in the same atomic replace as the checkpoint and listings. It holds every invocation (reservation, status, each request's URL/status/size) and an append-only list of per-pair first-page rechecks. A report is always rebuilt from it, so a zero-request resume keeps the request log, accounting and recheck results. The effective recheck of a pair is its worst recorded result: `drift` and `unreadable` are sticky and a later `stable` never hides them. A resume exits `1` while drift stands. A pair left `not_checked` (budget exhausted) is rechecked by a later invocation, and the history keeps both entries. |
+| **F02-01** budget and in-flight attempts | The 5-attempt budget is per bundle (one day's snapshot) and cumulative across invocations (`LIVE_BUNDLE_MAX_REQUESTS`); the per-invocation ceiling stays 5. Before any request the invocation's reservation is published durably as `in_flight`. If the process dies, the next run records that invocation as `interrupted_unverified` and charges the whole reservation, so unrecorded attempts can never exceed the budget. With no work left, no reservation is made and the bundle is not rewritten. A live bundle without valid evidence (for example one written before this change) is refused before any request. |
+| **F02-02** projection | Rows are projected only when every country pair they were observed in is `completed` and has a stable recheck. Rows from pending, failed, blocked, unapproved or drifting pairs, and rows that were also seen in such a pair, are excluded and counted in `excluded_rows` with a reason. Previously only completed pairs were checked, so accepted rows of a pending pair could pass. |
+| Coverage | `coverage.status` and `coverage.counts` are measured over the approved scope; other pairs are `not_approved` and listed in `coverage.research_scope` (`total_pairs`, `approved_pairs`, `completed_pairs`, `not_approved_pairs`, `research_coverage_complete`). A finished pilot is therefore `completed`, and research coverage is never overstated. Synthetic reports keep their previous shape. |
 
 Preserved unchanged: normalization (`parse_smartrecruiters`), exact `(tenant, posting_id)` deduplication,
 cursor checkpoint, private bundle, report builder, the four-employer `--live` gate, and the HTTP carrier's
@@ -57,13 +66,13 @@ A same-total change of unseen IDs between pages is still undetectable without fe
 
 | # | Criterion | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | Approved exact employer/country scope | **Pilot approved only** | `KPMGNederland` / `NL`. Remaining 242 pairs are not approved. |
-| 2 | Verified country filter, pagination and identity semantics | **Verified for the pilot pair; not for others** | Documentation confirmed. Live behaviour unverified. Fail-closed tests: `tests/test_expansion_live.py` (drift, wrong country, wrong tenant, offset, total, duplicates). |
+| 1 | Approved exact employer/country scope | **Pilot approved only** | `KPMGNederland` / `NL`. Remaining 242 pairs are reported as `not_approved`, separate from coverage of the approved scope. |
+| 2 | Verified country filter, pagination and identity semantics | **Verified for the pilot pair; not for others** | Documentation confirmed; one live pair observed (see pilot evidence). Fail-closed tests: `tests/test_expansion_live.py` (drift, wrong country, wrong tenant, offset, total, duplicates). |
 | 3 | Bounded allowlisted read-only collection on the existing engine | **Run once live (3 requests)** | GET-only carrier, host allowlist, 5/60 ceilings and 1 s floor reused. Tests assert no request outside the approved set and no overrun. |
 | 4 | Real fresh normalized listings, measured coverage and completeness | **Partial** | 197 listings, six-field ratio 1.0, one of 243 pairs. Freshness of each vacancy is unverified. |
 | 5 | No duplicate identities | **Met (synthetic)** | Cross-country and cross-batch dedup tests. Not measured on a real feed. |
-| 6 | Durable restart and per-employer failure isolation | **Met (provider-shaped synthetic)** | HTTP 503, malformed body and process-kill tests. Real-feed evidence is open. |
-| 7 | Downstream-compatible output, distinguished from synthetic | **Met, with owner decision** | Report says `live_country_feed`. The W2 bridge still rejects `EJS-EXPANSION-SHADOW-REPORT-1` on purpose; an explicit projection to `EJS-SHADOW-REPORT-2` is accepted and tested. |
+| 6 | Durable restart and per-employer failure isolation | **Met (provider-shaped synthetic)** | HTTP 503, malformed body, in-flight kill, resume with preserved evidence, sticky drift and cumulative budget tests. A recovery after a real interruption is not exercised live. |
+| 7 | Downstream-compatible output, distinguished from synthetic | **Met** | Report says `live_country_feed`. The W2 bridge is unchanged and still rejects `EJS-EXPANSION-SHADOW-REPORT-1`; the row-level verified projection to `EJS-SHADOW-REPORT-2` is accepted and tested. |
 | 8 | Repeatable daily collection without application writes | **Met (synthetic)** | One directory per day. Earlier days stay byte-identical. Re-initializing a used day is refused. |
 
 ## Pilot evidence (26 Nov 2026, `KPMGNederland` / `NL`)
@@ -76,27 +85,33 @@ Output stayed in an owner-only directory outside the repository; no candidate da
 * Result: 197 unique listings, 0 duplicates, 0 unkeyed, all six fields present, every posting `location.country == nl` and `company.identifier == KPMGNederland`. This equals the historical W3.4 count of 197, which is consistent but is not evidence of completeness.
 * Drift: first-page recheck `stable`. This does not make the read an atomic snapshot (`atomic_snapshot: false`).
 * Output: all 197 rows are `needs_user` / `vacancy_evidence_missing`; no eligibility is asserted. The verified projection passed the unchanged W2 bridge: 197 candidates, all `missing_evidence`, `executable: false`, `submit_authorized: false`.
-* Recovery: a second invocation without `--expansion-init` made 0 requests and left the bundle byte-identical. It rebuilt the report without the first run's request log and recheck, so the projection now refuses that report. Keep the invocation's report if a projection is needed.
+* Recovery (as run, before F02-01): a second invocation without `--expansion-init` made 0 requests and left the bundle byte-identical, but rebuilt the report without that invocation's request log and recheck. F02-01 fixes this: the evidence now lives in the bundle. The pilot output itself was written before the fix and has no `evidence` section, so the current CLI refuses to resume it; it is not re-run and it is not needed for later days.
 
 ## Daily collection and recovery
 
-Initialize one directory per day (for example `…/2026-11-27`) with `--expansion-live --expansion-init`.
-After an interruption rerun the same command without `--expansion-init`:
+Initialize one directory per day (for example `…/2026-11-27`) with `--expansion-live --expansion-init`. Each day
+has its own bundle and its own 5-attempt budget. After an interruption rerun the same command without
+`--expansion-init`:
 
-* A kill before the bundle commit leaves no bundle. Initialize again; pages are idempotent GETs.
-* A kill or failure after the commit resumes from the saved cursors. Completed pairs are not requested again.
-* A failed tenant stays blocked for the day. Other tenants continue. Exit code `1` means a failure, `3` incomplete, `0` complete.
+* A kill before the first reservation leaves no bundle. Initialize again.
+* A kill during an invocation leaves a bundle with an `in_flight` reservation. The next run charges it in full
+  (`interrupted_unverified`), keeps all validated progress and uses only what is left of the budget.
+* A kill or failure after a commit resumes from the saved cursors. Completed pairs are not requested again.
+* A failed tenant stays blocked for the day. Other tenants continue.
+* Exit codes: `1` a failed pair or standing drift, `3` approved scope incomplete, `0` approved scope complete.
+  `0` says nothing about the 242 unapproved pairs.
 * The next day uses a new directory. Compare `vacancies[].posting_id` across the two reports to find new listings.
 
-Request counts in a report describe the latest invocation only.
+Request counts in a report are cumulative for the bundle; per-invocation counts are in `request_accounting.invocations`.
 
 ## Blockers and owner decisions
 
-1. **Scope approval.** Name the exact tenant/country pairs, as a prefix of `COUNTRIES` per tenant, and the request ceilings. The current four-employer gate lists only `Rituals1` for SmartRecruiters, which is not in the 27-employer research scope. Verifying the filter therefore needs an explicit read-only approval; this work made no live request.
-2. **Live verification run.** A small approved pilot (one tenant, one country, up to five requests) should confirm the lowercase code, filter exactness, total stability and the response shape before widening. Record only status codes, counts and execution IDs.
+1. **Scope beyond the pilot.** Only `KPMGNederland` / `NL` is approved. Any further pair needs an owner decision naming the pairs (per tenant a prefix of `COUNTRIES`), the per-invocation ceiling and the daily bundle budget (currently 5 attempts).
+2. **Remaining live unknowns.** One pair was observed. Whether the lowercase code is required or only accepted, filter exactness for multi-location or remote postings, and total stability across tenants are not established.
 3. **Bridge intake.** Decided: the W2 contract is unchanged and `project_for_application_bridge` is the minimal verified projection.
 4. **Same-total drift.** Only the first page is re-read. Drift deeper in the feed is not observable inside the request budget, so no atomic or full-snapshot completeness is ever claimed.
-5. **Release.** Merge into `main` needs release approval. Exact-head CI on the pushed branch is not yet observed.
+5. **Vacancy freshness and suitability.** Whether a listing is still open, and eligibility, belong to later function gates.
+6. **Release.** Merge into `main` needs release approval. Exact-head CI is tracked on PR #133.
 
 ## Validation
 

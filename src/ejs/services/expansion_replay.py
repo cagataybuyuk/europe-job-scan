@@ -62,6 +62,10 @@ LIVE_APPROVED_PAIRS: frozenset[tuple[str, str]] = frozenset({("KPMGNederland", "
 LIVE_FEED_HOST = "api.smartrecruiters.com"
 # Total GET attempts (failures included) one live invocation may make; the owner-approved pilot ceiling.
 LIVE_MAX_REQUESTS = 5
+# Cumulative GET attempts one private bundle (one day's snapshot) may spend across all its invocations.
+# Owner-approved pilot total; widening it is an owner decision.
+LIVE_BUNDLE_MAX_REQUESTS = LIVE_MAX_REQUESTS
+EVIDENCE_VERSION = 1
 _POSTING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
@@ -162,6 +166,113 @@ def _page(cursor: Cursor, payload: object) -> tuple[Cursor, list[dict[str, str]]
     new_offset = offset + len(items)
     return replace(cursor, offset=new_offset, total=total, seen=cursor.seen + ids,
                    status="complete" if new_offset == total else "pending"), page
+
+
+@dataclass(frozen=True)
+class LiveObservation:
+    """What one live invocation observed: attempted requests and first-page rechecks."""
+    requests: tuple[dict, ...] = ()
+    rechecks: tuple[dict, ...] = ()
+
+
+_RECHECK_STATUSES = ("stable", "drift", "unreadable", "not_checked", "not_applicable")
+
+
+def empty_evidence() -> dict:
+    """Durable live evidence kept in the same atomic private bundle as the checkpoint."""
+    return {"version": EVIDENCE_VERSION, "budget": LIVE_BUNDLE_MAX_REQUESTS, "invocations": [],
+            "rechecks": [], "in_flight": None}
+
+
+def _natural(value: object, limit: int | None = None) -> bool:
+    return type(value) is int and value >= 0 and (limit is None or value <= limit)
+
+
+def validate_evidence(evidence: object) -> None:
+    """Reject evidence that no sequence of recorded invocations could have produced."""
+    if (type(evidence) is not dict
+            or evidence.keys() != {"version", "budget", "invocations", "rechecks", "in_flight"}
+            or evidence["version"] != EVIDENCE_VERSION or not _natural(evidence["budget"], LIVE_BUNDLE_MAX_REQUESTS)
+            or type(evidence["invocations"]) is not list or type(evidence["rechecks"]) is not list):
+        raise ValueError(_ERROR)
+    for position, call in enumerate(evidence["invocations"], 1):
+        if (type(call) is not dict or call.keys() != {"seq", "status", "reserved", "requests"}
+                or call["seq"] != position or call["status"] not in ("completed", "interrupted_unverified")
+                or not _natural(call["reserved"], LIVE_MAX_REQUESTS) or type(call["requests"]) is not list
+                or len(call["requests"]) > call["reserved"]
+                or (call["status"] == "interrupted_unverified" and call["requests"])):
+            raise ValueError(_ERROR)
+        for request in call["requests"]:
+            if (type(request) is not dict or request.keys() != {"url", "status", "bytes"}
+                    or type(request["url"]) is not str or not request["url"].isprintable()
+                    or len(request["url"]) > 300 or type(request["status"]) not in (int, str)
+                    or not _natural(request["bytes"])):
+                raise ValueError(_ERROR)
+    in_flight = evidence["in_flight"]
+    if in_flight is not None and (
+            type(in_flight) is not dict or in_flight.keys() != {"seq", "reserved"}
+            or in_flight["seq"] != len(evidence["invocations"]) + 1
+            or not 0 < in_flight["reserved"] <= LIVE_MAX_REQUESTS):
+        raise ValueError(_ERROR)
+    for check in evidence["rechecks"]:
+        if (type(check) is not dict or check.keys() != {"seq", "tenant", "country", "status", "reason"}
+                or (check["tenant"], check["country"]) not in _SCOPE
+                or check["status"] not in _RECHECK_STATUSES or type(check["reason"]) is not str
+                or not _natural(check["seq"]) or not 0 < check["seq"] <= len(evidence["invocations"])
+                or evidence["invocations"][check["seq"] - 1]["status"] != "completed"):
+            raise ValueError(_ERROR)
+    if spent_requests(evidence) > evidence["budget"]:
+        raise ValueError(_ERROR)
+
+
+def spent_requests(evidence: dict) -> int:
+    """Attempts spent so far. An interrupted or in-flight invocation is charged its full reservation."""
+    spent = sum(len(c["requests"]) if c["status"] == "completed" else c["reserved"]
+                for c in evidence["invocations"])
+    return spent + (evidence["in_flight"]["reserved"] if evidence["in_flight"] else 0)
+
+
+def remaining_requests(evidence: dict) -> int:
+    return max(0, min(evidence["budget"], LIVE_BUNDLE_MAX_REQUESTS) - spent_requests(evidence))
+
+
+def effective_rechecks(evidence: dict) -> dict[tuple[str, str], dict[str, str]]:
+    """Worst recorded recheck per pair. Drift and unreadable are sticky: a later stable result never hides them."""
+    order = {"drift": 0, "unreadable": 1, "stable": 2, "not_checked": 3, "not_applicable": 4}
+    best: dict[tuple[str, str], dict[str, str]] = {}
+    for check in evidence["rechecks"]:
+        pair = (check["tenant"], check["country"])
+        if pair not in best or order[check["status"]] < order[best[pair]["status"]]:
+            best[pair] = {"status": check["status"], "reason": check["reason"]}
+    return best
+
+
+def settle_in_flight(evidence: dict) -> dict:
+    """Recover from a process that died mid-invocation: its whole reservation counts as spent."""
+    if evidence["in_flight"] is None:
+        return evidence
+    call = {"seq": evidence["in_flight"]["seq"], "status": "interrupted_unverified",
+            "reserved": evidence["in_flight"]["reserved"], "requests": []}
+    return {**evidence, "invocations": [*evidence["invocations"], call], "in_flight": None}
+
+
+def begin_invocation(evidence: dict, reserved: int) -> dict:
+    """Evidence to publish durably before any request of the invocation is sent."""
+    if evidence["in_flight"] is not None or not 0 < reserved <= remaining_requests(evidence):
+        raise ValueError(_ERROR)
+    return {**evidence, "in_flight": {"seq": len(evidence["invocations"]) + 1, "reserved": reserved}}
+
+
+def record_invocation(evidence: dict, observation: LiveObservation) -> dict:
+    """Close the in-flight invocation with what it actually did; prior rechecks are only ever appended to."""
+    in_flight = evidence["in_flight"]
+    seq = in_flight["seq"]
+    call = {"seq": seq, "status": "completed", "reserved": in_flight["reserved"],
+            "requests": [{k: r[k] for k in ("url", "status", "bytes")} for r in observation.requests]}
+    checks = [{"seq": seq, "tenant": c["tenant"], "country": c["country"],
+               "status": c["status"], "reason": c["reason"]} for c in observation.rechecks]
+    return {**evidence, "invocations": [*evidence["invocations"], call],
+            "rechecks": [*evidence["rechecks"], *checks], "in_flight": None}
 
 
 def live_page_url(tenant: str, country: str, offset: int) -> str:
