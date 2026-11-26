@@ -1,12 +1,16 @@
 """Offline composition of the current-approval, compiler and fact gates.
 
 The caller supplies authenticated CURRENT approval state independently of the
-manifest writer. This is not a publisher, file reader, runtime or authority.
+manifest writer. This module provides byte and private local file entry points.
 """
 from datetime import datetime
+from pathlib import Path
 
-from ejs.services.current_fact_approval import resolve_current_fact_inputs
-from ejs.services.execution_manifest import load_execution_manifest
+from ejs.services.current_fact_approval import (
+    MAX_APPROVAL_BYTES, MAX_REGISTRY_BYTES, MAX_SNAPSHOT_BYTES, resolve_current_fact_inputs,
+)
+from ejs.services.execution_manifest import MAX_MANIFEST_BYTES, load_execution_manifest
+from ejs.services.private_source_files import _read_private_sources
 from ejs.services.reviewed_manifest_compiler import compile_reviewed_manifest
 
 ERROR = "CURRENT_MANIFEST_REVIEW_REQUIRED"
@@ -50,4 +54,38 @@ def compile_current_manifest(
     del approval_raw, template_raw, registry_raw, snapshot_raw
     del expected_approval_sha256, expected_generation, expected_profile_version, now
     pins = compiled = manifest = None
+    raise PermissionError(ERROR) from None
+
+
+def compile_current_manifest_from_files(
+    approval_path: str | Path, template_path: str | Path,
+    registry_path: str | Path, snapshot_path: str | Path, *,
+    expected_approval_sha256: str, expected_generation: int,
+    expected_profile_version: str, now: datetime,
+) -> bytes:
+    """Compile private local sources using the independently authenticated current context.
+
+    Paths must be absolute and symlink-free, and each source must live in an
+    owner-only directory. The current approval pin is supplied by the caller.
+    The verified approval record provides the other three exact-byte pins.
+    Current-state retrieval, publication and point-of-use checks belong to the
+    authorized caller.
+    """
+    try:
+        return compile_current_manifest(
+            *_read_private_sources((
+                (approval_path, MAX_APPROVAL_BYTES), (template_path, MAX_MANIFEST_BYTES),
+                (registry_path, MAX_REGISTRY_BYTES), (snapshot_path, MAX_SNAPSHOT_BYTES),
+            )),
+            expected_approval_sha256=expected_approval_sha256,
+            expected_generation=expected_generation,
+            expected_profile_version=expected_profile_version, now=now,
+        )
+    except (OSError, ValueError, TypeError, AttributeError, NotImplementedError,
+            OverflowError, RecursionError):
+        pass
+    # Keep private paths, pins, payloads and subordinate exceptions out of the
+    # public traceback. The caller is responsible for its own diagnostic frames.
+    del approval_path, template_path, registry_path, snapshot_path
+    del expected_approval_sha256, expected_generation, expected_profile_version, now
     raise PermissionError(ERROR) from None

@@ -133,6 +133,7 @@ jobs:
           tests/test_trusted_fact_snapshot.py
           tests/test_current_fact_approval.py
           tests/test_current_manifest_compiler.py
+          tests/test_current_manifest_local_sources.py
           tests/test_application_bridge.py
           tests/test_application_batch.py
           tests/test_w3_2_1_redirect_diagnostics.py
