@@ -127,6 +127,10 @@ def project_for_application_bridge(report: dict) -> dict:
             or report.get("listings_kept") != len(vacancies)
             or any(c.get("status") not in ("stable", "not_applicable")
                    for c in consistency.get("first_page_rechecks", ()))
+            or not {(p["tenant"], p["country"]) for p in coverage.get("pairs", ())
+                    if p["status"] == "completed" and p["accepted_listings"]}
+            <= {(c.get("tenant"), c.get("country")) for c in consistency.get("first_page_rechecks", ())
+                if c.get("status") == "stable"}
             or any(not isinstance(v.get("discovery_evidence"), dict)
                    or v["discovery_evidence"].get("observation") != "live_country_feed" for v in vacancies)):
         raise ValueError("EXPANSION_PROJECTION_REFUSED")

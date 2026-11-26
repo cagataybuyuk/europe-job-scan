@@ -57,14 +57,26 @@ A same-total change of unseen IDs between pages is still undetectable without fe
 
 | # | Criterion | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | Approved exact employer/country scope | **Open (owner)** | `LIVE_APPROVED_PAIRS` is empty by design. |
-| 2 | Verified country filter, pagination and identity semantics | **Partial** | Documentation confirmed. Live behaviour unverified. Fail-closed tests: `tests/test_expansion_live.py` (drift, wrong country, wrong tenant, offset, total, duplicates). |
-| 3 | Bounded allowlisted read-only collection on the existing engine | **Implemented, not run live** | GET-only carrier, host allowlist, 5/60 ceilings and 1 s floor reused. Tests assert no request outside the approved set and no overrun. |
-| 4 | Real fresh normalized listings, measured coverage and completeness | **Open** | Needs criterion 1. Report already emits per-pair coverage and the six-field completeness ratio. |
+| 1 | Approved exact employer/country scope | **Pilot approved only** | `KPMGNederland` / `NL`. Remaining 242 pairs are not approved. |
+| 2 | Verified country filter, pagination and identity semantics | **Verified for the pilot pair; not for others** | Documentation confirmed. Live behaviour unverified. Fail-closed tests: `tests/test_expansion_live.py` (drift, wrong country, wrong tenant, offset, total, duplicates). |
+| 3 | Bounded allowlisted read-only collection on the existing engine | **Run once live (3 requests)** | GET-only carrier, host allowlist, 5/60 ceilings and 1 s floor reused. Tests assert no request outside the approved set and no overrun. |
+| 4 | Real fresh normalized listings, measured coverage and completeness | **Partial** | 197 listings, six-field ratio 1.0, one of 243 pairs. Freshness of each vacancy is unverified. |
 | 5 | No duplicate identities | **Met (synthetic)** | Cross-country and cross-batch dedup tests. Not measured on a real feed. |
 | 6 | Durable restart and per-employer failure isolation | **Met (provider-shaped synthetic)** | HTTP 503, malformed body and process-kill tests. Real-feed evidence is open. |
 | 7 | Downstream-compatible output, distinguished from synthetic | **Met, with owner decision** | Report says `live_country_feed`. The W2 bridge still rejects `EJS-EXPANSION-SHADOW-REPORT-1` on purpose; an explicit projection to `EJS-SHADOW-REPORT-2` is accepted and tested. |
 | 8 | Repeatable daily collection without application writes | **Met (synthetic)** | One directory per day. Earlier days stay byte-identical. Re-initializing a used day is refused. |
+
+## Pilot evidence (26 Nov 2026, `KPMGNederland` / `NL`)
+
+One invocation of `--expansion-live --expansion-init --expansion-max-pages 5` from head `01240f9`.
+Output stayed in an owner-only directory outside the repository; no candidate data was involved.
+
+* Requests: **3** of 5 (all HTTP 200, no retry, no redirect): `offset=0` (259,658 bytes), `offset=100` (257,057 bytes) and one first-page recheck `offset=0` (259,658 bytes, identical size).
+* Pagination: `totalFound` 197 on both pages, offsets echoed 0 and 100, 100 + 97 postings, no overlap, no duplicate ID.
+* Result: 197 unique listings, 0 duplicates, 0 unkeyed, all six fields present, every posting `location.country == nl` and `company.identifier == KPMGNederland`. This equals the historical W3.4 count of 197, which is consistent but is not evidence of completeness.
+* Drift: first-page recheck `stable`. This does not make the read an atomic snapshot (`atomic_snapshot: false`).
+* Output: all 197 rows are `needs_user` / `vacancy_evidence_missing`; no eligibility is asserted. The verified projection passed the unchanged W2 bridge: 197 candidates, all `missing_evidence`, `executable: false`, `submit_authorized: false`.
+* Recovery: a second invocation without `--expansion-init` made 0 requests and left the bundle byte-identical. It rebuilt the report without the first run's request log and recheck, so the projection now refuses that report. Keep the invocation's report if a projection is needed.
 
 ## Daily collection and recovery
 

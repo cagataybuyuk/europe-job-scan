@@ -468,6 +468,7 @@ def test_verified_projection_feeds_the_unchanged_bridge(cli_inputs, pilot):
     lambda r: r.update(listings_kept=r["listings_kept"] + 1),
     lambda r: r["vacancies"][0]["discovery_evidence"].update(observation="synthetic_country_replay"),
     lambda r: r.pop("snapshot_consistency"),
+    lambda r: r["snapshot_consistency"].update(first_page_rechecks=[]),   # e.g. report rebuilt after a resume
 ])
 def test_projection_refuses_unverified_reports(cli_inputs, pilot, tamper):
     out = cli_inputs[2] / "t"
