@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline, read-only acceptance check for the bounded FUNCTION-02 KPMGNederland/NL live bundle.
+"""Offline, read-only acceptance check for the explicitly scoped FUNCTION-02 live bundle.
 
   PYTHONPATH=src python scripts/function02_acceptance_check.py --bundle-dir <private bundle dir> --expect-invocations 2
 
@@ -15,22 +15,31 @@ import sys
 from pathlib import Path
 
 from ejs.services.application_bridge import prepare_application_report
-from ejs.services.expansion_replay import LIVE_BUNDLE_MAX_REQUESTS, validate_evidence
+from ejs.services.expansion_replay import LIVE_BUNDLE_MAX_REQUESTS, VERSION1_APPROVED_PAIRS, validate_evidence
 from ejs.services.expansion_shadow import SCHEMA, project_for_application_bridge
 
 PAIR = ("KPMGNederland", "NL")
-_URL = re.compile(r"https://api\.smartrecruiters\.com/v1/companies/KPMGNederland/postings"
-                  r"\?country=nl&offset=\d+&limit=100")
 
 
-def check(report: dict, bundle: dict, expect_invocations: int | None) -> dict[str, bool]:
+def check(report: dict, bundle: dict, expect_invocations: int | None, *,
+          scope: str | None = None) -> dict[str, bool]:
     evidence = bundle.get("evidence")
     validate_evidence(evidence)
     log = report["request_log"]
     pairs = {(p["tenant"], p["country"]): p for p in report["coverage"]["pairs"]}
     scoped = [pair for pair, p in pairs.items() if p["status"] != "not_approved"]
-    pair = pairs[PAIR]
-    ids = [v["posting_id"] for v in report["vacancies"]]
+    expected = VERSION1_APPROVED_PAIRS if scope == "version1-nl-ie" else frozenset({PAIR})
+    if scope not in (None, "version1-nl-ie"):
+        raise ValueError("unknown_scope")
+    selected = [pairs[p] for p in expected]
+    rows = report["vacancies"]
+    ids = [(v["tenant"], v["posting_id"]) for v in rows]
+    memberships = [(v["tenant"], country) for v in rows for country in v["discovery_evidence"]["countries"]]
+    allowed_urls = [re.compile(r"https://api\.smartrecruiters\.com/v1/companies/" + re.escape(t) +
+                               r"/postings\?country=" + re.escape(c.lower()) + r"&offset=\d+&limit=100")
+                    for t, c in expected]
+    stable = {(c["tenant"], c["country"]) for c in report["snapshot_consistency"]["first_page_rechecks"]
+              if c["status"] == "stable"}
     projected = project_for_application_bridge(report)
     prepared = prepare_application_report(projected)
     calls = evidence["invocations"]
@@ -38,20 +47,23 @@ def check(report: dict, bundle: dict, expect_invocations: int | None) -> dict[st
         "live_report_not_executable": (report["schema"] == SCHEMA and report["transport_mode"] == "live_country_feed"
                                        and report["execution_authorized"] is False
                                        and report["snapshot_consistency"]["atomic_snapshot"] is False),
-        "scope_is_exactly_the_pilot_pair": scoped == [PAIR],
-        "pair_completed_and_acceptance_ready": pair["status"] == "completed" and report["acceptance"]["ready"] is True,
+        "scope_is_exactly_the_pilot_pair": set(scoped) == expected and len(scoped) == len(expected),
+        "pair_completed_and_acceptance_ready": all(p["status"] == "completed" for p in selected)
+                                               and report["acceptance"]["ready"] is True,
         "requests_within_total_budget": 0 < len(log) == report["network_requests"] <= LIVE_BUNDLE_MAX_REQUESTS,
-        "every_request_is_the_approved_get": all(_URL.fullmatch(r["url"]) for r in log),
+        "every_request_is_the_approved_get": all(any(pattern.fullmatch(r["url"]) for pattern in allowed_urls) for r in log),
         "every_request_returned_200": all(r["status"] == 200 for r in log),
         "no_interrupted_or_inflight_attempt": (evidence["in_flight"] is None
                                                and all(c["status"] == "completed" for c in calls)),
         "invocation_count_as_expected": expect_invocations is None or len(calls) == expect_invocations,
-        "evidence_matches_report": sum(len(c["requests"]) for c in calls) == len(log),
-        "stable_first_page_recheck": any(c["tenant"] == PAIR[0] and c["country"] == PAIR[1] and c["status"] == "stable"
-                                         for c in report["snapshot_consistency"]["first_page_rechecks"]),
+        "evidence_matches_report": [{"invocation": c["seq"], **req} for c in calls for req in c["requests"]] == log,
+        "stable_first_page_recheck": all((p["tenant"], p["country"]) in stable for p in selected if p["accepted_listings"]),
         "listings_unique_and_match_declared_total": (len(ids) == len(set(ids)) == report["listings_kept"]
-                                                     == pair["accepted_listings"] == pair["declared_total"] > 0),
-        "every_listing_observed_in_nl": all(v["discovery_evidence"]["countries"] == ["NL"] for v in report["vacancies"]),
+             and (scope is not None or len(ids) > 0)
+             and all(p["accepted_listings"] == p["declared_total"] == memberships.count((p["tenant"], p["country"]))
+                     for p in selected)),
+        "every_listing_observed_in_approved_scope": (all(v["discovery_evidence"]["countries"] for v in rows)
+                                                       and all(pair in expected for pair in memberships)),
         "projection_keeps_every_row": (projected["excluded_rows"]["count"] == 0
                                        and projected["listings_kept"] == report["listings_kept"]),
         "w2_bridge_non_executable": (prepared["candidate_count"] == projected["listings_kept"]
@@ -63,12 +75,13 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--bundle-dir", required=True)
     ap.add_argument("--expect-invocations", type=int)
+    ap.add_argument("--scope", choices=("version1-nl-ie",))
     a = ap.parse_args(argv)
     try:
         directory = Path(a.bundle_dir)
         report = json.loads((directory / "expansion-report.json").read_bytes())
         bundle = json.loads((directory / "expansion-replay.json").read_bytes())
-        results = check(report, bundle, a.expect_invocations)
+        results = check(report, bundle, a.expect_invocations, scope=a.scope)
     except (OSError, ValueError, KeyError, TypeError, RecursionError):
         print("ACCEPTANCE_INPUT_UNREADABLE", file=sys.stderr)
         return 2
