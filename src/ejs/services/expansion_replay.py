@@ -153,7 +153,7 @@ def _page(cursor: Cursor, payload: object) -> tuple[Cursor, list[dict[str, str]]
                    status="complete" if new_offset == total else "pending"), page
 
 
-def replay_batch(checkpoint: Checkpoint, fixtures: dict[tuple[str, str, int], dict],
+def replay_batch(checkpoint: Checkpoint, fixtures: dict[tuple[str, str, int], object],
                  *, max_pages: int = MAX_REQUESTS_PER_RUN,
                  max_per_employer: int = MAX_PAGES_PER_EMPLOYER) -> ReplayResult:
     """Consume only supplied synthetic pages under the existing 5/60 ceilings.
