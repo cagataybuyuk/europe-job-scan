@@ -7,7 +7,7 @@ never a filter or a claim of current completeness.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Mapping
+import re
 
 from ejs.services.discovery import (
     AtsClass, BadPayloadError, DiscoveryError, PAGE_SIZE,
@@ -50,6 +50,8 @@ RESEARCH = (
 _SCOPE = tuple((tenant, country) for _, tenant, _, _ in RESEARCH for country in COUNTRIES)
 _NAMES = {tenant: name for name, tenant, _, _ in RESEARCH}
 _ERROR = "EXPANSION_CHECKPOINT_REVIEW_REQUIRED"
+_PAGE_ERROR = "page_review_required"
+_POSTING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 @dataclass(frozen=True)
@@ -82,72 +84,89 @@ def initial_checkpoint() -> Checkpoint:
     return Checkpoint(SCOPE_VERSION, tuple(Cursor(*pair) for pair in _SCOPE))
 
 
-def _validate(checkpoint: Checkpoint) -> None:
+def validate_checkpoint(checkpoint: Checkpoint) -> None:
+    """Reject cursors that could not result from replaying this scope."""
     if (type(checkpoint) is not Checkpoint or checkpoint.scope_version != SCOPE_VERSION
             or type(checkpoint.cursors) is not tuple
             or len(checkpoint.cursors) != len(_SCOPE)):
         raise ValueError(_ERROR)
+    incomplete_tenants: set[str] = set()
     for c, pair in zip(checkpoint.cursors, _SCOPE):
         if (type(c) is not Cursor or (c.tenant, c.country) != pair
                 or type(c.offset) is not int or c.offset < 0
                 or type(c.seen) is not tuple or len(c.seen) != c.offset
-                or any(type(x) is not str or not x or len(x) > 128
-                       or not x.isascii() or not all(ch.isalnum() or ch in "_-" for ch in x)
-                       for x in c.seen)
+                or any(type(x) is not str or not _POSTING_ID.fullmatch(x) for x in c.seen)
                 or len(set(c.seen)) != len(c.seen)
                 or (c.total is not None and
                     (type(c.total) is not int or c.total < c.offset))
                 or (c.total is None and c.offset != 0)
                 or c.status not in ("pending", "complete", "error")
                 or (c.status == "complete" and c.total != c.offset)
-                or (c.status == "pending" and c.total == c.offset)
-                or (c.status == "error") != (c.error is not None)):
+                or (c.status != "complete" and c.total is not None
+                    and not 0 < c.offset < c.total)
+                or c.error != (_PAGE_ERROR if c.status == "error" else None)
+                or (c.tenant in incomplete_tenants and c != Cursor(*pair))):
             raise ValueError(_ERROR)
+        if c.status != "complete":
+            incomplete_tenants.add(c.tenant)
 
 
 def _page(cursor: Cursor, payload: object) -> tuple[Cursor, list[dict[str, str]]]:
     """Validate one synthetic country page atomically, never advance on drift."""
-    if not isinstance(payload, dict):
+    if type(payload) is not dict:
         raise BadPayloadError("invalid_page")
+    if payload.get("tenant") != cursor.tenant or payload.get("country") != cursor.country:
+        raise BadPayloadError("fixture_scope_mismatch")
     total, offset, limit = (payload.get(k) for k in ("totalFound", "offset", "limit"))
     items = payload.get("content")
     if (not all(type(n) is int and n >= 0 for n in (total, offset, limit))
             or offset != cursor.offset or not 0 < limit <= PAGE_SIZE
-            or not isinstance(items, list) or len(items) > limit
+            or type(items) is not list or len(items) > limit
             or offset + len(items) > total
             or (cursor.total is not None and cursor.total != total)
             or (not items and offset < total)):
         raise BadPayloadError("invalid_pagination")
     for item in items:
-        loc = item.get("location") if isinstance(item, dict) else None
-        if (not isinstance(loc, dict) or loc.get("country") != cursor.country):
+        if type(item) is not dict:
+            raise BadPayloadError("invalid_posting")
+        location, publisher = item.get("location"), item.get("company")
+        if type(location) is not dict or location.get("country") != cursor.country:
             raise BadPayloadError("country_mismatch")
+        if type(publisher) is not dict or publisher.get("identifier") != cursor.tenant:
+            raise BadPayloadError("tenant_mismatch")
+        posting_id = item.get("id")
+        if type(posting_id) is not str or not _POSTING_ID.fullmatch(posting_id):
+            raise BadPayloadError("invalid_posting_id")
+        title, city = item.get("name"), location.get("city", "")
+        if (type(title) is not str or not title.strip() or not title.isprintable()
+                or type(city) is not str or (city and not city.isprintable())):
+            raise BadPayloadError("invalid_posting_text")
     identity = AtsClass("smartrecruiters", cursor.tenant)
     page = parse_smartrecruiters(payload, _NAMES[cursor.tenant], cursor.tenant,
                                   identity=identity)
     ids = tuple(item["posting_id"] for item in page)
-    if (len(page) != len(items) or not all(ids)
-            or len(set(ids)) != len(ids) or set(ids).intersection(cursor.seen)):
+    if (len(page) != len(items) or len(set(ids)) != len(ids)
+            or set(ids).intersection(cursor.seen)):
         raise BadPayloadError("invalid_or_overlapping_postings")
-    for item in page:
-        for value in item.values():
-            value.encode("utf-8", errors="strict")
     new_offset = offset + len(items)
     return replace(cursor, offset=new_offset, total=total, seen=cursor.seen + ids,
                    status="complete" if new_offset == total else "pending"), page
 
 
-def replay_batch(checkpoint: Checkpoint, fixtures: Mapping[tuple[str, str, int], dict],
+def replay_batch(checkpoint: Checkpoint, fixtures: dict[tuple[str, str, int], dict],
                  *, max_pages: int = MAX_REQUESTS_PER_RUN,
                  max_per_employer: int = MAX_PAGES_PER_EMPLOYER) -> ReplayResult:
     """Consume only supplied synthetic pages under the existing 5/60 ceilings.
 
     Budget-limited cursors remain pending; errors block their tenant until
     separately reviewed. The returned checkpoint is an in-memory value,
-    not a trusted or persisted production cursor. Returned listings are new
-    identities only, including across countries and prior batches.
+    not a trusted production cursor. Every synthetic payload repeats the exact
+    tenant and country, including empty pages. Listings are new identities only,
+    including across countries and prior batches.
     """
-    _validate(checkpoint)
+    validate_checkpoint(checkpoint)
+    if type(fixtures) is not dict:
+        raise ValueError("EXPANSION_FIXTURES_INVALID")
     if (type(max_pages) is not int or not 0 < max_pages <= MAX_REQUESTS_PER_RUN
             or type(max_per_employer) is not int
             or not 0 < max_per_employer <= MAX_PAGES_PER_EMPLOYER):
@@ -166,11 +185,9 @@ def replay_batch(checkpoint: Checkpoint, fixtures: Mapping[tuple[str, str, int],
             counts[cursor.tenant] = counts.get(cursor.tenant, 0) + 1
             key = (cursor.tenant, cursor.country, cursor.offset)
             try:
-                if key not in fixtures:
-                    raise BadPayloadError("missing_fixture")
                 next_cursor, page = _page(cursor, fixtures[key])
-            except (DiscoveryError, UnicodeError, TypeError, ValueError, RecursionError):
-                cursor = replace(cursor, status="error", error="page_review_required")
+            except (KeyError, DiscoveryError):
+                cursor = replace(cursor, status="error", error=_PAGE_ERROR)
                 blocked.add(cursor.tenant)
                 break
             cursor = next_cursor

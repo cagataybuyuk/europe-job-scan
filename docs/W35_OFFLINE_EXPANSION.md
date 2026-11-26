@@ -1,51 +1,67 @@
-# W3.5 — explicit employer expansion scope and offline replay
+# W3.5 employer expansion scope and offline replay
 
-## Source and scope
+The owner-reviewed W3.4 SmartRecruiters employer research is dated 2026-11-26.
+Independent QA compared the 27 employer names, exact tenant IDs, tiers, nine
+country columns and all 243 counts against both
+`ejs-w34-employer-research.md` (coverage matrix) and
+`ejs-w34-employers.csv`. The counts sum to 4,508 reported historical listings.
+The scope includes 121 nonzero and 122 zero-count pairs. Historical counts and
+research tiers establish scope and ordering only. The owner-maintained
+Employer Watchlist and the four-employer live pilot have separate scope.
 
-Source: owner-reviewed EJS-W3.4 SmartRecruiters Employer Expansion Research,
-dated 2026-11-26, priority-market coverage matrix (27 employers). The matrix
-was available in the project's Library as ejs-w34-employer-research.md.
-All 27 exact tenant identifiers, nine country columns and per-country counts
-were transcribed; their sums were reconciled to the reported 4,508 historical
-priority-market listings. This is not a new live verification. The original
-research CSV was not available in this session; no CSV values were guessed.
+The prior local W3.5 worktree was clean at `ee232ce`, an ancestor of PR #126.
+It contained no unique commits or source changes to consolidate. QA applied its
+changes in a detached worktree at `fcadb0f`.
 
-The expansion scope is separate from the owner-maintained Employer Watchlist
-and the existing four-pilot live gate. The 27 x 9 explicit pairs include all
-122 pairs with historical zero counts: a prior zero is not a permanent filter.
-The tiers are research prioritization only; no employer-level exclusion based
-on language, sponsorship, job family or volume is applied.
+## Replay contract
 
-## Offline replay contract
+Call `initial_checkpoint()` and `replay_batch(checkpoint, fixtures)` with a plain
+in-memory dict keyed by (exact tenant, country code, offset). Each synthetic
+page dict must repeat `tenant` and `country`, including for empty pages. These are
+fixture metadata fields supplied by the offline fixture author.
 
-- Explicitly call initial_checkpoint() and replay_batch(checkpoint, fixtures).
-  Fixtures are in-memory synthetic dictionaries keyed by
-  (exact tenant, country code, offset); no filesystem or transport is called.
-- Existing SmartRecruiters normalization and 100-item page ceiling are reused.
-  Every item must have the exact requested country, a valid posting identity
-  and valid text. A changed total, wrong offset, missing page, no progress,
-  invalid row or repeated ID within a country fails that page atomically.
-- A run may consume at most five pages per employer and 60 in total,
-  including failed pages. Budget exhaustion leaves pending cursors; no
-  automatic retries follow an error. An errored tenant is blocked until review.
-- Dedup uses exact provider tenant/posting identity across countries and prior
-  batches. The per-country cursor still records all seen IDs for coverage.
-- Pending does not mean complete; only an accepted page reaching the feed
-  total completes a pair. Errored tenants may have remaining pending pairs.
-- The checkpoint is an in-memory immutable value. It is not a durable,
-  authenticated cursor; storing and restoring it across process restarts is
-  not part of this increment. Listings and checkpoint are returned together;
-  a later private publisher must commit them atomically to avoid lost output.
-- No network request, report write, actual candidate data, ATS application
-  interaction, runtime, STOP, ledger or production policy change is included.
+A page commits only after the scope, pagination and every row validate. Each row
+supplies the exact publisher tenant, country and opaque posting ID, plus a
+printable title and an optional printable city. The existing SmartRecruiters
+normalizer constructs the canonical URL without copying source URLs or queries.
+Changed totals, wrong offsets, missing pages, nonprogress and repeated IDs
+within a country reject the complete page. Detecting changed unseen IDs with the
+same total and valid offsets requires additional feed evidence.
 
-## Validation and remaining integration
+Each batch consumes at most five pages per employer and 60 pages in total,
+including failures. Budget exhaustion leaves pending cursors. An error retains
+prior progress and blocks later pages for that tenant. Other tenants may proceed.
+A pair completes only when an accepted page reaches the declared total. Exact
+(tenant, posting ID) deduplication keeps the first occurrence across countries
+and batches while preserving per-country cursor coverage.
 
-Run: python -m pytest -q tests/test_expansion_replay.py
-The existing core CI list includes this suite. No live endpoint is exercised.
-Before any separately authorized live expansion, review the real country
-filter semantics, durable private checkpoint/report publishing, transport
-rate floor, explicit approved scope, and integration with existing shadow
-report, evidence and dedup behavior. Do not loosen the existing pilot gate.
-The local W3.5 worktree is not accessible from this session; reconcile its
-existing changes before merging any overlapping implementation.
+## Durable synthetic batches
+
+On macOS and Linux, call
+`scripts.expansion_replay_store.replay_private_batch(directory, fixtures, initialize=True)`
+once for a new bundle. For later batches use the same directory with the default
+`initialize=False`. The directory must be absolute, canonical, owner-only and
+outside Git worktrees and `control` paths, with an owner-controlled parent. The
+store checks effective ACLs and rejects symlinks, nonregular files, hard links
+and insecure permissions. Parallel processes fail on the private advisory lock.
+
+The owner-only `expansion-replay.json` bundle holds all cursors and the
+cumulative deduplicated normalized listings. Resume checks that the identities
+and countries in the bundle agree with accepted cursor progress. File and
+directory synchronization plus atomic replacement publish both together. On
+failure before replacement, the earlier bundle remains available. If an error
+occurs after replacement, reload the bundle to determine which batch committed.
+The 32 MB bound applies to both reading and writing. Owner-only storage assumes
+the local owner is trusted and provides no authentication against owner edits.
+The bundle schema is specific to this offline replay.
+
+## Validation and release gates
+
+Core CI runs both synthetic suites. The targeted local command is
+`python -m pytest -q tests/test_expansion_replay.py tests/test_expansion_replay_store.py tests/unit/test_ejs_phase1b_discovery.py tests/unit/test_ejs_shadow_phaseA.py tests/unit/test_watchlist_coverage.py`.
+Run with network access denied. No candidate data or live ATS access is needed.
+
+Before live expansion, separately review the provider's country-filter and
+pagination consistency semantics, the approved scope and rate floor, and how
+the checkpoint and output integrate with the shadow report, evidence and
+deduplication pipeline. The current four-employer live gate stays in force.

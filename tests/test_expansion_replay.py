@@ -1,5 +1,7 @@
 """Synthetic country replay tests; never invoke a transport."""
 from dataclasses import replace
+import hashlib
+import json
 
 import pytest
 
@@ -13,6 +15,7 @@ TENANT = "KPMGNederland"
 
 def page(country, offset=0, total=0, ids=(), *, tenant=TENANT):
     return {
+        "tenant": tenant, "country": country,
         "offset": offset, "limit": 100, "totalFound": total,
         "content": [
             {"id": jid, "name": "Synthetic analyst",
@@ -26,7 +29,12 @@ def page(country, offset=0, total=0, ids=(), *, tenant=TENANT):
 def test_research_scope_and_reported_counts():
     cp = initial_checkpoint()
     assert len(RESEARCH) == 27
-    assert len(COUNTRIES) == 9
+    assert COUNTRIES == ("NL", "IE", "DE", "BE", "SE", "DK", "ES", "PT", "IT")
+    # SHA-256 of the rows parsed independently from the W3.4 Markdown matrix.
+    canonical = json.dumps(RESEARCH, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert hashlib.sha256(canonical).hexdigest() == (
+        "d2b2ed048c01f5fcbbca7323de00c47e9c9d634f915904e3f2c765b3ec9c6a9b"
+    )
     assert len(cp.cursors) == 243
     assert len({(c.tenant, c.country) for c in cp.cursors}) == 243
     assert sum(sum(counts) for _, _, _, counts in RESEARCH) == 4508
@@ -85,9 +93,9 @@ def test_budget_cannot_be_loosened(kwargs):
     page("NL", offset=1, total=2, ids=("a",)),
     page("NL", total=2),
     page("NL", total=2, ids=("a", "a")),
-    page("NL", total=1, ids=("a",), tenant="Other"),
     page("NL", total=1, ids=("bad/id",)),
-    {"offset": True, "limit": 100, "totalFound": 0, "content": []},
+    {"tenant": TENANT, "country": "NL", "offset": True, "limit": 100,
+     "totalFound": 0, "content": []},
 ])
 def test_bad_page_is_atomic_and_blocks_tenant(bad):
     result = replay_batch(initial_checkpoint(), {(TENANT, "NL", 0): bad}, max_pages=1)
@@ -134,3 +142,79 @@ def test_wrong_checkpoint_scope_and_cursor_rejected():
                 replace(cp, cursors=(replace(cp.cursors[0], offset=1), *cp.cursors[1:]))):
         with pytest.raises(ValueError, match="EXPANSION_CHECKPOINT_REVIEW_REQUIRED"):
             replay_batch(bad, {})
+
+
+def test_all_pairs_complete_across_resumed_batches():
+    cp = initial_checkpoint()
+    fixtures = {
+        (c.tenant, c.country, 0): page(c.country, total=1, ids=(c.country,), tenant=c.tenant)
+        for c in cp.cursors
+    }
+    emitted = set()
+    while any(c.status == "pending" for c in cp.cursors):
+        result = replay_batch(cp, fixtures)
+        keys = {(row["tenant"], row["posting_id"]) for row in result.listings}
+        per_tenant = {tenant: sum(key[0] == tenant for key in keys) for tenant, _ in keys}
+        assert 0 < result.pages == len(keys) <= 60
+        assert all(pages <= 5 for pages in per_tenant.values())
+        assert not emitted.intersection(keys)
+        emitted.update(keys)
+        cp = result.checkpoint
+    assert all(c.status == "complete" for c in cp.cursors)
+    assert emitted == {(c.tenant, c.country) for c in cp.cursors}
+
+
+@pytest.mark.parametrize("publisher", [None, {}, {"identifier": None},
+                                      {"identifier": "kpmgnederland"},
+                                      {"identifier": " KPMGNederland "}])
+def test_each_posting_requires_exact_publisher(publisher):
+    payload = page("NL", total=2, ids=("A", "B"))
+    payload["content"][1]["company"] = publisher
+    result = replay_batch(initial_checkpoint(), {(TENANT, "NL", 0): payload}, max_pages=1)
+    assert result.checkpoint.cursors[0].status == "error"
+    assert result.checkpoint.cursors[0].offset == 0
+    assert not result.listings
+
+
+def test_swapped_empty_page_is_not_coverage():
+    result = replay_batch(initial_checkpoint(), {(TENANT, "NL", 0): page("IE")}, max_pages=1)
+    assert result.checkpoint.cursors[0].status == "error"
+
+
+def test_exact_identities_do_not_collapse_case_or_other_tenants():
+    result = replay_batch(initial_checkpoint(), {
+        (TENANT, "NL", 0): page("NL", total=2, ids=("a", "A")),
+        ("Devoteam", "NL", 0): page("NL", total=1, ids=("a",), tenant="Devoteam"),
+    }, max_pages=2, max_per_employer=1)
+    assert [(row["tenant"], row["posting_id"]) for row in result.listings] == [
+        (TENANT, "a"), (TENANT, "A"), ("Devoteam", "a"),
+    ]
+
+
+@pytest.mark.parametrize("fields", [
+    {"status": "error", "error": "unrecognized"},
+    {"status": "error", "error": "page_review_required", "total": 0},
+    {"status": "pending", "total": 1},
+])
+def test_impossible_cursor_state_fails_closed(fields):
+    cp = initial_checkpoint()
+    invalid = replace(cp, cursors=(replace(cp.cursors[0], **fields), *cp.cursors[1:]))
+    with pytest.raises(ValueError, match="^EXPANSION_CHECKPOINT_REVIEW_REQUIRED$"):
+        replay_batch(invalid, {})
+
+
+@pytest.mark.parametrize("value", ["bad\x00title", "bad\ud800title", ["not", "text"], " "])
+def test_invalid_row_text_rejects_entire_page(value):
+    payload = page("NL", total=2, ids=("A", "B"))
+    payload["content"][1]["name"] = value
+    result = replay_batch(initial_checkpoint(), {(TENANT, "NL", 0): payload}, max_pages=1)
+    assert result.checkpoint.cursors[0].status == "error"
+    assert not result.listings
+
+
+def test_checkpoint_rejects_advancing_past_incomplete_pair():
+    cp = initial_checkpoint()
+    cursors = list(cp.cursors)
+    cursors[1] = replace(cursors[1], status="complete", total=0)
+    with pytest.raises(ValueError, match="^EXPANSION_CHECKPOINT_REVIEW_REQUIRED$"):
+        replay_batch(replace(cp, cursors=tuple(cursors)), {})
