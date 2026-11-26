@@ -120,6 +120,15 @@ def run_shadow(rows: list[dict[str, str]], criteria: Criteria, *, fetch: Callabl
     for e in employers:
         e["requests"] = int(counts.get(e["employer"], 0))
 
+    return build_shadow_report(employers, pending, listings, criteria, sheet_labels=sheet_labels)
+
+
+def build_shadow_report(employers: list[dict[str, Any]], pending: list[dict[str, str]],
+                        listings: list[dict[str, str]], criteria: Criteria, *,
+                        sheet_labels: Mapping[str, str] | None = None,
+                        evidence_for: Callable[[dict[str, str]], dict[str, Any]] | None = None,
+                        vacancy_open: bool | None = True) -> dict[str, Any]:
+    """Evaluate and report normalized listings using caller-provided observation evidence."""
     vacancies: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
     duplicates = unkeyed = 0
@@ -141,9 +150,10 @@ def run_shadow(rows: list[dict[str, str]], criteria: Criteria, *, fetch: Callabl
         vacancy["url"] = item["url"] or None
         vacancy["identity_status"] = "known" if posting_id else "unknown"
         vacancy["similarity_key"] = dedupe_key(item["company"], item["role"], item["location"])
-        vacancy["discovery_evidence"] = {"feed_url": item["discovered_via"], "observation": "public_listing_feed"}
+        vacancy["discovery_evidence"] = (evidence_for(item) if evidence_for else
+                                         {"feed_url": item["discovered_via"], "observation": "public_listing_feed"})
         decision = decide(ListingFacts(item["url"] or f"unknown-{len(vacancies) + 1}",
-                                      {c: None for c in SCORE_COMPONENTS}, vacancy_open=True), criteria)
+                                      {c: None for c in SCORE_COMPONENTS}, vacancy_open=vacancy_open), criteria)
         vacancy["criteria_evaluation"] = {"label": decision.label, "reason": decision.reason_code,
                                           "rule_version": decision.rule_version, "score": decision.score,
                                           "unknown_components": list(decision.unknown_components)}
@@ -189,7 +199,9 @@ def run_shadow(rows: list[dict[str, str]], criteria: Criteria, *, fetch: Callabl
 
 
 def render_markdown(rep: Mapping[str, Any]) -> str:
-    L = [f"# EJS-W1 gölge keşif raporu ({rep['schema']})", "",
+    coverage = rep.get("coverage")
+    wave = "EJS-W3.5" if coverage else "EJS-W1"
+    L = [f"# {wave} gölge keşif raporu ({rep['schema']})", "",
          f"Mod: `{rep['mode']}` · kural: `{rep['rule_version']}` · gönderim YOK",
          f"İşveren: {rep['employers_total']} toplam, {rep['employers_supported']} desteklenen ATS, "
          f"{rep['employers_pending_adapter']} adaptör bekliyor.", "",
@@ -197,6 +209,15 @@ def render_markdown(rep: Mapping[str, Any]) -> str:
     for e in rep["employers"]:
         if e["status"] != "pending_adapter":
             L.append(f"| {e['employer']} | {e['ats']} | {e['status']} | {e['error_kind'] or '-'} | {e['requests']} | {e['listings']} |")
+    if coverage:
+        L += ["", "## Sentetik ülke kapsamı", "", f"Durum **{coverage['status']}** · `{coverage['scope_version']}`",
+              ", ".join(f"{status}: {count}" for status, count in coverage["counts"].items()), "",
+              "| Tenant | Ülke | Durum | Kabul edilen ilan | Bildirilen toplam | Hata sınıfı |",
+              "|---|---|---|---|---|---|"]
+        for pair in coverage["pairs"]:
+            total = pair["declared_total"] if pair["declared_total"] is not None else "-"
+            L.append(f"| {pair['tenant']} | {pair['country']} | {pair['status']} | {pair['accepted_listings']} | "
+                     f"{total} | {pair['error_kind'] or '-'} |")
     c = rep["completeness"]
     L += ["", f"## İlanlar", "", f"Ayrıştırılan {rep['listings_parsed']}, tekil {rep['listings_kept']}, "
           f"yinelenen {rep['listings_duplicate']}, anahtarsız {rep['listings_unkeyed']}.",

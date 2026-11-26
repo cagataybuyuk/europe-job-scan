@@ -116,6 +116,7 @@ jobs:
           tests/test_submission_ledger.py
           tests/test_durable_submission.py
           tests/test_single_application_inputs.py
+          tests/test_reviewed_manifest_compiler.py
           tests/test_oneclick_target.py
           tests/test_single_application_runtime.py
           tests/test_application_outcome.py
@@ -129,6 +130,10 @@ jobs:
           tests/test_reviewed_application_bootstrap.py
           tests/test_mac_validation.py
           tests/test_execution_manifest.py
+          tests/test_trusted_fact_snapshot.py
+          tests/test_current_fact_approval.py
+          tests/test_current_manifest_compiler.py
+          tests/test_current_manifest_local_sources.py
           tests/test_application_bridge.py
           tests/test_application_batch.py
           tests/test_w3_2_1_redirect_diagnostics.py
@@ -143,6 +148,9 @@ jobs:
           tests/unit/test_ejs_phase1a_dedupe_queue.py
           tests/unit/test_ejs_phase1a_csv_export.py
           tests/unit/test_ejs_phase1b_discovery.py
+          tests/test_expansion_replay.py
+          tests/test_expansion_replay_store.py
+          tests/test_expansion_shadow_integration.py
           tests/unit/test_ejs_shadow_phaseA.py
 
   mvp01-render-regression:
