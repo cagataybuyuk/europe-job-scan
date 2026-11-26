@@ -116,6 +116,7 @@ jobs:
           tests/test_submission_ledger.py
           tests/test_durable_submission.py
           tests/test_single_application_inputs.py
+          tests/test_reviewed_manifest_compiler.py
           tests/test_oneclick_target.py
           tests/test_single_application_runtime.py
           tests/test_application_outcome.py
