@@ -11,7 +11,7 @@ import hmac
 import json
 import re
 
-from ejs.services.execution_manifest import POLICY_VERSION
+from ejs.services.execution_manifest import MAX_MANIFEST_BYTES, POLICY_VERSION
 
 ERROR = "FACT_SOURCE_REVIEW_REQUIRED"
 SCHEMA = "EJS-CURRENT-FACT-APPROVAL-1"
@@ -24,12 +24,13 @@ _PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|\+00:00)")
 _KEYS = frozenset({"schema_version", "generation", "status", "profile_version",
                    "policy_version", "issued_at", "expires_at",
-                   "registry_sha256", "snapshot_sha256"})
+                   "template_sha256", "registry_sha256", "snapshot_sha256"})
 
 
 @dataclass(frozen=True, repr=False)
 class FactInputPins:
-    """Digest pair for offline compiler; not an execution capability."""
+    """Three exact-byte pins for offline compiler; not an execution capability."""
+    template_sha256: str
     registry_sha256: str
     snapshot_sha256: str
 
@@ -70,7 +71,8 @@ def _pinned(raw, pin, limit):
 
 
 def resolve_current_fact_inputs(
-    approval_raw: bytes, registry_raw: bytes, snapshot_raw: bytes, *,
+    approval_raw: bytes, template_raw: bytes, registry_raw: bytes,
+    snapshot_raw: bytes, *,
     expected_approval_sha256: str, expected_generation: int,
     expected_profile_version: str, now: datetime,
 ) -> FactInputPins:
@@ -80,7 +82,7 @@ def resolve_current_fact_inputs(
     manifest writer, do not cache them, use a trusted current clock, and
     reject unavailable/unverified current state. A valid older record is
     rejected when checked against the current generation and pin.
-    Revoked records are never accepted. Both supplied input byte sequences
+    Revoked records are never accepted. All three supplied input byte sequences
     must match the approved digests; no parsing of their private contents
     occurs here. Their schemas and values still require compiler validation.
     """
@@ -102,14 +104,21 @@ def resolve_current_fact_inputs(
         issued = _stamp(approval["issued_at"])
         expires = _stamp(approval["expires_at"])
         _require(issued <= now < expires and expires - issued <= MAX_APPROVAL_AGE)
+        template_pin = approval["template_sha256"]
         registry_pin = approval["registry_sha256"]
         snapshot_pin = approval["snapshot_sha256"]
+        _pinned(template_raw, template_pin, MAX_MANIFEST_BYTES)
         _pinned(registry_raw, registry_pin, MAX_REGISTRY_BYTES)
         _pinned(snapshot_raw, snapshot_pin, MAX_SNAPSHOT_BYTES)
-        result = FactInputPins(registry_pin, snapshot_pin)
+        result = FactInputPins(template_pin, registry_pin, snapshot_pin)
     except (PermissionError, ValueError, TypeError, KeyError, AttributeError,
             OverflowError, RecursionError):
         pass
     else:
         return result
+    # Do not retain private payloads or digests in the public error frame.
+    del approval_raw, template_raw, registry_raw, snapshot_raw
+    del expected_approval_sha256, expected_generation, expected_profile_version, now
+    # The parsed record and extracted pins may exist after a late failure.
+    approval = template_pin = registry_pin = snapshot_pin = None
     raise PermissionError(ERROR) from None
