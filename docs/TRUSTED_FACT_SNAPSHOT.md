@@ -19,6 +19,8 @@ Private local material only; never commit actual candidate data or digests.
 - schema_version: EJS-TRUSTED-FACT-SNAPSHOT-1
 - profile_version, cv_sha256: exact independently reviewed manifest binding
 - policy: SUBMIT-1.0
+- observed_at: exact manifest observation instant in canonical UTC ISO 8601
+  format (Python UTC datetime isoformat, including microseconds when nonzero)
 - issued_at, expires_at: UTC seconds, issued no earlier than the observed form,
   not in the future, expires strictly after validation, validity at most 24 h
 - target: exact ats_family, company, posting_id, requisition_id,
@@ -28,6 +30,11 @@ Private local material only; never commit actual candidate data or digests.
   duplicate or extra rows. Each row contains key, canonical_field, fact_key,
   step, control, options (ordered list or null), value (exact type and value)
   and nonempty provenance (opaque independently reviewed source reference).
+
+The option strings are the execution manifest identities in observed order.
+The snapshot does not carry separate DOM option values or widget selectors.
+If distinct employer options cannot be represented unambiguously by these
+strings, the observation needs separate review before any integration.
 
 The trusted source must review the fact-to-field mapping and option identity
 against the observed form independently, not copy proposed manifest answers.
@@ -40,9 +47,9 @@ answer modes. Actual CV bytes are not read in this increment.
 
 Synthetic regression tests cover altered answers with unchanged fingerprint,
 option drift, context, expiry, source pin mismatch and malformed input.
-Run offline: `python -m pytest -q tests/test_execution_manifest.py tests/test_trusted_fact_snapshot.py`.
+Core CI runs the manifest and snapshot suites. Run offline: `python -m pytest -q tests/test_execution_manifest.py tests/test_trusted_fact_snapshot.py`.
 
 Still open: trusted local registry publication and pin distribution, snapshot
-compiler from independently reviewed facts, independent QA, evidence/policy
+compiler from independently reviewed facts, evidence/policy
 review as applicable, and separately reviewed integration before any writes.
 No live request is part of this increment.

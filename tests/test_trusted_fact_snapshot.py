@@ -8,7 +8,9 @@ import pytest
 
 from ejs.services.execution_manifest import FACT_KEYS, load_execution_manifest
 from ejs.services.trusted_fact_snapshot import ERROR, verify_fact_snapshot
-from test_execution_manifest import NOW, PREPARED, base_document, encode, refingerprint
+from tests.test_execution_manifest import (
+    NOW, OBSERVED, PREPARED, base_document, encode, refingerprint,
+)
 
 
 def snapshot_fixture():
@@ -27,6 +29,7 @@ def snapshot_fixture():
         "profile_version": "profile-2026-11-16",
         "cv_sha256": "c" * 64,
         "policy": "SUBMIT-1.0",
+        "observed_at": OBSERVED.isoformat(),
         "issued_at": PREPARED.isoformat(),
         "expires_at": (PREPARED + timedelta(hours=2)).isoformat(),
         "target": deepcopy(doc["target"]),
@@ -81,6 +84,7 @@ def test_exact_option_identity():
     ("form_fingerprint", "0" * 64),
     ("schema_version", "unknown"),
     ("issued_at", (NOW + timedelta(seconds=1)).isoformat()),
+    ("issued_at", (OBSERVED - timedelta(seconds=1)).isoformat()),
     ("expires_at", NOW.isoformat()),
     ("expires_at", (NOW + timedelta(days=2)).isoformat()),
 ])
@@ -155,4 +159,81 @@ def test_unknown_keys_reject():
 def test_invalid_manifest_not_accepted():
     doc, snap = snapshot_fixture()
     doc["policy"]["version"] = "other"
+    rejected(doc, snap)
+
+
+def test_pinned_snapshot_rejects_changed_observation_time():
+    doc, snap = snapshot_fixture()
+    verify(doc, snap)
+    doc["form"]["observed_at"] = (OBSERVED + timedelta(seconds=1)).isoformat()
+    load_execution_manifest(encode(doc), now=NOW)
+    rejected(doc, snap)
+
+
+def test_invalid_json_has_no_sensitive_exception_chain():
+    doc, _ = snapshot_fixture()
+    raw = b'{"provenance": "synthetic-private-reference",}'
+    with pytest.raises(PermissionError, match=f"^{ERROR}$") as error:
+        verify_fact_snapshot(encode(doc), raw, now=NOW,
+                             expected_snapshot_sha256=hashlib.sha256(raw).hexdigest())
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+def test_reserialized_snapshot_rejects_original_pin():
+    doc, snap = snapshot_fixture()
+    raw = encode(snap)
+    with pytest.raises(PermissionError, match=f"^{ERROR}$"):
+        verify_fact_snapshot(encode(doc), raw + b"\n", now=NOW,
+                             expected_snapshot_sha256=hashlib.sha256(raw).hexdigest())
+
+
+@pytest.mark.parametrize("key", ["facts", "provenance", "apply_url"])
+def test_duplicate_keys_rejected_at_each_object_depth(key):
+    doc, snap = snapshot_fixture()
+
+    # Repeat the same key and value; equality does not make duplicates valid.
+    raw = encode(snap).decode("utf-8")
+    name = json.dumps(key) + ": "
+    start = raw.index(name)
+    value_start = start + len(name)
+    _, length = json.JSONDecoder().raw_decode(raw[value_start:])
+    end = value_start + length
+    raw = (raw[:end] + ", " + raw[start:end] + raw[end:]).encode("utf-8")
+    with pytest.raises(PermissionError, match=f"^{ERROR}$"):
+        verify_fact_snapshot(encode(doc), raw, now=NOW,
+                             expected_snapshot_sha256=hashlib.sha256(raw).hexdigest())
+
+
+def test_later_step_fact_must_be_bound():
+    doc, snap = snapshot_fixture()
+    doc["form"]["fields"][4]["step"] = 1
+    snap["facts"][4]["step"] = 1
+    refingerprint(doc)
+    snap["form_fingerprint"] = doc["form"]["fingerprint"]
+    verify(doc, snap)
+    snap["facts"].pop()
+    rejected(doc, snap)
+
+
+@pytest.mark.parametrize("value", [0, 0.0, "false", [], None])
+def test_checkbox_fact_rejects_non_boolean_values(value):
+    doc, snap = snapshot_fixture()
+    doc["form"]["fields"][3].update(control="checkbox", required=False, options=None)
+    doc["form"]["fields"][3]["answer"]["value"] = False
+    snap["facts"][3].update(control="checkbox", options=None, value=False)
+    refingerprint(doc)
+    snap["form_fingerprint"] = doc["form"]["fingerprint"]
+    verify(doc, snap)
+    snap["facts"][3]["value"] = value
+    rejected(doc, snap)
+
+
+def test_fractional_observation_instant_is_bound():
+    doc, snap = snapshot_fixture()
+    observed = OBSERVED.replace(microsecond=123456).isoformat()
+    doc["form"]["observed_at"] = observed.replace("+00:00", "Z")
+    snap["observed_at"] = observed
+    verify(doc, snap)
+    snap["observed_at"] = OBSERVED.isoformat()
     rejected(doc, snap)

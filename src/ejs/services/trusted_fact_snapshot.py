@@ -4,20 +4,20 @@ Caller must obtain the expected snapshot SHA-256 independently from the
 trusted local review source, never from the manifest or snapshot itself.
 This module does not establish trust in that source or read files.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import hashlib
 import hmac
 import json
 import re
 
-from ejs.services.execution_manifest import FACT_KEYS, load_execution_manifest
+from ejs.services.execution_manifest import FACT_KEYS, POLICY_VERSION, load_execution_manifest
 
 ERROR = "FACT_SNAPSHOT_REVIEW_REQUIRED"
 _MAX_BYTES = 500_000
 _HEX = re.compile(r"[a-f0-9]{64}")
 _UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|\+00:00)")
 _TOP = frozenset({"schema_version", "profile_version", "cv_sha256", "policy",
-                  "issued_at", "expires_at", "target", "form_fingerprint", "facts"})
+                  "observed_at", "issued_at", "expires_at", "target", "form_fingerprint", "facts"})
 _ROW = frozenset({"key", "canonical_field", "fact_key", "step", "control",
                   "options", "value", "provenance"})
 
@@ -68,7 +68,7 @@ def verify_fact_snapshot(manifest_raw: bytes, snapshot_raw: bytes, *,
                               object_pairs_hook=_pairs, parse_constant=_constant)
         _shape(snapshot, _TOP)
         _require(snapshot["schema_version"] == "EJS-TRUSTED-FACT-SNAPSHOT-1")
-        _require(snapshot["policy"] == "SUBMIT-1.0")
+        _require(snapshot["policy"] == POLICY_VERSION)
         _require(snapshot["profile_version"] == manifest.candidate_profile_version)
         _require(snapshot["cv_sha256"] == manifest.cv_sha256)
         _require(snapshot["form_fingerprint"] == manifest.form_fingerprint)
@@ -76,6 +76,7 @@ def verify_fact_snapshot(manifest_raw: bytes, snapshot_raw: bytes, *,
                   "posting_id": manifest.posting_id, "requisition_id": manifest.requisition_id,
                   "opportunity_key": manifest.opportunity_key, "apply_url": manifest.apply_url}
         _require(snapshot["target"] == target)
+        _require(snapshot["observed_at"] == manifest.observed_at.isoformat())
         issued, expires = _stamp(snapshot["issued_at"]), _stamp(snapshot["expires_at"])
         _require(manifest.observed_at <= issued <= now < expires
                  and expires - issued <= timedelta(hours=24))
@@ -102,4 +103,8 @@ def verify_fact_snapshot(manifest_raw: bytes, snapshot_raw: bytes, *,
         _require(not fields)
     except (PermissionError, ValueError, TypeError, KeyError, AttributeError,
             OverflowError, RecursionError):
-        raise PermissionError(ERROR) from None
+        # JSON errors can retain the entire private input in the exception object.
+        pass
+    else:
+        return
+    raise PermissionError(ERROR) from None
