@@ -53,14 +53,14 @@ def pid(i: int) -> str:
     return str(100000000000000 + i)
 
 
-def row(i: int, role: str = "Senior Business Analyst", *, country: str | None = "NL", url: str | None = None,
+def row(i: int, role: str = "Senior Business Analyst", *, country: str | list[str] | None = "NL", url: str | None = None,
         ats: str = "smartrecruiters", tenant: str = TENANT, region: str = "global") -> dict:
     return {"company": "Acme", "role": role, "location": f"City{i}", "url": url if url is not None else
             f"https://jobs.smartrecruiters.com/{tenant}/{pid(i)}", "ats_kind": ats, "source": "employer_watchlist",
             "tenant": tenant, "region": region, "posting_id": pid(i), "identity_status": "known",
             "similarity_key": f"acme|{role.casefold()}|city{i}",
             "discovery_evidence": {"observation": "live_country_feed", "feed_url": "https://x",
-                                   "countries": [country] if country else []}}
+                                   "countries": [country] if isinstance(country, str) else (country or [])}}
 
 
 class F04(dict):
@@ -610,7 +610,7 @@ def files(tmp_path):
 
 def prepare(cli, tmp_path, common, name="allow"):
     out = tmp_path / name
-    assert cli.main(["prepare", *common, "--out-dir", str(out)]) == 0
+    assert cli.main(["prepare", *common, "--pilot-country", "NL", "--out-dir", str(out)]) == 0
     return out / "detail-allowlist.json"
 
 
@@ -1476,7 +1476,7 @@ def test_medium_cli_uses_same_approval_and_budget_guards(files, capsys):
     base, common, f04 = files
     cli = load_cli()
     out = base / "medium-allow"
-    assert cli.main(["prepare", *common, "--medium-offset", "0", "--out-dir", str(out)]) == 0
+    assert cli.main(["prepare", *common, "--medium-offset", "0", "--pilot-country", "NL", "--out-dir", str(out)]) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["network"] is False and summary["medium_rows_in_report"] == 1
     allow_path = out / "detail-allowlist.json"
@@ -1536,3 +1536,18 @@ def test_lineage_rejects_forged_binding_even_if_suitability_unchanged():
     forged["vacancies"][0]["url"] = f"https://jobs.smartrecruiters.com/Other/{pid(1)}"
     with pytest.raises(DetailVerificationError, match="F04_REPORT_NOT_REPRODUCIBLE"):
         lineage_call(forged, f04.projection)
+
+
+def test_cli_unscoped_allowlist_is_offline_only_even_with_quoted_digest(files):
+    base, common, _ = files
+    cli = load_cli()
+    out = base / "unscoped"
+    assert cli.main(["prepare", *common, "--out-dir", str(out)]) == 0
+    path = out / "detail-allowlist.json"
+    digest = dv.allowlist_digest(json.loads(path.read_text()))
+    net = Net({url_of(i): ok(sr(i)) for i in range(1, 6)})
+    assert cli.main(["verify", *common, "--allowlist", str(path), "--live",
+                     "--approve-allowlist-sha256", digest, "--budget-dir", str(base / "budget"),
+                     "--out-dir", str(base / "live")], live_transport=net, now=fake_now,
+                    clock=Clock(), sleep=lambda _: None) == 2
+    assert net.calls == [] and not (base / "budget").exists() and not (base / "live").exists()

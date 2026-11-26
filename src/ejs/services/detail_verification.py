@@ -282,7 +282,7 @@ def check_lineage(f04_report: Mapping[str, Any], projection: Any, criteria: Crit
         raise DetailVerificationError("F02_SOURCE_SHA256")
     if f04_report.get("source_report_sha256") != again["source_report_sha256"]:
         raise DetailVerificationError("F04_REPORT_NOT_FROM_PINNED_F02_DATA")
-    if f04_report != again:
+    if json.dumps(f04_report, sort_keys=True) != json.dumps(again, sort_keys=True):
         raise DetailVerificationError("F04_REPORT_NOT_REPRODUCIBLE")
     return {"f02_source_file_sha256": f02_source_sha256, "f02_projection_sha256": again["source_report_sha256"]}
 

@@ -773,3 +773,9 @@ def test_fo_role_aliases_do_not_change_seniority_or_secondary_precedence():
     assert items["1"]["classification"] == "preliminary_high"
     assert items["1"]["dimensions"]["seniority"]["status"] == "include_match"
     assert items["2"]["classification"] == "preliminary_medium"
+
+
+def test_fo_normalization_preserves_generic_existing_role_track_matching():
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", 'primary: "Dynamics 365"'))
+    item = by_posting(evaluate_report(report(row("1", "Dynamics 365 F&O Consultant")), c))["1"]
+    assert item["classification"] == "preliminary_high"

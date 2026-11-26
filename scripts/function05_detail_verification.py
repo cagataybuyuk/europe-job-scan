@@ -248,6 +248,8 @@ def _verify(args, *, live_transport, clock, sleep, now) -> int:
         raise DetailVerificationError("HISTORY_ONLY_FOR_LIVE_OR_DERIVED_EVIDENCE")     # synthetic never enters history
     budget_dir = None
     if args.live:
+        if not doc["selection"].get("pilot_countries"):
+            raise DetailVerificationError("LIVE_REQUIRES_EXPLICIT_PILOT_COUNTRIES")
         if args.approve_allowlist_sha256 != digest:
             raise DetailVerificationError("LIVE_REQUIRES_OWNER_QUOTED_ALLOWLIST_DIGEST")
         if args.budget_dir is None:

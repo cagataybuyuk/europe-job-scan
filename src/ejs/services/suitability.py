@@ -148,10 +148,14 @@ def _role_tokens(text: str) -> frozenset[str]:
     return _tokens(_FO_ROLE.sub("d365fo", _fold(text)))
 
 
-def _role_match(title: frozenset[str], phrases: tuple[str, ...]) -> str | None:
+def _role_match(title: frozenset[str], normalized_title: frozenset[str],
+                phrases: tuple[str, ...]) -> str | None:
     for phrase in phrases:
-        toks = _role_tokens(phrase)
-        if toks and toks <= title:
+        if _FO_ROLE.search(_fold(phrase)):
+            toks, candidate = _role_tokens(phrase), normalized_title
+        else:
+            toks, candidate = _tokens(phrase), title
+        if toks and toks <= candidate:
             return phrase
     return None
 
@@ -175,10 +179,10 @@ def _assess_listing(row: Mapping[str, Any], profile: Profile, policy: Suitabilit
 
     if not (profile.primary_roles or profile.secondary_roles):
         dims["role_track"] = {"status": "unknown", "need": "role_tracks_not_configured"}
-    elif (hit := _role_match(role_title, profile.primary_roles)):
+    elif (hit := _role_match(title, role_title, profile.primary_roles)):
         ratings["role_fit"] = policy.role_primary
         dims["role_track"] = {"status": "primary_match", "matched": hit}
-    elif (hit := _role_match(role_title, profile.secondary_roles)):
+    elif (hit := _role_match(title, role_title, profile.secondary_roles)):
         ratings["role_fit"] = policy.role_secondary
         dims["role_track"] = {"status": "secondary_match", "matched": hit}
     else:
