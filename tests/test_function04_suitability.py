@@ -797,3 +797,27 @@ def test_fo_aliases_are_symmetric_for_explicit_compact_spellings(criterion, titl
 def test_fo_marker_does_not_match_partial_product_tokens(title):
     c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", 'primary: "D365 F&O"'))
     assert by_posting(evaluate_report(report(row("1", title)), c))["1"]["classification"] == "preliminary_low"
+
+
+# Independent QA counterexamples: punctuation separators and Unicode boundaries.
+@pytest.mark.parametrize("criterion,title", [
+    ("D365 F&O", "D365 - F&O Consultant"),
+    ("D365 - F&O", "Dynamics 365 F&O Consultant"),
+    ("D365 F&O", "Dynamics 365 – F/O Consultant"),
+    ("D365 F&O", "D365—FO Consultant"),
+])
+def test_fo_aliases_allow_single_dash_separator_symmetrically(criterion, title):
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", f'primary: "{criterion}"'))
+    assert by_posting(evaluate_report(report(row("1", title)), c))["1"]["classification"] == "preliminary_high"
+
+
+@pytest.mark.parametrize("title", [
+    "D365 FOю Consultant", "юD365 FO Consultant", "D365FO中 Consultant",
+    "D365 FO_Extra Consultant", "prefix_D365 FO Consultant",
+    "D365 -- F&O Consultant", "D365 - Sales F&O Consultant",
+])
+def test_fo_aliases_reject_unicode_word_continuations_and_unrelated_separators(title):
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", 'primary: "D365 F&O"'))
+    item = by_posting(evaluate_report(report(row("1", title)), c))["1"]
+    assert item["classification"] == "preliminary_low"
+    assert item["ratings"]["role_fit"] is None

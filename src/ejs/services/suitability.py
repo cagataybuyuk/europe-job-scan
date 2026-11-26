@@ -51,9 +51,9 @@ _TOKEN = re.compile(r"[a-z0-9+#]+")
 # Only adjacent, explicitly identified Finance & Operations variants. Do not infer
 # F&O from Dynamics 365, CE, CRM, Power Platform, AX or an isolated FO token.
 _FO_ROLE = re.compile(
-    r"(?<![a-z0-9+#])(?:(?:d365|dynamics\s*365)\s+"
+    r"(?<![\w+#])(?:(?:d365|dynamics\s*365)(?:\s+|\s*[-–—]\s*)"
     r"(?:f\s*[&/]\s*o|fo|finance\s+(?:and|&)\s+operations)|d365fo)"
-    r"(?![a-z0-9+#/&])"
+    r"(?![\w+#/&])"
 )
 
 
