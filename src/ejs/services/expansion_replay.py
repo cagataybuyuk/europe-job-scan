@@ -2,7 +2,7 @@
 
 The replay itself has no network, filesystem, queue or submission integration.
 ``live_replay_batch`` reads pages through an injected read-only carrier and only
-for pairs in ``LIVE_APPROVED_PAIRS``, which holds only the owner-approved pilot pair. The existing four-employer
+for pairs in the explicitly selected owner-approved pilot scope (default ``LIVE_APPROVED_PAIRS``). The existing four-employer
 pilot gate and transport are unchanged. Research counts are historical
 evidence, never a filter or a claim of current completeness.
 """
@@ -56,9 +56,25 @@ _SCOPE = tuple((tenant, country) for _, tenant, _, _ in RESEARCH for country in 
 _NAMES = {tenant: name for name, tenant, _, _ in RESEARCH}
 _ERROR = "EXPANSION_CHECKPOINT_REVIEW_REQUIRED"
 _PAGE_ERROR = "page_review_required"
+# Fixed vocabulary only: never persist arbitrary exception strings or provider values.
+_PAGE_DETAILS = frozenset({
+    "invalid_json", "invalid_page", "fixture_scope_mismatch", "invalid_pagination",
+    "invalid_posting", "country_mismatch", "tenant_mismatch", "invalid_posting_id",
+    "invalid_posting_text", "invalid_or_overlapping_postings", "missing_content",
+    "no_valid_entries",
+})
+_LIVE_PAGE_ERRORS = frozenset(f"{_PAGE_ERROR}:{code}" for code in _PAGE_DETAILS) | {_PAGE_ERROR}
+
+
+def _safe_page_error(exc: Exception) -> str:
+    if isinstance(exc, BadPayloadError) and type(exc.detail) is str and exc.detail in _PAGE_DETAILS:
+        return f"{_PAGE_ERROR}:{exc.detail}"
+    return _PAGE_ERROR
 # Exact (tenant, country) pairs approved for live read-only collection. Owner decision of 26 Nov 2026:
 # one pilot pair. Widening this set needs a new owner approval in a reviewed change.
 LIVE_APPROVED_PAIRS: frozenset[tuple[str, str]] = frozenset({("KPMGNederland", "NL")})
+# Second owner-approved pilot, separate bundle and cumulative budget; never union with the default.
+VERSION1_APPROVED_PAIRS: frozenset[tuple[str, str]] = frozenset({("Version1", "NL"), ("Version1", "IE")})
 LIVE_FEED_HOST = "api.smartrecruiters.com"
 # Total GET attempts (failures included) one live invocation may make; the owner-approved pilot ceiling.
 LIVE_MAX_REQUESTS = 5
@@ -119,7 +135,8 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
                 or (c.status == "complete" and c.total != c.offset)
                 or (c.status != "complete" and c.total is not None
                     and not 0 < c.offset < c.total)
-                or c.error != (_PAGE_ERROR if c.status == "error" else None)
+                or (c.status == "error" and (type(c.error) is not str or c.error not in _LIVE_PAGE_ERRORS))
+                or (c.status != "error" and c.error is not None)
                 or (c.tenant in incomplete_tenants and c != Cursor(*pair))):
             raise ValueError(_ERROR)
         if c.status != "complete":
@@ -370,8 +387,9 @@ def recheck_first_page(cursor: Cursor, fetch: Callable[[str], bytes],
                                       fetch(live_page_url(cursor.tenant, cursor.country, 0))))
     except (RequestBudgetError, PageLimitError):
         return {**pair, "status": "not_checked", "reason": "request_budget"}
-    except (KeyError, DiscoveryError):
-        return {**pair, "status": "unreadable", "reason": "recheck_page_rejected"}
+    except (KeyError, DiscoveryError) as exc:
+        code = _safe_page_error(exc)
+        return {**pair, "status": "unreadable", "reason": "recheck_page_rejected" + code[len(_PAGE_ERROR):]}
     if again.total != cursor.total:
         return {**pair, "status": "drift", "reason": "total_changed"}
     if again.seen != cursor.seen[:len(again.seen)]:
@@ -409,8 +427,8 @@ def _replay(checkpoint: Checkpoint, read: Callable[[tuple[str, str, int]], objec
                 counts[cursor.tenant] -= 1
                 exhausted = True
                 break
-            except (KeyError, DiscoveryError):
-                cursor = replace(cursor, status="error", error=_PAGE_ERROR)
+            except (KeyError, DiscoveryError) as exc:
+                cursor = replace(cursor, status="error", error=_safe_page_error(exc) if approved is not None else _PAGE_ERROR)
                 blocked.add(cursor.tenant)
                 break
             cursor = next_cursor

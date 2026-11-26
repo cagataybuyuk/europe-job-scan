@@ -798,3 +798,87 @@ def test_acceptance_check_rejects_a_wrong_invocation_count_and_missing_input(cli
     out = accepted_bundle(cli_inputs)
     assert acceptance_check.main(["--bundle-dir", str(out), "--expect-invocations", "1"]) == 1
     assert acceptance_check.main(["--bundle-dir", str(tmp_path / "missing")]) == 2
+
+
+# --- explicit second pilot scope; no union, no new transport ---------------------------------------
+def test_version1_scope_isolated_and_accepted_with_three_requests(cli_inputs, capsys):
+    import scripts.expansion_shadow as es
+    from ejs.services.expansion_replay import VERSION1_APPROVED_PAIRS
+    assert VERSION1_APPROVED_PAIRS == {("Version1", "NL"), ("Version1", "IE")}
+    out = cli_inputs[2] / "version1"
+    parser = cli.argparse.ArgumentParser()
+    ns = cli.argparse.Namespace(
+        watchlist=str(cli_inputs[0]), criteria=str(cli_inputs[1]), out_dir=str(out),
+        expansion_live=True, expansion_init=True, expansion_max_pages=5,
+        expansion_fixtures=None, sheet_labels=None, expansion_scope="version1-nl-ie")
+    pages = {("Version1", "nl", 0): feed("NL", total=0, tenant="Version1"),
+             ("Version1", "ie", 0): feed("IE", total=2, ids=("ie1", "ie2"), tenant="Version1")}
+    fake = Feed(pages)
+    assert es.run_expansion(ns, parser, transport=fake, clock=lambda: 0.0, sleep=lambda s: None) == 0
+    assert fake.urls == [live_page_url("Version1", country, 0) for country in ("NL", "IE", "IE")]
+    report = report_of(out)
+    assert report["request_accounting"]["spent"] == 3 and report["request_accounting"]["remaining"] == 2
+    assert report["coverage"]["research_scope"]["approved_pairs"] == 2
+    assert report["acceptance"]["ready"] and project_for_application_bridge(report)["listings_kept"] == 2
+    assert acceptance_check.main(["--bundle-dir", str(out), "--scope", "version1-nl-ie", "--expect-invocations", "1"]) == 0
+    assert acceptance_check.main(["--bundle-dir", str(out)]) == 1
+    before = (out / store.BUNDLE_NAME).read_bytes()
+    ns.expansion_init = False
+    silent = Feed({})
+    assert es.run_expansion(ns, parser, transport=silent, clock=lambda: 0.0, sleep=lambda s: None) == 0
+    assert silent.urls == [] and (out / store.BUNDLE_NAME).read_bytes() == before
+    ns.expansion_scope = None
+    with pytest.raises(SystemExit):
+        es.run_expansion(ns, parser, transport=silent, clock=lambda: 0.0, sleep=lambda s: None)
+    assert silent.urls == []
+
+
+def test_second_scope_requires_explicit_live_expansion(cli_inputs):
+    watchlist, criteria, root = cli_inputs
+    common = ["--watchlist", str(watchlist), "--criteria", str(criteria), "--out-dir", str(root / "wrong")]
+    for extra in (["--expansion-scope", "version1-nl-ie"], ["--expansion-fixtures", "x", "--expansion-scope", "version1-nl-ie"],
+                  ["--expansion-live", "--expansion-scope", "arbitrary"]):
+        with pytest.raises(SystemExit):
+            cli.main([*common, *extra])
+
+
+@pytest.mark.parametrize("mutate,reason", [
+    (lambda d: d["content"][0]["location"].update(country="de"), "country_mismatch"),
+    (lambda d: d["content"][0]["company"].update(identifier="untrusted provider text"), "tenant_mismatch"),
+    (lambda d: d.update(offset=100), "invalid_pagination"),
+    (lambda d: d["content"][0].update(id="bad id"), "invalid_posting_id"),
+    (lambda d: d["content"][0].update(name="bad\nname"), "invalid_posting_text"),
+])
+def test_version1_rejection_reason_is_durable_and_no_retry(cli_inputs, mutate, reason):
+    import scripts.expansion_shadow as es
+    out = cli_inputs[2] / "version1-failed"
+    parser = cli.argparse.ArgumentParser()
+    ns = cli.argparse.Namespace(
+        watchlist=str(cli_inputs[0]), criteria=str(cli_inputs[1]), out_dir=str(out),
+        expansion_live=True, expansion_init=True, expansion_max_pages=5,
+        expansion_fixtures=None, sheet_labels=None, expansion_scope="version1-nl-ie")
+    body = json.loads(feed("NL", total=1, ids=("n1",), tenant="Version1"))
+    mutate(body)
+    fake = Feed({("Version1", "nl", 0): json.dumps(body).encode()})
+    assert es.run_expansion(ns, parser, transport=fake, clock=lambda: 0.0, sleep=lambda s: None) == 1
+    assert fake.urls == [live_page_url("Version1", "NL", 0)]
+    report = report_of(out)
+    pairs = {(p["tenant"], p["country"]): p for p in report["coverage"]["pairs"]}
+    assert pairs["Version1", "NL"]["error_kind"] == "page_review_required:" + reason
+    assert pairs["Version1", "IE"]["status"] == "blocked"
+    assert report["request_accounting"]["spent"] == 1
+    assert report["request_accounting"]["remaining"] == 4
+    assert report["listings_kept"] == 0 and report["acceptance"]["ready"] is False
+    before = (out / store.BUNDLE_NAME).read_bytes()
+    ns.expansion_init = False
+    silent = Feed({})
+    assert es.run_expansion(ns, parser, transport=silent, clock=lambda: 0.0, sleep=lambda s: None) == 1
+    assert silent.urls == [] and (out / store.BUNDLE_NAME).read_bytes() == before
+    assert report_of(out)["coverage"] == report["coverage"]
+
+
+def test_page_error_does_not_publish_arbitrary_exception_detail():
+    from ejs.services.discovery import BadPayloadError
+    from ejs.services.expansion_replay import _safe_page_error
+    assert _safe_page_error(BadPayloadError("private response value")) == "page_review_required"
+    assert _safe_page_error(BadPayloadError("country_mismatch")) == "page_review_required:country_mismatch"

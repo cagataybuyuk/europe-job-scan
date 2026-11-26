@@ -167,3 +167,29 @@ multi-day acceptance needs a next-day run and is not claimed by this test.
 
 Targeted: `PYTHONPATH=src:. python -m pytest -q tests/test_expansion_live.py tests/test_expansion_replay.py tests/test_expansion_replay_store.py tests/test_expansion_shadow_integration.py tests/test_application_bridge.py`.
 Run with network access denied. `tests/test_expansion_live.py` is in the core CI job.
+
+
+## Version 1 bounded pilot: Version 1 Netherlands / Ireland
+
+Owner approval 26 Nov 2026: exactly Version 1 NL and IE, maximum five public GET attempts total in a new
+private bundle (including first-page rechecks). Select explicitly with `--expansion-live --expansion-scope version1-nl-ie`.
+This is a separate scope, not the union with the legacy KPMG scope. The original KPMG default and existing bundle
+input digest are unchanged; resuming with a different scope is refused. No KPMG request, authentication, redirects,
+automatic retries, candidate data, application forms or submission. A single invocation with `--expansion-init
+--expansion-max-pages 5` should collect both country pages and recheck non-empty pairs within budget if each fits
+one page. Historical counts are not current counts; stop and inspect any nonzero exit without starting another
+bundle or repeating a request. Use `scripts/function02_acceptance_check.py --scope version1-nl-ie
+--bundle-dir <new private directory> --expect-invocations 1` for offline acceptance. No other pair is approved by this
+change. No F05 detail request is authorized by the F02 listing approval.
+
+
+### Rejected page diagnostics
+
+For live collection only, the cursor and report retain a fixed allowlisted reason such as
+`page_review_required:country_mismatch`, `page_review_required:tenant_mismatch`, or
+`page_review_required:invalid_pagination`. First-page recheck failures retain the same safe suffix where known.
+Unknown exception details remain generic. No response text, arbitrary exception string, or posting content is
+persisted by this diagnostic change; rejected raw bodies are still not retained. Existing legacy generic errors
+remain readable; synthetic error behavior, fail-closed checks, tenant blocking, budget accounting and no-retry
+behavior are unchanged. This cannot reconstruct the previously rejected ServiceNow response. That pilot remains
+parked on #137 and is not included in this branch.
