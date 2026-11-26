@@ -217,7 +217,8 @@ def _reassess(args, *, now) -> int:
 
 def _prepare(args) -> int:
     criteria, criteria_sha, f04, f04_sha, projection, lineage = _load_inputs(args)
-    allowlist = build_allowlist(f04, f04_report_sha256=f04_sha, lineage=lineage, limit=args.limit)
+    allowlist = build_allowlist(f04, f04_report_sha256=f04_sha, lineage=lineage, limit=args.limit,
+                                medium_offset=args.medium_offset)
     out_dir = prepare_output_dir(args.out_dir)
     if (out_dir / ALLOWLIST_NAME).exists():
         raise OutputDirError("OUTPUT_EXISTS")
@@ -226,7 +227,8 @@ def _prepare(args) -> int:
         "mode": "prepare_offline_no_requests", "network": False,
         "expected_request_count": len(allowlist["targets"]),
         "allowlist_sha256": allowlist["approval"]["allowlist_sha256"],
-        "high_rows_in_report": allowlist["selection"]["high_rows_in_report"],
+        **{k: allowlist["selection"][k] for k in ("high_rows_in_report", "medium_rows_in_report", "medium_offset")
+           if k in allowlist["selection"]},
         "unbound": allowlist["selection"]["unbound"],
         "targets": [{k: t[k] for k in ("sequence", "f04_priority_rank", "tenant", "posting_id", "canonical_url",
                                       "detail_url")} for t in allowlist["targets"]]}, sort_keys=True, indent=1))
@@ -313,6 +315,8 @@ def main(argv: list[str] | None = None, *, live_transport: Callable = urllib_tra
         p.add_argument("--expected-f02-sha256", required=True, help="independently recorded SHA-256 of that file")
         p.add_argument("--out-dir", type=Path, required=True, help="absolute owner-only directory outside the repo")
     sub.choices["prepare"].add_argument("--limit", type=int, default=5)
+    sub.choices["prepare"].add_argument("--medium-offset", type=int, default=None,
+                                        help="explicit zero-based window offset within preliminary_medium rows; omit for legacy high selection")
     r = sub.choices["reassess"]
     r.add_argument("--allowlist", type=Path, required=True)
     r.add_argument("--evidence-dir", type=Path, required=True, help="the original live run's output directory (read only)")

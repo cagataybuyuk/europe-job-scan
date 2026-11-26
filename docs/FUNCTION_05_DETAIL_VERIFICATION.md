@@ -278,3 +278,16 @@ first live pilot returned 5 of 5 HTTP 200 responses; the language-policy work ad
 Function 06 step. Real reassessment results (languages, sponsorship, salary, requirements, watchlist count) are not
 available to this work until the owner runs `reassess`.
 Employer-confirmed autonomous applications remain 0.
+
+
+## Explicit medium-priority windows after the first pilot
+
+The original high-priority selection and its digest are unchanged when no offset is provided.
+To preview a later bounded medium-priority group from the same original F04 report, use
+`prepare --medium-offset 0` with the original pinned inputs and a new owner-only output directory.
+The offset is zero-based within `preliminary_medium` rows in F04 priority order. Each window contains
+at most five rows; an unbindable row is reported and is not replaced outside the window.
+The chosen offset and targets are included in the approval digest. Do not relabel or edit F04 rows.
+Use a separate owner approval for each window, the same persistent budget and policy history roots,
+and a new output directory for each live run. Any overlapping reserved URL refuses the run;
+no automatic skipping, retries, or additional requests. A later window is never automatically authorized.

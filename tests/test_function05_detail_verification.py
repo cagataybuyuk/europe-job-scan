@@ -1442,3 +1442,53 @@ def test_real_sentences_flow_into_the_report_and_leave_policy_and_scoring_untouc
     assert [(e["level"], e["kind"]) for e in pe["education_requirements"]] == [("wo_master", "mandatory")]
     assert c["language_policy"]["action"] == "watchlist" and c["verdict"]["status"] == lp.WATCHLIST   # policy unchanged
     assert lp.POLICY_VERSION == "EJS-LANG-SPONSOR-POLICY-1.0" and sha256(criteria_text().encode()).hexdigest() == SHA
+
+
+# ---- H. explicit medium windows; previous high allowlists remain reproducible ------------------------
+def test_medium_windows_are_bounded_reproducible_and_do_not_relabel_rows():
+    f04 = f04_report([row(1)] + [row(i, "Data Analyst") for i in range(10, 17)] + [row(60, "Accountant")])
+    kwargs = dict(f04_report_sha256=F04_SHA, lineage=lineage_of(f04))
+    high = build_allowlist(f04, **kwargs)
+    assert [t["posting_id"] for t in high["targets"]] == [pid(1)]
+    assert verify_allowlist(high, f04, **kwargs) == high
+    first = build_allowlist(f04, medium_offset=0, **kwargs)
+    second = build_allowlist(f04, medium_offset=5, **kwargs)
+    medium = [r["posting_id"] for r in f04["vacancies"] if r["suitability"]["classification"] == "preliminary_medium"]
+    assert len(medium) == 7
+    assert [t["posting_id"] for t in first["targets"]] == medium[:5]
+    assert [t["posting_id"] for t in second["targets"]] == medium[5:]
+    assert first["selection"]["medium_offset"] == 0 and second["selection"]["medium_offset"] == 5
+    assert first["request_policy"]["max_requests"] == 5 and second["request_policy"]["max_requests"] == 2
+    assert verify_allowlist(first, f04, **kwargs) == first
+    assert verify_allowlist(second, f04, **kwargs) == second
+    assert dv.allowlist_digest(first) != dv.allowlist_digest(second)
+    for offset in (-1, 7, True, "0"):
+        with pytest.raises(DetailVerificationError, match="MEDIUM_OFFSET_OUT_OF_RANGE"):
+            build_allowlist(f04, medium_offset=offset, **kwargs)
+    for changed in (dict(rule="preliminary_low"), dict(medium_offset=1), dict(medium_offset=None)):
+        tampered = copy.deepcopy(first)
+        tampered["selection"].update(changed)
+        with pytest.raises(DetailVerificationError):
+            verify_allowlist(tampered, f04, **kwargs)
+
+
+def test_medium_cli_uses_same_approval_and_budget_guards(files, capsys):
+    base, common, f04 = files
+    cli = load_cli()
+    out = base / "medium-allow"
+    assert cli.main(["prepare", *common, "--medium-offset", "0", "--out-dir", str(out)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["network"] is False and summary["medium_rows_in_report"] == 1
+    allow_path = out / "detail-allowlist.json"
+    allow = json.loads(allow_path.read_text())
+    assert [t["posting_id"] for t in allow["targets"]] == [pid(50)]
+    digest = dv.allowlist_digest(allow)
+    net = Net({url_of(50): ok(sr(50))})
+    argv = ["verify", *common, "--allowlist", str(allow_path), "--live",
+            "--budget-dir", str(base / "budget"), "--out-dir", str(base / "medium-result")]
+    kwargs = dict(live_transport=net, now=fake_now, clock=Clock(), sleep=lambda s: None)
+    assert cli.main(argv, **kwargs) == 2 and net.calls == []
+    assert cli.main([*argv, "--approve-allowlist-sha256", digest], **kwargs) == 0
+    assert [u for u, _ in net.calls] == [url_of(50)]
+    assert cli.main([*argv[:-1], str(base / "medium-again"), "--approve-allowlist-sha256", digest], **kwargs) == 2
+    assert len(net.calls) == 1
