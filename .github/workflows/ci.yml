@@ -143,6 +143,7 @@ jobs:
           tests/unit/test_ejs_phase1a_dedupe_queue.py
           tests/unit/test_ejs_phase1a_csv_export.py
           tests/unit/test_ejs_phase1b_discovery.py
+          tests/test_expansion_replay.py
           tests/unit/test_ejs_shadow_phaseA.py
 
   mvp01-render-regression:
