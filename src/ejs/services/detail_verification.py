@@ -51,6 +51,9 @@ SCHEMA_HANDOFF = "EJS-F06-HANDOFF-1"
 POLICY_VERSION = "DETAIL-VERIFICATION-1.0"
 MAX_PILOT_REQUESTS = 5
 SELECT_CLASSIFICATION = "preliminary_high"
+MEDIUM_CLASSIFICATION = "preliminary_medium"
+HIGH_SELECTION_RULE = "preliminary_high_in_f04_priority_rank_order"
+MEDIUM_SELECTION_RULE = "preliminary_medium_in_f04_priority_rank_order"
 DETAIL_HOST = "api.smartrecruiters.com"
 APPROVED_CRITERIA_STATUS = "approved_digest_and_rule_version_match"
 MAX_SECTION_LINES = 40
@@ -155,12 +158,13 @@ def _lineage_problem(lineage: Any, f04_report: Mapping[str, Any]) -> bool:
 
 
 def build_allowlist(f04_report: Any, *, f04_report_sha256: str, lineage: Mapping[str, str],
-                    limit: int = MAX_PILOT_REQUESTS) -> dict[str, Any]:
+                    limit: int = MAX_PILOT_REQUESTS, medium_offset: int | None = None) -> dict[str, Any]:
     """Explicit, reviewable detail-request allowlist. Pure; no network.
 
     Selection follows Function 04's ``priority_rank`` (the explicit priority), not a score sort: the first
-    ``limit`` ``preliminary_high`` rows. A high row that cannot be bound exactly is reported in
-    ``selection.unbound`` and is never replaced by a lower-priority row. ``lineage`` pins the verified original
+    ``limit`` ``preliminary_high`` rows by default, or an explicit bounded window of ``preliminary_medium``
+    rows when medium_offset is supplied. An unbindable row is reported in ``selection.unbound`` and is never
+    replaced by a row outside the chosen window. The legacy high selection document remains unchanged. ``lineage`` pins the verified original
     Function 02 data the Function 04 report was produced from (see ``check_lineage``).
     """
     rows = validate_f04_report(f04_report)
@@ -170,11 +174,17 @@ def build_allowlist(f04_report: Any, *, f04_report_sha256: str, lineage: Mapping
         raise DetailVerificationError("LIMIT_OUT_OF_RANGE")
     if not isinstance(f04_report_sha256, str) or not _HEX64.fullmatch(f04_report_sha256):
         raise DetailVerificationError("F04_REPORT_SHA256")
-    high = [r for r in rows if r["suitability"]["classification"] == SELECT_CLASSIFICATION]
+    if medium_offset is not None and (type(medium_offset) is not int or medium_offset < 0 or medium_offset > len(rows)):
+        raise DetailVerificationError("MEDIUM_OFFSET_OUT_OF_RANGE")
+    classification = SELECT_CLASSIFICATION if medium_offset is None else MEDIUM_CLASSIFICATION
+    eligible = [r for r in rows if r["suitability"]["classification"] == classification]
+    if medium_offset is not None and medium_offset >= len(eligible):
+        raise DetailVerificationError("MEDIUM_OFFSET_OUT_OF_RANGE")
+    start = 0 if medium_offset is None else medium_offset
     targets: list[dict[str, Any]] = []
     unbound: list[dict[str, Any]] = []
     seen_identity: set[tuple] = set()
-    for row in high[:limit]:
+    for row in eligible[start:start + limit]:
         try:
             target = _bind(row, len(targets) + 1)
         except DetailVerificationError as exc:
@@ -197,8 +207,10 @@ def build_allowlist(f04_report: Any, *, f04_report_sha256: str, lineage: Mapping
                    "rule_version": f04_report.get("rule_version"),
                    "policy_version": f04_report.get("policy_version"),
                    "criteria_sha256": f04_report["criteria"].get("sha256"), "lineage": dict(lineage)},
-        "selection": {"rule": "preliminary_high_in_f04_priority_rank_order", "limit": limit,
-                      "high_rows_in_report": len(high), "selected": len(targets), "unbound": unbound},
+        "selection": {"rule": HIGH_SELECTION_RULE if medium_offset is None else MEDIUM_SELECTION_RULE, "limit": limit,
+                      **({"high_rows_in_report": len(eligible)} if medium_offset is None else
+                         {"medium_rows_in_report": len(eligible), "medium_offset": medium_offset}),
+                      "selected": len(targets), "unbound": unbound},
         "targets": targets}
     doc["approval"] = {"status": "awaiting_owner_approval", "allowlist_sha256": allowlist_digest(doc),
                        "note": "Quote allowlist_sha256 to approve exactly these requests. Nothing is approved yet."}
@@ -214,8 +226,15 @@ def verify_allowlist(doc: Any, f04_report: Any, *, f04_report_sha256: str, linea
     if (not isinstance(targets, list) or not isinstance(selection, dict) or len(targets) > MAX_PILOT_REQUESTS
             or type(selection.get("limit")) is not int):
         raise DetailVerificationError("ALLOWLIST_SHAPE")
+    rule = selection.get("rule")
+    if rule == HIGH_SELECTION_RULE:
+        medium_offset = None
+    elif rule == MEDIUM_SELECTION_RULE and type(selection.get("medium_offset")) is int:
+        medium_offset = selection["medium_offset"]
+    else:
+        raise DetailVerificationError("ALLOWLIST_SELECTION_RULE")
     expected = build_allowlist(f04_report, f04_report_sha256=f04_report_sha256, lineage=lineage,
-                               limit=selection["limit"])
+                               limit=selection["limit"], medium_offset=medium_offset)
     if allowlist_digest(doc) != allowlist_digest(expected):
         raise DetailVerificationError("ALLOWLIST_NOT_REPRODUCED_FROM_F04_REPORT")
     return expected
