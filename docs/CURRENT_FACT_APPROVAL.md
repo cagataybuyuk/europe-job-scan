@@ -10,20 +10,20 @@ EJS-CURRENT-FACT-APPROVAL-1 is a strict JSON object with exactly:
 
 - schema_version: EJS-CURRENT-FACT-APPROVAL-1
 - generation: positive integer, monotonically advanced by the independent
-  publisher whenever the approved pair changes or is revoked
+  publisher whenever the approved triple changes or is revoked
 - status: active or revoked (only active passes the consumer)
 - profile_version: current approved candidate profile identifier
 - policy_version: SUBMIT-1.0
 - issued_at, expires_at: UTC seconds, validity at most 24 hours
-- registry_sha256, snapshot_sha256: exact reviewed private byte digests
+- template_sha256, registry_sha256, snapshot_sha256: exact reviewed private byte digests
 
 The consumer receives the exact record and private input bytes plus an
 independently authenticated CURRENT record digest, generation and profile
 version. No defaults or fallback to an earlier approval are permitted.
 `resolve_current_fact_inputs` verifies those values, freshness, active status
-and both input digests, returning only the pins for the offline compiler.
+and all three input digests, returning only the pins for the offline compiler.
 The compiler and snapshot validator remain responsible for schema, values,
-provenance, form, target and CV metadata binding. Do not persist the returned
+provenance, form, target and CV metadata binding. The template digest also binds non-fact answers and package metadata, but the independent reviewer must approve them. This matches the three-pin compiler interface on PR #127 at 0174ef87e38837720bc3873d4013969e6e921f6a. Earlier two-pin records fail closed; no automatic upgrade or pin recomputation is allowed. Do not persist the returned
 pins as reusable approval tokens.
 
 ## Required operational boundary (not implemented here)
@@ -57,6 +57,6 @@ between preparation and use.
 `python -m pytest -q tests/test_current_fact_approval.py`
 
 Synthetic tests cover exact pin matching, generation rollback, explicit
-revocation, expiry, invalid timestamps, malformed JSON and type confusion.
+revocation, expiry, invalid timestamps, malformed JSON, type confusion, modified template bytes, missing template pin and private error-frame cleanup.
 Core CI includes the suite. No live ATS, CV, private data, queue, STOP, ledger
 or submission authority changes are in scope.
