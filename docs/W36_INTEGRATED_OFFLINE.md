@@ -25,8 +25,32 @@ The integration tests exercise valid deterministic compilation, byte changes
 to each input, mismatched current profile, revocation/rollback, expiry,
 downstream denials even with matching pins and private error-frame cleanup.
 
+## Private local sources
+
+`compile_current_manifest_from_files` accepts four absolute file paths and the
+same independently authenticated current approval context as the byte API. Keep
+private inputs outside the repository on a trusted local filesystem. Each input
+needs an owner-only `0700` parent and a caller-owned `0600` regular file with one
+link. The reader opens each component relative to a verified directory
+descriptor without following symlinks. Ancestors must belong to the caller or
+root. Group or other write access is permitted only on root-owned sticky
+ancestors such as `/tmp`
+on Linux or `/private/tmp` on macOS. Pass physical paths when the OS also
+exposes a symlink alias.
+
+On macOS the reader checks descriptor-based extended ACLs and accepts only
+absent or deny-only ACLs. On Linux it rejects extended POSIX access ACLs,
+including masked grants. Failed ACL inspection and unsupported platforms deny
+the read. The reader checks the path bindings and file metadata again after all
+four reads. It caps each read at one byte beyond the inspected file size and
+uses the existing per-input limits of 16,384 bytes for approval, 512,000 bytes
+for template, 1,000,000 bytes for registry and 500,000 bytes for snapshot.
+The existing gate compares the approval bytes against the independent digest
+and uses the authenticated record's pins for the other three byte sequences.
+Errors expose only `CURRENT_MANIFEST_REVIEW_REQUIRED` from the file entry point.
+
 Run offline:
-`python -m pytest -q tests/test_execution_manifest.py tests/test_trusted_fact_snapshot.py tests/test_reviewed_manifest_compiler.py tests/test_current_fact_approval.py tests/test_current_manifest_compiler.py`
+`python -m pytest -q tests/test_execution_manifest.py tests/test_trusted_fact_snapshot.py tests/test_reviewed_manifest_compiler.py tests/test_current_fact_approval.py tests/test_current_manifest_compiler.py tests/test_current_manifest_local_sources.py`
 
 ## Operational decision still required
 
@@ -35,8 +59,8 @@ service. An independent review identity must publish authenticated CURRENT
 approval state, protected from the manifest writer (including rollback).
 A file owned by the same user or a hash computed by the writer is not enough.
 A separately permissioned owner-controlled approval channel is a candidate,
-but its actual identities, permissions, revocation retrieval, private file
-reader and point-of-use recheck must be verified before integration.
+and its actual identities, permissions, publication, current-state retrieval
+and point-of-use revocation recheck must be verified before integration.
 Do not assume a signing key or same-UID storage provides that separation.
 The current helper tests a supplied trust context; it cannot authenticate or
 refresh that context. Compiled bytes do not confer execution authority.
