@@ -1492,3 +1492,47 @@ def test_medium_cli_uses_same_approval_and_budget_guards(files, capsys):
     assert [u for u, _ in net.calls] == [url_of(50)]
     assert cli.main([*argv[:-1], str(base / "medium-again"), "--approve-allowlist-sha256", digest], **kwargs) == 2
     assert len(net.calls) == 1
+
+
+# Geographic pilot scope: selection only, never a change in F04 eligibility.
+def test_scoped_shortlist_uses_verified_configured_countries_only():
+    f04 = f04_report([row(1, country="US"), row(2, country=None), row(3, country="IE"),
+                      row(4, country="NL"), row(5, country=["NL", "US"]), row(6, country="NL")])
+    kwargs = dict(f04_report_sha256=F04_SHA, lineage=lineage_of(f04))
+    allow = build_allowlist(f04, pilot_countries=["NL"], **kwargs)
+    assert [x["posting_id"] for x in allow["targets"]] == [pid(4), pid(6)]
+    assert allow["selection"]["pilot_countries"] == ["NL"]
+    assert allow["selection"]["scope_excluded"] == 4
+    assert allow["selection"]["high_rows_in_report"] == 2
+    assert verify_allowlist(allow, f04, **kwargs) == allow
+    assert f04["listings_kept"] == 6
+    forged = copy.deepcopy(allow)
+    forged["selection"]["pilot_countries"] = ["IE"]
+    with pytest.raises(DetailVerificationError, match="ALLOWLIST_NOT_REPRODUCED"):
+        verify_allowlist(forged, f04, **kwargs)
+
+
+def test_scoped_medium_window_and_canonical_scope_order():
+    f04 = f04_report([row(1, "Data Analyst", country="US"), row(2, "Data Analyst", country="NL"),
+                      row(3, "Data Analyst", country="IE"), row(4, "Data Analyst", country="NL")])
+    kwargs = dict(f04_report_sha256=F04_SHA, lineage=lineage_of(f04), medium_offset=1, limit=1)
+    allow = build_allowlist(f04, pilot_countries=["NL", "IE"], **kwargs)
+    assert [x["posting_id"] for x in allow["targets"]] == [pid(4)]
+    assert allow["selection"]["medium_rows_in_report"] == 3
+    assert allow["selection"]["scope_excluded"] == 1
+    assert allow == build_allowlist(f04, pilot_countries=["IE", "NL"], **kwargs)
+
+
+@pytest.mark.parametrize("scope", [[], ["nl"], ["NL", "NL"], ["Netherlands"], "NL", [None]])
+def test_invalid_pilot_scope_fails_closed(scope):
+    f04, _ = world()
+    with pytest.raises(DetailVerificationError, match="PILOT_COUNTRIES_INVALID"):
+        build_allowlist(f04, f04_report_sha256=F04_SHA, lineage=lineage_of(f04), pilot_countries=scope)
+
+
+def test_lineage_rejects_forged_binding_even_if_suitability_unchanged():
+    f04 = f04_report([row(1)])
+    forged = copy.deepcopy(f04)
+    forged["vacancies"][0]["url"] = f"https://jobs.smartrecruiters.com/Other/{pid(1)}"
+    with pytest.raises(DetailVerificationError, match="F04_REPORT_NOT_REPRODUCIBLE"):
+        lineage_call(forged, f04.projection)

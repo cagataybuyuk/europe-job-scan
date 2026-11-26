@@ -218,7 +218,7 @@ def _reassess(args, *, now) -> int:
 def _prepare(args) -> int:
     criteria, criteria_sha, f04, f04_sha, projection, lineage = _load_inputs(args)
     allowlist = build_allowlist(f04, f04_report_sha256=f04_sha, lineage=lineage, limit=args.limit,
-                                medium_offset=args.medium_offset)
+                                medium_offset=args.medium_offset, pilot_countries=args.pilot_country)
     out_dir = prepare_output_dir(args.out_dir)
     if (out_dir / ALLOWLIST_NAME).exists():
         raise OutputDirError("OUTPUT_EXISTS")
@@ -227,7 +227,8 @@ def _prepare(args) -> int:
         "mode": "prepare_offline_no_requests", "network": False,
         "expected_request_count": len(allowlist["targets"]),
         "allowlist_sha256": allowlist["approval"]["allowlist_sha256"],
-        **{k: allowlist["selection"][k] for k in ("high_rows_in_report", "medium_rows_in_report", "medium_offset")
+        **{k: allowlist["selection"][k] for k in ("high_rows_in_report", "medium_rows_in_report", "medium_offset",
+                                                       "pilot_countries", "scope_excluded")
            if k in allowlist["selection"]},
         "unbound": allowlist["selection"]["unbound"],
         "targets": [{k: t[k] for k in ("sequence", "f04_priority_rank", "tenant", "posting_id", "canonical_url",
@@ -317,6 +318,8 @@ def main(argv: list[str] | None = None, *, live_transport: Callable = urllib_tra
     sub.choices["prepare"].add_argument("--limit", type=int, default=5)
     sub.choices["prepare"].add_argument("--medium-offset", type=int, default=None,
                                         help="explicit zero-based window offset within preliminary_medium rows; omit for legacy high selection")
+    sub.choices["prepare"].add_argument("--pilot-country", action="append", metavar="ISO2",
+                                        help="repeat for each approved pilot country; only exact configured provenance is eligible")
     r = sub.choices["reassess"]
     r.add_argument("--allowlist", type=Path, required=True)
     r.add_argument("--evidence-dir", type=Path, required=True, help="the original live run's output directory (read only)")
