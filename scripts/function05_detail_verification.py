@@ -84,7 +84,10 @@ def _load_inputs(args):
     if f02_sha != args.expected_f02_sha256:
         raise DetailVerificationError("F02_DIGEST_MISMATCH")
     projection = json.loads(f02_bytes)
-    if isinstance(projection, dict) and projection.get("schema") == EXPANSION_SCHEMA:
+    original_expansion = isinstance(projection, dict) and projection.get("schema") == EXPANSION_SCHEMA
+    if getattr(args, "live", False) and not original_expansion:
+        raise DetailVerificationError("LIVE_REQUIRES_ORIGINAL_VERIFIED_EXPANSION_REPORT")
+    if original_expansion:
         projection = project_for_application_bridge(projection)          # exactly what function04_suitability does
     lineage = check_lineage(f04, projection, criteria, criteria_sha256=criteria_sha,
                             expected_criteria_sha256=args.expected_criteria_sha256,
@@ -218,7 +221,7 @@ def _reassess(args, *, now) -> int:
 def _prepare(args) -> int:
     criteria, criteria_sha, f04, f04_sha, projection, lineage = _load_inputs(args)
     allowlist = build_allowlist(f04, f04_report_sha256=f04_sha, lineage=lineage, limit=args.limit,
-                                medium_offset=args.medium_offset)
+                                medium_offset=args.medium_offset, pilot_countries=args.pilot_country)
     out_dir = prepare_output_dir(args.out_dir)
     if (out_dir / ALLOWLIST_NAME).exists():
         raise OutputDirError("OUTPUT_EXISTS")
@@ -227,7 +230,8 @@ def _prepare(args) -> int:
         "mode": "prepare_offline_no_requests", "network": False,
         "expected_request_count": len(allowlist["targets"]),
         "allowlist_sha256": allowlist["approval"]["allowlist_sha256"],
-        **{k: allowlist["selection"][k] for k in ("high_rows_in_report", "medium_rows_in_report", "medium_offset")
+        **{k: allowlist["selection"][k] for k in ("high_rows_in_report", "medium_rows_in_report", "medium_offset",
+                                                       "pilot_countries", "scope_excluded")
            if k in allowlist["selection"]},
         "unbound": allowlist["selection"]["unbound"],
         "targets": [{k: t[k] for k in ("sequence", "f04_priority_rank", "tenant", "posting_id", "canonical_url",
@@ -247,6 +251,8 @@ def _verify(args, *, live_transport, clock, sleep, now) -> int:
         raise DetailVerificationError("HISTORY_ONLY_FOR_LIVE_OR_DERIVED_EVIDENCE")     # synthetic never enters history
     budget_dir = None
     if args.live:
+        if not doc["selection"].get("pilot_countries"):
+            raise DetailVerificationError("LIVE_REQUIRES_EXPLICIT_PILOT_COUNTRIES")
         if args.approve_allowlist_sha256 != digest:
             raise DetailVerificationError("LIVE_REQUIRES_OWNER_QUOTED_ALLOWLIST_DIGEST")
         if args.budget_dir is None:
@@ -317,6 +323,8 @@ def main(argv: list[str] | None = None, *, live_transport: Callable = urllib_tra
     sub.choices["prepare"].add_argument("--limit", type=int, default=5)
     sub.choices["prepare"].add_argument("--medium-offset", type=int, default=None,
                                         help="explicit zero-based window offset within preliminary_medium rows; omit for legacy high selection")
+    sub.choices["prepare"].add_argument("--pilot-country", action="append", metavar="ISO2",
+                                        help="repeat for each approved pilot country; only exact configured provenance is eligible")
     r = sub.choices["reassess"]
     r.add_argument("--allowlist", type=Path, required=True)
     r.add_argument("--evidence-dir", type=Path, required=True, help="the original live run's output directory (read only)")

@@ -40,7 +40,7 @@ from ejs.services.discovery import DiscoveryError
 from ejs.services.execution_manifest import validate_apply_url
 from ejs.services.http_carrier import HttpCarrier
 from ejs.services.suitability import (AUTHORITY as F04_AUTHORITY, ROW_FIELDS, SCHEMA as F04_SCHEMA, evaluate_report,
-                                      canonical_sha256)
+                                      canon_country, canonical_sha256)
 from ejs.services import language_policy as lp
 from ejs.services.suitability_evidence import (VacancyDetail, detail_from_smartrecruiters, extract_detail_evidence,
                                                html_to_text)
@@ -158,7 +158,8 @@ def _lineage_problem(lineage: Any, f04_report: Mapping[str, Any]) -> bool:
 
 
 def build_allowlist(f04_report: Any, *, f04_report_sha256: str, lineage: Mapping[str, str],
-                    limit: int = MAX_PILOT_REQUESTS, medium_offset: int | None = None) -> dict[str, Any]:
+                    limit: int = MAX_PILOT_REQUESTS, medium_offset: int | None = None,
+                    pilot_countries: list[str] | None = None) -> dict[str, Any]:
     """Explicit, reviewable detail-request allowlist. Pure; no network.
 
     Selection follows Function 04's ``priority_rank`` (the explicit priority), not a score sort: the first
@@ -178,6 +179,38 @@ def build_allowlist(f04_report: Any, *, f04_report_sha256: str, lineage: Mapping
         raise DetailVerificationError("MEDIUM_OFFSET_OUT_OF_RANGE")
     classification = SELECT_CLASSIFICATION if medium_offset is None else MEDIUM_CLASSIFICATION
     eligible = [r for r in rows if r["suitability"]["classification"] == classification]
+    # Explicit pilot scope is digest-bound; unknown or mixed provenance
+    # outside it skips this pilot, not the listing itself.
+    total_classified = len(eligible)
+    if pilot_countries is not None:
+        if (not isinstance(pilot_countries, list) or not pilot_countries
+                or any(not isinstance(code, str) or not re.fullmatch(r"[A-Z]{2}", code)
+                       or canon_country(code) != code for code in pilot_countries)
+                or len(set(pilot_countries)) != len(pilot_countries)):
+            raise DetailVerificationError("PILOT_COUNTRIES_INVALID")
+        pilot_countries = sorted(pilot_countries)
+        allowed = set(pilot_countries)
+        scoped = []
+        for row in eligible:
+            dims = row["suitability"].get("dimensions")
+            geo = dims.get("geography") if isinstance(dims, dict) else None
+            countries = geo.get("countries") if isinstance(geo, dict) else None
+            evidence = row.get("discovery_evidence")
+            raw = evidence.get("countries") if isinstance(evidence, dict) else None
+            if (f04_report.get("source_projection") != "verified_live_country_feed"
+                    or not isinstance(evidence, dict) or evidence.get("observation") != "live_country_feed"
+                    or not isinstance(raw, list) or not raw
+                    or any(type(code) is not str or code not in allowed for code in raw)
+                    or len(set(raw)) != len(raw)
+                    or not isinstance(countries, list) or countries != sorted(raw)
+                    or not isinstance(geo, dict) or geo.get("status") not in ("tier_1", "other")
+                    or not _TENANT.fullmatch(row["tenant"])):
+                continue
+            expected_feed = (f"https://{DETAIL_HOST}/v1/companies/{row['tenant']}/postings"
+                             f"?country={raw[0].lower()}&offset=0&limit=100")
+            if evidence.get("feed_url") == expected_feed:
+                scoped.append(row)
+        eligible = scoped
     if medium_offset is not None and medium_offset >= len(eligible):
         raise DetailVerificationError("MEDIUM_OFFSET_OUT_OF_RANGE")
     start = 0 if medium_offset is None else medium_offset
@@ -210,6 +243,8 @@ def build_allowlist(f04_report: Any, *, f04_report_sha256: str, lineage: Mapping
         "selection": {"rule": HIGH_SELECTION_RULE if medium_offset is None else MEDIUM_SELECTION_RULE, "limit": limit,
                       **({"high_rows_in_report": len(eligible)} if medium_offset is None else
                          {"medium_rows_in_report": len(eligible), "medium_offset": medium_offset}),
+                      **({"pilot_countries": pilot_countries, "scope_excluded": total_classified - len(eligible)}
+                         if pilot_countries is not None else {}),
                       "selected": len(targets), "unbound": unbound},
         "targets": targets}
     doc["approval"] = {"status": "awaiting_owner_approval", "allowlist_sha256": allowlist_digest(doc),
@@ -234,7 +269,8 @@ def verify_allowlist(doc: Any, f04_report: Any, *, f04_report_sha256: str, linea
     else:
         raise DetailVerificationError("ALLOWLIST_SELECTION_RULE")
     expected = build_allowlist(f04_report, f04_report_sha256=f04_report_sha256, lineage=lineage,
-                               limit=selection["limit"], medium_offset=medium_offset)
+                               limit=selection["limit"], medium_offset=medium_offset,
+                               pilot_countries=selection.get("pilot_countries"))
     if allowlist_digest(doc) != allowlist_digest(expected):
         raise DetailVerificationError("ALLOWLIST_NOT_REPRODUCED_FROM_F04_REPORT")
     return expected
@@ -257,9 +293,7 @@ def check_lineage(f04_report: Mapping[str, Any], projection: Any, criteria: Crit
         raise DetailVerificationError("F02_SOURCE_SHA256")
     if f04_report.get("source_report_sha256") != again["source_report_sha256"]:
         raise DetailVerificationError("F04_REPORT_NOT_FROM_PINNED_F02_DATA")
-    old = [(r["priority_rank"], r["tenant"], r.get("posting_id"), r["suitability"]) for r in f04_report["vacancies"]]
-    new = [(r["priority_rank"], r["tenant"], r.get("posting_id"), r["suitability"]) for r in again["vacancies"]]
-    if json.dumps(old, sort_keys=True) != json.dumps(new, sort_keys=True):
+    if json.dumps(f04_report, sort_keys=True) != json.dumps(again, sort_keys=True):
         raise DetailVerificationError("F04_REPORT_NOT_REPRODUCIBLE")
     return {"f02_source_file_sha256": f02_source_sha256, "f02_projection_sha256": again["source_report_sha256"]}
 
