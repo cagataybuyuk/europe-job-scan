@@ -30,7 +30,7 @@ from ejs.services.shadow_run import SCHEMA as DISCOVERY_SCHEMA
 from ejs.services.suitability_evidence import (DetailEvidence, VacancyDetail, extract_detail_evidence)
 
 SCHEMA = "EJS-SUITABILITY-1"
-POLICY_VERSION = "SUITABILITY-1.1"
+POLICY_VERSION = "SUITABILITY-1.2"
 IDENTITY_FIELDS = ("ats_kind", "region", "tenant", "posting_id")
 ROW_FIELDS = ("company", "role", "location", "url", "ats_kind", "source", "tenant", "region")
 APPROVED_POLICY_FIELDS = ("role_primary", "role_secondary", "role_no_title_match")
@@ -48,6 +48,13 @@ _COUNTRY_NAMES = {
 _COUNTRY_LOOKUP = {name: code for code, names in _COUNTRY_NAMES.items() for name in (code.casefold(), *names)}
 _PLACEHOLDER = re.compile(r"^<[^<>]+>$")
 _TOKEN = re.compile(r"[a-z0-9+#]+")
+# Only adjacent, explicitly identified Finance & Operations variants. Do not infer
+# F&O from Dynamics 365, CE, CRM, Power Platform, AX or an isolated FO token.
+_FO_ROLE = re.compile(
+    r"(?<![\w+#])(?:(?:d365|dynamics\s*365)(?:\s+|\s*[-–—]\s*)"
+    r"(?:f\s*[&/]\s*o|fo|finance\s+(?:and|&)\s+operations)|d365fo)"
+    r"(?![\w+#/&])"
+)
 
 
 class SuitabilityError(ValueError):
@@ -137,6 +144,26 @@ def _tokens(text: str) -> frozenset[str]:
     return frozenset(_TOKEN.findall(_fold(text)))
 
 
+def _role_tokens(text: str) -> frozenset[str]:
+    """Canonicalize only exact F&O product spellings for role matching."""
+    folded = _fold(text)
+    remainder, count = _FO_ROLE.subn(" ", folded)
+    # The marker cannot be emitted by _TOKEN from ordinary title text.
+    return _tokens(remainder) | (frozenset({"@d365_fo@"}) if count else frozenset())
+
+
+def _role_match(title: frozenset[str], normalized_title: frozenset[str],
+                phrases: tuple[str, ...]) -> str | None:
+    for phrase in phrases:
+        if _FO_ROLE.search(_fold(phrase)):
+            toks, candidate = _role_tokens(phrase), normalized_title
+        else:
+            toks, candidate = _tokens(phrase), title
+        if toks and toks <= candidate:
+            return phrase
+    return None
+
+
 def _matches(title: frozenset[str], phrases: tuple[str, ...]) -> str | None:
     for phrase in phrases:
         toks = _tokens(phrase)
@@ -149,16 +176,17 @@ def _assess_listing(row: Mapping[str, Any], profile: Profile, policy: Suitabilit
                     ) -> tuple[dict[str, int | None], dict[str, Any], dict[str, bool | None]]:
     """Ratings, dimensions and blocker signals from title/location/country provenance only."""
     title = _tokens(row["role"])
+    role_title = _role_tokens(row["role"])
     ratings: dict[str, int | None] = {c: None for c in SCORE_COMPONENTS}
     dims: dict[str, Any] = {}
     signals: dict[str, bool | None] = {}
 
     if not (profile.primary_roles or profile.secondary_roles):
         dims["role_track"] = {"status": "unknown", "need": "role_tracks_not_configured"}
-    elif (hit := _matches(title, profile.primary_roles)):
+    elif (hit := _role_match(title, role_title, profile.primary_roles)):
         ratings["role_fit"] = policy.role_primary
         dims["role_track"] = {"status": "primary_match", "matched": hit}
-    elif (hit := _matches(title, profile.secondary_roles)):
+    elif (hit := _role_match(title, role_title, profile.secondary_roles)):
         ratings["role_fit"] = policy.role_secondary
         dims["role_track"] = {"status": "secondary_match", "matched": hit}
     else:

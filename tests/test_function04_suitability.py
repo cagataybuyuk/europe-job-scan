@@ -727,3 +727,97 @@ def test_cli_refuses_non_utf8_criteria_bytes(tmp_path, capsys):
     assert _cli().main([*base, "--out-dir", str(tmp_path / "o"), "--expected-criteria-sha256",
                         sha256(crit.read_bytes()).hexdigest(), "--expected-rule-version", RV]) == 2
     assert "CRITERIA_NOT_UTF8" in capsys.readouterr().err and not (tmp_path / "o").exists()
+
+
+# ---- Narrow product-spelling regression: no expansion of approved career tracks ---------------------
+@pytest.mark.parametrize("title", [
+    "Dynamics 365 F&O Finance Lead Consultant",
+    "D365 FO Senior Functional Consultant",
+    "Solution Architect -Dynamics 365 F/O",
+    "Microsoft Dynamics 365 Finance and Operations Consultant",
+    "Microsoft Dynamics 365 Finance & Operations Consultant",
+    "d365 f & o Consultant",
+    "D365 F&O Developer",
+])
+def test_fo_product_variants_match_approved_track_without_claiming_eligibility(title):
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", 'primary: "D365 F&O"'))
+    result = evaluate_report(report(row("1", title)), c)
+    item = by_posting(result)["1"]
+    assert result["policy_version"] == "SUITABILITY-1.2"
+    assert item["dimensions"]["role_track"] == {"status": "primary_match", "matched": "D365 F&O"}
+    assert item["classification"] == "preliminary_high"
+    assert item["decision_label"] == "needs_user"
+    assert item["confirmed_incompatibilities"] == []
+    assert item["ratings"]["sponsorship"] is None
+    assert result["authority"] == AUTHORITY
+
+
+@pytest.mark.parametrize("title", [
+    "Dynamics 365 CE Consultant", "D365 CRM Consultant", "Power Platform Consultant",
+    "Dynamics AX Consultant", "Microsoft Dynamics 365 Consultant", "FO Consultant",
+    "D365 Finance Officer", "D365 Food Specialist", "XD365 FO Consultant",
+    "D365 F/Ops Consultant", "D365 F and O unrelated", "Dynamics 365 Sales F&O Consultant",
+])
+def test_fo_product_variants_do_not_expand_to_other_products_or_partial_words(title):
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", 'primary: "D365 F&O"'))
+    item = by_posting(evaluate_report(report(row("1", title)), c))["1"]
+    assert item["classification"] == "preliminary_low"
+    assert item["ratings"]["role_fit"] is None
+
+
+def test_fo_role_aliases_do_not_change_seniority_or_secondary_precedence():
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", 'primary: "Dynamics 365 F/O"'))
+    result = evaluate_report(report(row("1", "Senior D365 FO Data Analyst"),
+                                    row("2", "Senior Data Analyst")), c)
+    items = by_posting(result)
+    assert items["1"]["classification"] == "preliminary_high"
+    assert items["1"]["dimensions"]["seniority"]["status"] == "include_match"
+    assert items["2"]["classification"] == "preliminary_medium"
+
+
+def test_fo_normalization_preserves_generic_existing_role_track_matching():
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", 'primary: "Dynamics 365"'))
+    item = by_posting(evaluate_report(report(row("1", "Dynamics 365 F&O Consultant")), c))["1"]
+    assert item["classification"] == "preliminary_high"
+
+
+@pytest.mark.parametrize("criterion,title", [
+    ("D365FO", "Microsoft Dynamics 365 F&O Consultant"),
+    ("Dynamics365 F/O", "D365 FO Consultant"),
+    ("D365 F&O", "D365FO Consultant"),
+    ("D365 FO", "Microsoft Dynamics365 Finance and Operations Consultant"),
+])
+def test_fo_aliases_are_symmetric_for_explicit_compact_spellings(criterion, title):
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", f'primary: "{criterion}"'))
+    assert by_posting(evaluate_report(report(row("1", title)), c))["1"]["classification"] == "preliminary_high"
+
+
+@pytest.mark.parametrize("title", ["D365FOps Consultant", "D365 FO/O Consultant",
+                                  "D365 F/O&Other Consultant", "D365FO+Other Consultant"])
+def test_fo_marker_does_not_match_partial_product_tokens(title):
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", 'primary: "D365 F&O"'))
+    assert by_posting(evaluate_report(report(row("1", title)), c))["1"]["classification"] == "preliminary_low"
+
+
+# Independent QA counterexamples: punctuation separators and Unicode boundaries.
+@pytest.mark.parametrize("criterion,title", [
+    ("D365 F&O", "D365 - F&O Consultant"),
+    ("D365 - F&O", "Dynamics 365 F&O Consultant"),
+    ("D365 F&O", "Dynamics 365 – F/O Consultant"),
+    ("D365 F&O", "D365—FO Consultant"),
+])
+def test_fo_aliases_allow_single_dash_separator_symmetrically(criterion, title):
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", f'primary: "{criterion}"'))
+    assert by_posting(evaluate_report(report(row("1", title)), c))["1"]["classification"] == "preliminary_high"
+
+
+@pytest.mark.parametrize("title", [
+    "D365 FOю Consultant", "юD365 FO Consultant", "D365FO中 Consultant",
+    "D365 FO_Extra Consultant", "prefix_D365 FO Consultant",
+    "D365 -- F&O Consultant", "D365 - Sales F&O Consultant",
+])
+def test_fo_aliases_reject_unicode_word_continuations_and_unrelated_separators(title):
+    c = criteria(PROFILE_SECTIONS.replace("primary: business analyst", 'primary: "D365 F&O"'))
+    item = by_posting(evaluate_report(report(row("1", title)), c))["1"]
+    assert item["classification"] == "preliminary_low"
+    assert item["ratings"]["role_fit"] is None
