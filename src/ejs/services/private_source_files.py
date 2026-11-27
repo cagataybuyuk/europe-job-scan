@@ -93,23 +93,28 @@ class _OpenedPath:
         _require(self._state(os.fstat(self.fd)) == expected)
 
 
-def _open_directory(stack: ExitStack, name: str, parent_fd: int | None) -> _OpenedPath:
+def _open_directory(stack: ExitStack, name: str, parent_fd: int | None, *,
+                    root_owned: bool) -> _OpenedPath:
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
     stack.callback(os.close, fd)
     info = os.fstat(fd)
-    _require(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, os.geteuid()))
+    owners = (0,) if root_owned else (0, os.geteuid())
+    _require(stat.S_ISDIR(info.st_mode) and info.st_uid in owners)
     shared_sticky = bool(info.st_mode & 0o022)
     if shared_sticky:
-        _require(info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX))
+        _require(not root_owned and info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX))
     directory = _OpenedPath(fd, parent_fd, name, info, shared_sticky)
     directory.verify()
     return directory
 
 
-def _open_file(stack: ExitStack, parent_fd: int, name: str, limit: int) -> _OpenedPath:
+def _open_file(stack: ExitStack, parent_fd: int, name: str, limit: int, *,
+               root_owned: bool) -> _OpenedPath:
     before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    _require(stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid()
-             and stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1
+    owner = 0 if root_owned else os.geteuid()
+    modes = (0o440, 0o444, 0o640, 0o644) if root_owned else (0o600,)
+    _require(stat.S_ISREG(before.st_mode) and before.st_uid == owner
+             and stat.S_IMODE(before.st_mode) in modes and before.st_nlink == 1
              and 0 < before.st_size <= limit)
     # O_NONBLOCK also avoids waiting if a FIFO replaces the inspected entry.
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY,
@@ -134,8 +139,13 @@ def _read_exact(source: _OpenedPath) -> bytes:
 
 def _read_private_sources(sources: tuple[tuple[str | Path, int], ...]) -> tuple[bytes, ...]:
     """Return exact private bytes to the compiler for independent pin checks."""
+    return _read_sources(sources, root_owned=False)
+
+
+def _read_sources(sources: tuple[tuple[str | Path, int], ...], *,
+                  root_owned: bool) -> tuple[bytes, ...]:
     with ExitStack() as stack:
-        directories = {("/",): _open_directory(stack, "/", None)}
+        directories = {("/",): _open_directory(stack, "/", None, root_owned=root_owned)}
         opened = []
         for filename, limit in sources:
             path = Path(filename)
@@ -145,11 +155,14 @@ def _read_private_sources(sources: tuple[tuple[str | Path, int], ...]) -> tuple[
             for end in range(2, len(parts)):
                 prefix = parts[:end]
                 if prefix not in directories:
-                    directories[prefix] = _open_directory(stack, prefix[-1], parent.fd)
+                    directories[prefix] = _open_directory(
+                        stack, prefix[-1], parent.fd, root_owned=root_owned,
+                    )
                 parent = directories[prefix]
-            _require(parent.before.st_uid == os.geteuid()
-                     and stat.S_IMODE(parent.before.st_mode) == 0o700)
-            opened.append(_open_file(stack, parent.fd, path.name, limit))
+            if not root_owned:
+                _require(parent.before.st_uid == os.geteuid()
+                         and stat.S_IMODE(parent.before.st_mode) == 0o700)
+            opened.append(_open_file(stack, parent.fd, path.name, limit, root_owned=root_owned))
 
         raw = tuple(_read_exact(source) for source in opened)
         # Recheck all open descriptors and name bindings after the whole read,
