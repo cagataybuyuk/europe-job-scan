@@ -20,6 +20,10 @@ ON = RuntimeSwitch(final_submit_enabled=True, kill_switch_engaged=False)
 PDF = b"%PDF-1.7 synthetic test document\n" + b"0" * 200
 
 
+def ALLOW(point):
+    """Explicit always-allow runtime guard for tests that exercise unrelated behavior."""
+
+
 class Clock:
     def __init__(self):
         self.now = NOW
@@ -134,7 +138,7 @@ def run(env, *, switch=ON, doc=None, cv=None, **behaviour):
     clock = Clock()
     browser = FakeBrowser(doc, clock, **behaviour)
     raw = encode(doc)
-    result = PolicyApplicationRuntime(browser, ledger, clock=clock).run(
+    result = PolicyApplicationRuntime(browser, ledger, guard=ALLOW, clock=clock).run(
         raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv or cv_default, switch=switch)
     return result, browser, ledger, clock
 
@@ -255,10 +259,12 @@ def test_backwards_clock_keeps_ledger_consistent(env):
     clock = BackwardsClock()
     browser = FakeBrowser(base, clock, drift=False)
     raw = encode(base)
-    runtime = PolicyApplicationRuntime(browser, ledger, clock=clock)
+    runtime = PolicyApplicationRuntime(browser, ledger, guard=ALLOW, clock=clock)
     result = runtime.run(raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
-    assert result.status in ("EMPLOYER_CONFIRMED", "BLOCKED") and browser.clicks <= 1
-    assert status(ledger) in ("Confirmed", "Released")  # ledger still readable
+    # The per-boundary expiry reads consume clock ticks, so the backwards jump may now land after the
+    # click: an observation older than mark_started is then (correctly) left unconfirmed, never confirmed.
+    assert result.status in ("EMPLOYER_CONFIRMED", "BLOCKED", "SUBMITTED_UNCONFIRMED") and browser.clicks <= 1
+    assert status(ledger) in ("Confirmed", "Released", "Submitted / Unconfirmed")  # ledger still readable
 
 
 class Interrupt(BaseException):
@@ -271,7 +277,7 @@ def test_base_exception_before_start_releases_and_returns(env):
     browser = FakeBrowser(base, clock)
     browser.upload = lambda *a: (_ for _ in ()).throw(Interrupt())
     raw = encode(base)
-    result = PolicyApplicationRuntime(browser, ledger, clock=clock).run(
+    result = PolicyApplicationRuntime(browser, ledger, guard=ALLOW, clock=clock).run(
         raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
     assert result.status == "BLOCKED" and status(ledger) == "Released"
 
@@ -286,7 +292,7 @@ def test_keyboard_interrupt_after_start_is_reraised_with_row_consumed(env):
     browser.submit_once = interrupted
     raw = encode(base)
     with pytest.raises(KeyboardInterrupt):
-        PolicyApplicationRuntime(browser, ledger, clock=clock).run(
+        PolicyApplicationRuntime(browser, ledger, guard=ALLOW, clock=clock).run(
             raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
     assert browser.clicks == 1 and status(ledger) == "Submitted / Unconfirmed"
 
@@ -294,7 +300,7 @@ def test_keyboard_interrupt_after_start_is_reraised_with_row_consumed(env):
 def test_naive_clock_fails_closed(env):
     base, cv, ledger = env
     raw = encode(base)
-    runtime = PolicyApplicationRuntime(FakeBrowser(base, Clock()), ledger, clock=lambda: datetime(2026, 11, 17))
+    runtime = PolicyApplicationRuntime(FakeBrowser(base, Clock()), ledger, guard=ALLOW, clock=lambda: datetime(2026, 11, 17))
     result = runtime.run(raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
     assert result.status == "BLOCKED" and result.code == "POLICY_APP_CLOCK" and status(ledger) is None
 
@@ -311,7 +317,7 @@ def test_after_owner_handoff_the_key_is_held_for_the_owner(env, behaviour):
 
 def test_non_bytes_manifest_returns_a_result(env):
     base, cv, ledger = env
-    runtime = PolicyApplicationRuntime(FakeBrowser(base, Clock()), ledger, clock=Clock())
+    runtime = PolicyApplicationRuntime(FakeBrowser(base, Clock()), ledger, guard=ALLOW, clock=Clock())
     result = runtime.run("not-bytes", expected_sha256="0" * 64, cv_path=cv, switch=ON)  # type: ignore[arg-type]
     assert result.status in ("BLOCKED", "MANIFEST_REJECTED") and status(ledger) is None
 
@@ -340,7 +346,7 @@ def test_owner_hold_survives_an_expired_reservation_after_resume(env):
     browser = FakeBrowser(base, clock, challenge_at=1)
     ref[0] = browser
     raw = encode(base)
-    result = PolicyApplicationRuntime(browser, ledger, clock=clock).run(
+    result = PolicyApplicationRuntime(browser, ledger, guard=ALLOW, clock=clock).run(
         raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
     assert result.status == "BLOCKED" and browser.clicks == 0
     assert status(ledger) == "Awaiting User"
@@ -450,7 +456,7 @@ def test_observation_refuses_echoed_candidate_values(env):
     clock = Clock()
     browser = EchoBrowser(doc, clock, pages=FakeBrowser._pages_from(full))
     raw = encode(doc)
-    result = PolicyApplicationRuntime(browser, ledger, clock=clock).run(
+    result = PolicyApplicationRuntime(browser, ledger, guard=ALLOW, clock=clock).run(
         raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
     assert result.status == "BLOCKED" and result.code == "POLICY_APP_OBSERVATION_INVALID"
     assert "synthetic@example.invalid" not in repr(result)
@@ -484,6 +490,6 @@ def test_disguised_echo_is_refused(env, disguise):
     clock = Clock()
     raw = encode(doc)
     result = PolicyApplicationRuntime(Disguised(doc, clock, pages=FakeBrowser._pages_from(full)), ledger,
-                                      clock=clock).run(raw, expected_sha256=hashlib.sha256(raw).hexdigest(),
+                                      guard=ALLOW, clock=clock).run(raw, expected_sha256=hashlib.sha256(raw).hexdigest(),
                                                        cv_path=cv, switch=ON)
     assert result.status == "BLOCKED" and result.code == "POLICY_APP_OBSERVATION_INVALID"

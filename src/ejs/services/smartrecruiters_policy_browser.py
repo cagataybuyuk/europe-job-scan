@@ -77,6 +77,7 @@ class PolicyNetworkBoundary:
         self.read_hosts = read_hosts
         self.publication_id: str | None = None
         self._lock = Lock()
+        self._guard = None  # bound by the runtime; while unbound every outbound POST is denied
         self._phase = "read"
         self.blocked_writes = 0
         self.uploads = 0
@@ -128,6 +129,23 @@ class PolicyNetworkBoundary:
         with self._lock:
             self.blocked_writes += 1
 
+    def bind_guard(self, guard) -> None:
+        """Mandatory runtime authorization for outbound POSTs; bound once, never replaced."""
+        with self._lock:
+            _require(callable(guard) and self._guard is None, "POLICY_APP_SR_BOUNDARY")
+            self._guard = guard
+
+    def authorize_forward(self, point: str) -> bool:
+        """Ask the runtime guard right before a write is forwarded. Any failure denies."""
+        guard = self._guard
+        try:
+            if guard is None:
+                return False
+            guard(point)
+            return True
+        except Exception:
+            return False
+
     # ---- phases ---------------------------------------------------------------------------
 
     def begin_upload(self) -> None:
@@ -166,6 +184,10 @@ class PolicyNetworkBoundary:
                 self.application_attempts += 1
                 if (self._phase == "submit" and self.application_attempts == 1
                         and self.applications_allowed == 0 and not is_navigation):
+                    if not self.authorize_forward("network:application"):
+                        self._phase = "closed"  # STOP / expiry at the forwarding boundary: nothing is sent
+                        self.blocked_writes += 1
+                        return False
                     self.applications_allowed += 1
                     self._phase = "closed"  # consumed before the request continues
                     return True
@@ -174,6 +196,9 @@ class PolicyNetworkBoundary:
                 return False
             if method == "POST" and self._phase == "upload" and self.uploads == 0 and self.is_upload(url) \
                     and not is_navigation:
+                if not self.authorize_forward("network:upload"):
+                    self.blocked_writes += 1
+                    return False
                 self.uploads += 1
                 return True
             self.blocked_writes += 1
@@ -223,12 +248,20 @@ class SmartRecruitersPolicyBrowser:
     def close(self) -> None:
         self.context.close()
 
+    def bind_guard(self, guard) -> None:
+        """The runtime hands over its authorization check; CV and application POSTs need it."""
+        self.boundary.bind_guard(guard)
+
     # ---- fences ------------------------------------------------------------------------------
 
     def _route(self, route):
         request = route.request
         if not self.boundary.allows(request.method, request.url, request.resource_type,
                                     request.is_navigation_request()):
+            route.abort("blockedbyclient")
+            return
+        if request.method not in ("GET", "HEAD") and not self.boundary.authorize_forward("network:forward"):
+            self.boundary.note_blocked()  # second look, immediately before the request leaves
             route.abort("blockedbyclient")
             return
         if self._transport == "fallback":

@@ -16,7 +16,20 @@ The engine runs on the owner's Mac (launchd, step 6) with
 | `.ejs-local/first-application.sqlite3` | engine | canonical ledger (existing; v3 policy table added on first run) |
 
 Safe by default: without a valid `runtime.json`, or with `STOP` present, no form is
-opened (`RUNTIME_DISABLED` / `KILL_SWITCH`). `STOP` is re-read between items.
+opened (`RUNTIME_DISABLED` / `KILL_SWITCH`). `STOP` and `runtime.json` are re-read for every item and at
+every point of use inside an item (`runtime_guard`, mandatory `guard` of `PolicyApplicationRuntime`): before the
+browser opens, before every field write, the CV upload and every page advance, after an owner challenge wait,
+before `mark_started` and immediately before the final dispatch. A missing, malformed, unsafe or unreadable
+control state denies. A denial before `mark_started` releases the reservation (`BLOCKED`,
+`POLICY_APP_RUNTIME_AUTH`); after an owner handoff the key stays held for the owner; a denial after
+`mark_started` leaves `SUBMITTED_UNCONFIRMED` (no click, never retried). This is not the independent
+approval check (pending) and does not change who may write `control/`.
+
+The runtime binds the same check (plus manifest expiry at the current UTC time) to the browser's network
+boundary (`bind_guard`). The SmartRecruiters boundary asks again when it decides a CV or application POST
+and immediately before the route forwards any write; an unbound boundary denies every POST. A `STOP`
+lookup that fails for any reason other than ENOENT counts as `STOP` present. Manifest expiry is rechecked
+before every guarded point, after an owner wait (the key stays held for the owner) and before every POST.
 
 ## Result file (EJS-ENGINE-RESULT-1)
 
