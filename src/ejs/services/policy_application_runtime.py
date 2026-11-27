@@ -160,6 +160,8 @@ class PolicyApplicationRuntime:
         self.browser, self.ledger, self._clock, self._guard = browser, ledger, clock, guard
         self.owner_wait_seconds = owner_wait_seconds
         self._last: datetime | None = None
+        self._expires_at: datetime | None = None
+        self._seen: datetime | None = None  # latest time any expiry check observed
 
     def clock(self) -> datetime:
         """Never earlier than a time this runtime already used."""
@@ -174,10 +176,28 @@ class PolicyApplicationRuntime:
 
     # ---- helpers ---------------------------------------------------------------------
 
+    def _check(self, point: str) -> None:
+        """Manifest validity at the current UTC time, then the runtime guard. Raises to deny.
+
+        Also bound to the browser's network boundary (``bind_guard``), so it runs again at the
+        moment an outbound CV or application POST would be forwarded.
+        """
+        now = self._clock()  # read-only: must not move the runtime's own ledger clock (self._last)
+        if not isinstance(now, datetime) or now.tzinfo is None:
+            raise _Stop("POLICY_APP_CLOCK")
+        now = now.astimezone(timezone.utc)
+        for floor in (self._last, self._seen):
+            if floor is not None and now < floor:
+                now = floor  # never trust a clock that went backwards in our favor
+        self._seen = now
+        if self._expires_at is None or not now < self._expires_at:
+            raise _Stop("POLICY_APP_MANIFEST_EXPIRED")
+        self._guard(point)
+
     def _authorized(self, point: str) -> None:
-        """Point-of-use runtime authorization. Any refusal or failure of the guard denies."""
+        """Point-of-use authorization. Any refusal or failure of the check denies."""
         try:
-            self._guard(point)
+            self._check(point)
         except Exception:
             raise _Stop("POLICY_APP_RUNTIME_AUTH") from None
 
@@ -316,7 +336,11 @@ class PolicyApplicationRuntime:
         m = decision.manifest
         started = False
         self._owner_handoff = False
+        self._expires_at = m.expires_at
         try:
+            bind = getattr(self.browser, "bind_guard", None)
+            if callable(bind):
+                bind(self._check)  # network fence asks again right before forwarding a POST
             cv = read_cv(cv_path, m)
             self._authorized("open")
             self.browser.open(m.apply_url)

@@ -138,12 +138,27 @@ def switch_enabled(switch: RuntimeSwitch) -> bool:
     return switch.final_submit_enabled is True and switch.kill_switch_engaged is False
 
 
+def _stop_engaged(control: Path) -> bool:
+    """True when STOP exists or cannot be ruled out. Only a genuine ENOENT means absent.
+
+    ``os.path.lexists`` returns False for every OSError (EIO, EACCES, ...), which would turn a
+    failing lookup into permission to submit.
+    """
+    try:
+        os.lstat(control / "STOP")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def read_switch(root: Path) -> RuntimeSwitch:
     """Safe defaults: anything unexpected means no submission."""
     control = root / "control"
     try:
         _owner_only(control, directory=True)
-        if os.path.lexists(control / "STOP"):
+        if _stop_engaged(control):
             return RuntimeSwitch(final_submit_enabled=False, kill_switch_engaged=True)
         data = json.loads(_read_private(control / "runtime.json", 4096), object_pairs_hook=_no_duplicates)
         if (type(data) is dict and set(data) == {"schema_version", "final_submit"}

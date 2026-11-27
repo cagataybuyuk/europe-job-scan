@@ -261,8 +261,10 @@ def test_backwards_clock_keeps_ledger_consistent(env):
     raw = encode(base)
     runtime = PolicyApplicationRuntime(browser, ledger, guard=ALLOW, clock=clock)
     result = runtime.run(raw, expected_sha256=hashlib.sha256(raw).hexdigest(), cv_path=cv, switch=ON)
-    assert result.status in ("EMPLOYER_CONFIRMED", "BLOCKED") and browser.clicks <= 1
-    assert status(ledger) in ("Confirmed", "Released")  # ledger still readable
+    # The per-boundary expiry reads consume clock ticks, so the backwards jump may now land after the
+    # click: an observation older than mark_started is then (correctly) left unconfirmed, never confirmed.
+    assert result.status in ("EMPLOYER_CONFIRMED", "BLOCKED", "SUBMITTED_UNCONFIRMED") and browser.clicks <= 1
+    assert status(ledger) in ("Confirmed", "Released", "Submitted / Unconfirmed")  # ledger still readable
 
 
 class Interrupt(BaseException):

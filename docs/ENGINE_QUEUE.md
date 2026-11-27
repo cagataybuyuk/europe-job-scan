@@ -25,6 +25,12 @@ control state denies. A denial before `mark_started` releases the reservation (`
 `mark_started` leaves `SUBMITTED_UNCONFIRMED` (no click, never retried). This is not the independent
 approval check (pending) and does not change who may write `control/`.
 
+The runtime binds the same check (plus manifest expiry at the current UTC time) to the browser's network
+boundary (`bind_guard`). The SmartRecruiters boundary asks again when it decides a CV or application POST
+and immediately before the route forwards any write; an unbound boundary denies every POST. A `STOP`
+lookup that fails for any reason other than ENOENT counts as `STOP` present. Manifest expiry is rechecked
+before every guarded point, after an owner wait (the key stays held for the owner) and before every POST.
+
 ## Result file (EJS-ENGINE-RESULT-1)
 
 `schema_version`, `execution_id`, `manifest_sha256`, `status`, `code`,

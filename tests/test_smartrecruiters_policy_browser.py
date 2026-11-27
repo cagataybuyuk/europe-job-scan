@@ -270,6 +270,7 @@ def test_wrong_upload_acknowledgement_blocks(chromium, env):
 
 def test_boundary_rules():
     boundary = PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf")
+    boundary.bind_guard(ALLOW)
     assert boundary.allows("GET", URL, "document", True)
     assert not boundary.allows("GET", ENTRY, "document", True)  # publication not yet learned
     boundary.set_publication(PUBLICATION)
