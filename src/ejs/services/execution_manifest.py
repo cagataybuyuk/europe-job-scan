@@ -279,6 +279,18 @@ def validate_apply_url(value: object, family: str, posting_id: str) -> str:
     return value  # type: ignore[return-value]
 
 
+def _validate_target(value: object) -> dict:
+    target = _exact_object(value, _TARGET_KEYS)
+    family = target["ats_family"]
+    _require(isinstance(family, str) and family in ATS_HOSTS)
+    _require(_text(target["company"], 200))
+    for name in ("posting_id", "requisition_id"):
+        _require(isinstance(target[name], str) and _SEGMENT.fullmatch(target[name]))
+    _require(_opaque(target["opportunity_key"]))
+    validate_apply_url(target["apply_url"], family, target["posting_id"])
+    return target
+
+
 def form_fingerprint(fields: list[dict] | tuple[ManifestField, ...], cv_upload: dict | None) -> str:
     """Return the canonical SHA-256 of the observed form inventory.
 
@@ -445,14 +457,9 @@ def load_execution_manifest(raw: bytes, *, now: datetime,
              and _SEGMENT.fullmatch(top["candidate_profile_version"]))
     _require(isinstance(top["prepared_by_run"], str) and _RUN_ID.fullmatch(top["prepared_by_run"]))
 
-    target = _exact_object(top["target"], _TARGET_KEYS)
+    target = _validate_target(top["target"])
     family = target["ats_family"]
-    _require(isinstance(family, str) and family in ATS_HOSTS)
-    _require(_text(target["company"], 200))
-    for name in ("posting_id", "requisition_id"):
-        _require(isinstance(target[name], str) and _SEGMENT.fullmatch(target[name]))
-    _require(_opaque(target["opportunity_key"]))
-    apply_url = validate_apply_url(target["apply_url"], family, target["posting_id"])
+    apply_url = target["apply_url"]
     expected_key = (f"submit:{target['opportunity_key']}:{target['requisition_id']}:"
                     f"{top['candidate_profile_version']}")
     _require(top["submit_key"] == expected_key)
