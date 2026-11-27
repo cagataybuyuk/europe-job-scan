@@ -34,7 +34,7 @@ before every guarded point, after an owner wait (the key stays held for the owne
 ## Result file (EJS-ENGINE-RESULT-1)
 
 `schema_version`, `execution_id`, `manifest_sha256`, `status`, `code`,
-`submit_clicks` (1, 0, or -1 when dispatched but unverified), `evidence_ref`
+`submit_clicks` (1, 0, or -1 when the ledger row is started but the outcome is unverified), `evidence_ref`
 (hash reference only), `observation` (observe pass: next page `step`, `final`,
 `fields` structure without answers), `finished_at`. No candidate values or CV bytes.
 
@@ -56,6 +56,14 @@ the owner's hands; check the employer before any retry).
   `INTERRUPTED`, or `SUBMITTED_UNCONFIRMED`/`EMPLOYER_CONFIRMED` if the ledger shows a
   dispatch, then archived. An unstarted reservation is released; one the owner handled
   is reported as `OWNER_CHECK_REQUIRED`. Claude decides on any new attempt.
+- The live result never contradicts the ledger (W36-04). If `mark_started` raises, the
+  runtime re-reads the row: only a row still `Reserved` is `BLOCKED` and released. A row
+  that shows `Submitted / Unconfirmed` is reported `SUBMITTED_UNCONFIRMED`
+  (`POLICY_APP_START_RECORD_ERROR`); an unreadable or unexpected state is reported
+  `SUBMITTED_UNCONFIRMED` (`POLICY_APP_START_STATE_UNKNOWN`) and is never released. No submit
+  is dispatched after such an error. If `confirm` raises after this run verified the exact
+  employer acknowledgement, the result follows the ledger: `EMPLOYER_CONFIRMED` only when the
+  row reads `Confirmed`, otherwise `SUBMITTED_UNCONFIRMED`.
 - The browser is visible (`headless=False`) so the owner can solve a CAPTCHA/MFA
   challenge; the engine never solves one.
 - Only SmartRecruiters is supported; any other ATS family is `BLOCKED`.
