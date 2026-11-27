@@ -20,6 +20,12 @@ Before ``mark_started`` every failure releases the reservation (no click happene
 After it, nothing is retried, released or replaced; an unverifiable outcome stays
 ``SUBMITTED_UNCONFIRMED``. Results carry fixed codes only, never candidate values.
 
+The report never contradicts the durable ledger: when ``mark_started`` (or ``confirm``)
+raises, the runtime re-reads the row. A start that may have committed is reported as
+``SUBMITTED_UNCONFIRMED`` and is never released; only a row that is provably still
+``Reserved`` is treated as "no start". ``EMPLOYER_CONFIRMED`` still requires the exact
+employer acknowledgement verified by this run before ``confirm`` was called.
+
 The real SmartRecruiters Playwright binding of ``PolicyFormBrowser`` is step 4b.
 """
 from __future__ import annotations
@@ -37,7 +43,7 @@ from urllib.parse import urlsplit
 
 from ejs.contracts.submit import submit_identity
 from ejs.domain.submission import ConfirmationEvidence, ConfirmationType
-from ejs.persistence.policy_submission_ledger import PolicySubmissionLedger
+from ejs.persistence.policy_submission_ledger import CONFIRMED, RESERVED, STARTED, PolicySubmissionLedger
 from ejs.services.execution_manifest import ExecutionManifest, ManifestField, form_fingerprint
 from ejs.services.policy_submission import PolicyDecision, RuntimeSwitch, authorize_manifest
 
@@ -201,6 +207,14 @@ class PolicyApplicationRuntime:
         except Exception:
             raise _Stop("POLICY_APP_RUNTIME_AUTH") from None
 
+    def _ledger_state(self, m: ExecutionManifest) -> str | None:
+        """Durable row status, or ``None`` when it cannot be read (treated as unknown)."""
+        try:
+            state = self.ledger.status(m.opportunity_key, m.requisition_id, m.candidate_profile_version)
+        except Exception:
+            return None
+        return state if type(state) is str else None
+
     def _ids(self, m: ExecutionManifest) -> dict:
         return dict(opportunity_key=m.opportunity_key, requisition_id=m.requisition_id,
                     profile_version=m.candidate_profile_version, execution_id=m.execution_id)
@@ -334,7 +348,7 @@ class PolicyApplicationRuntime:
         if not decision.dispatch_allowed:
             return RunResult(decision.decision.value)
         m = decision.manifest
-        started = False
+        started = start_attempted = False
         self._owner_handoff = False
         self._expires_at = m.expires_at
         try:
@@ -374,6 +388,7 @@ class PolicyApplicationRuntime:
                      and snap.get("next_visible") is False, "POLICY_APP_FORM_NOT_READY")
             self._authorized("before-start")
             inspected_at = self.clock()
+            start_attempted = True  # from here a raised error may follow a durable commit
             self.ledger.mark_started(**self._ids(m), now=inspected_at)
             started = True
             self._authorized("dispatch")  # last check; a denial here leaves the row Submitted / Unconfirmed
@@ -392,11 +407,23 @@ class PolicyApplicationRuntime:
                 ConfirmationType.ATS_ACKNOWLEDGEMENT, "evidence:sha256:" + observation.acknowledgement_sha256,
                 observation.observed_at.astimezone(timezone.utc).isoformat(), True, m.execution_id,
                 m.requisition_id)
-            _require(self.ledger.confirm(**self._ids(m), evidence=evidence, now=self.clock()),
-                     "POLICY_APP_CONFIRMATION_UNVERIFIED")
+            try:
+                confirmed = self.ledger.confirm(**self._ids(m), evidence=evidence, now=self.clock())
+            except Exception:
+                # The row may have committed before the error: follow the ledger. Evidence above
+                # is already exact and verified; an unreadable or other state stays unconfirmed.
+                confirmed = self._ledger_state(m) == CONFIRMED
+            _require(confirmed is True, "POLICY_APP_CONFIRMATION_UNVERIFIED")
             return RunResult("EMPLOYER_CONFIRMED", submit_clicks=1, evidence_ref=evidence.evidence_ref)
         except BaseException as error:  # noqa: BLE001 - every exit must leave a consistent ledger
             code = error.code if isinstance(error, _Stop) and _CODE.fullmatch(error.code) else "POLICY_APP_BLOCKED"
+            if start_attempted and not started:
+                # mark_started raised: it may have committed first (e.g. fsync after COMMIT).
+                # Only a row that is provably still Reserved means "not started".
+                state = self._ledger_state(m)
+                if state != RESERVED:
+                    started = True
+                    code = "POLICY_APP_START_RECORD_ERROR" if state == STARTED else "POLICY_APP_START_STATE_UNKNOWN"
             if started:
                 result = RunResult("SUBMITTED_UNCONFIRMED", code, submit_clicks=-1)
             else:
