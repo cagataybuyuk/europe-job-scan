@@ -343,6 +343,7 @@ def test_production_transport_refuses_redirects_and_counts_them():
     context = FakeContext()
     boundary = PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf")
     browser = SmartRecruitersPolicyBrowser(context, boundary)
+    browser.bind_guard(ALLOW)  # no read is forwarded while no guard is bound
     ok = FakeRoute("GET", URL, 200, navigation=True, resource="document")
     browser._route(ok)
     assert ok.result == ("fulfilled", 200)
@@ -382,6 +383,7 @@ def test_entry_link_with_extra_query_does_not_pin_publication(chromium, env):
     context.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=bad_posting))
     boundary = PolicyNetworkBoundary(COMPANY, POSTING, "Synthetic_CV.pdf")
     browser = SmartRecruitersPolicyBrowser(context, boundary, transport="fallback", offline_test_transport=True)
+    browser.bind_guard(ALLOW)  # the posting page must load; the extra query alone must fail
     try:
         with pytest.raises(PermissionError):
             browser.open(URL)

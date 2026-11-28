@@ -19,6 +19,27 @@ from tests.test_execution_manifest import NOW, base_document, encode
 from tests.test_policy_application_runtime import PDF, Clock, FakeBrowser, observe_doc, two_page
 
 
+class _AdmittedForQueueTests:
+    """Test-only stand-in for ``standing_guard.StandingRun`` in the queue/switch tests.
+
+    These modules cover queue, STOP and runtime.json behaviour with manifests a
+    standing envelope can never admit (R4, observe). The real admission path,
+    with the real trusted reader, is covered in ``test_standing_guard.py``.
+    """
+
+    def __init__(self, root, cv_dir, raw, clock):
+        pass
+
+    def check(self, point):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def legacy_standing_admission(monkeypatch):
+    from ejs.services import engine_queue
+    monkeypatch.setattr(engine_queue, "StandingRun", _AdmittedForQueueTests)
+
+
 def private_write(path: Path, data: bytes, mode=0o600):
     path.write_bytes(data)
     os.chmod(path, mode)

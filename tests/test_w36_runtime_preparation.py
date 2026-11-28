@@ -11,7 +11,7 @@ from ejs.services.current_fact_approval import SCHEMA
 from ejs.services.current_manifest_compiler import ERROR, compile_current_manifest
 from ejs.services.engine_queue import EngineQueue, _write_private
 from ejs.services.execution_manifest import load_execution_manifest
-from tests.test_engine_queue import enable, private_write, results
+from tests.test_engine_queue import enable, legacy_standing_admission, private_write, results  # noqa: F401
 from tests.test_execution_manifest import NOW, encode
 from tests.test_policy_application_runtime import PDF, Clock, FakeBrowser, two_page
 from tests.test_reviewed_manifest_compiler import digest, inputs

@@ -20,7 +20,10 @@ from ejs.services.engine_queue import (
 )
 from ejs.services.policy_application_runtime import PolicyApplicationRuntime
 from ejs.services.policy_submission import RuntimeSwitch
-from tests.test_engine_queue import enable, private_write, results
+from ejs.services import engine_queue
+from tests.test_engine_queue import (  # noqa: F401
+    _AdmittedForQueueTests, enable, legacy_standing_admission, private_write, results,
+)
 from tests.test_execution_manifest import NOW, base_document, encode
 from tests.test_policy_application_runtime import PDF, Clock, FakeBrowser, two_page
 
@@ -238,6 +241,8 @@ def test_stop_between_mark_started_and_click_blocks_dispatch_and_stays_uncertain
 
     # Uncertain submission is never retried or replaced: a new execution id for the same target is a duplicate.
     monkeypatch.undo()
+    # undo() also removed the queue-test admission stub; restore only that.
+    monkeypatch.setattr(engine_queue, "StandingRun", _AdmittedForQueueTests)
     world.clear_stop()
     second = json.loads(json.dumps(world.doc))
     second["execution_id"] = "exec-synthetic-second"

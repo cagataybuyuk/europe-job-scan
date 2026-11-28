@@ -8,6 +8,7 @@ Layout under one owner-only root (default ``~/Local/Projeler/EJS/engine-queue``)
     archive/      processed manifests
     control/      ``runtime.json`` and the ``STOP`` file
     logs/         ``engine.log`` written by launchd (0600)
+    packages/     one W36-02 standing execution package per manifest (``standing_guard``)
 
 Runtime switch (safe by default):
   * ``control/STOP`` exists (any content)          -> kill switch engaged, no submit
@@ -17,7 +18,9 @@ Runtime switch (safe by default):
 Every directory must be 0700 and every file 0600, owned by the current user, no
 symlinks. A file that fails these checks is never read. Results carry fixed codes,
 the observed next-page structure only, and never candidate values or CV bytes.
-A manifest left in ``processing/`` by a crash is never re-run: it gets an
+Every manifest must also be admitted under the root-owned standing envelope
+(``standing_guard``) before a browser is created, and again at every guard point;
+there is no un-admitted mode. A manifest left in ``processing/`` by a crash is never re-run: it gets an
 ``INTERRUPTED`` result (``SUBMITTED_UNCONFIRMED`` if the ledger shows it was
 dispatched) and is archived; Claude decides on any new attempt.
 """
@@ -39,10 +42,11 @@ from typing import Callable
 from ejs.persistence.policy_submission_ledger import PolicySubmissionLedger
 from ejs.services.policy_application_runtime import PolicyApplicationRuntime, RunResult
 from ejs.services.policy_submission import RuntimeSwitch
+from ejs.services.standing_guard import PACKAGES, StandingRun
 
 RESULT_SCHEMA = "EJS-ENGINE-RESULT-1"
 RUNTIME_SCHEMA = "EJS-ENGINE-RUNTIME-1"
-SUBDIRS = ("inbox", "processing", "outbox", "archive", "control", "logs")
+SUBDIRS = ("inbox", "processing", "outbox", "archive", "control", "logs", PACKAGES)
 MAX_MANIFEST_BYTES = 512_000
 MAX_ITEMS_PER_RUN = 200
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.json\Z")
@@ -180,6 +184,14 @@ def runtime_guard(root: Path) -> Callable[[str], None]:
         if not switch_enabled(read_switch(root)):
             raise QueueError("ENGINE_RUNTIME_AUTH_DENIED")
     return check
+
+
+def item_guard(runtime_check: Callable[[str], None], standing: StandingRun) -> Callable[[str], None]:
+    """One item's guard: the runtime and, through ``bind_guard``, every forwarded request."""
+    def guard(point: str) -> None:
+        runtime_check(point)  # STOP and runtime.json, re-read
+        standing.check(point)  # trusted envelope sources and package, re-read and re-admitted
+    return guard
 
 
 @contextmanager
@@ -355,10 +367,19 @@ class EngineQueue:
         except Exception:
             pass
         cv_path = self.cv_dir / cv_name if isinstance(cv_name, str) and "/" not in cv_name else self.cv_dir / "-"
+        try:
+            # Admission precedes the browser factory and pins this run's envelope binding.
+            standing = StandingRun(self.root, self.cv_dir, raw, self.clock)
+        except Exception:
+            result = RunResult("BLOCKED", "ENGINE_STANDING_ADMISSION_DENIED")
+            self._emit(raw, result)
+            self._archive(path)
+            return ItemReport(path.name, result.status, result.code)
+        guard = item_guard(self._guard, standing)
         browser = None
         try:
             browser = self.browser_factory(document)
-            result = PolicyApplicationRuntime(browser, self.ledger, guard=self._guard, clock=self.clock).run(
+            result = PolicyApplicationRuntime(browser, self.ledger, guard=guard, clock=self.clock).run(
                 raw, expected_sha256=digest, cv_path=cv_path, switch=read_switch(self.root))  # fresh read per item; STOP also re-read at every guard point
         except Exception:
             result = RunResult("BLOCKED", "ENGINE_BROWSER_UNAVAILABLE")
