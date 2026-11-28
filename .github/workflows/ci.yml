@@ -160,6 +160,17 @@ jobs:
           tests/test_function05_detail_verification.py
           tests/unit/test_ejs_shadow_phaseA.py
 
+      - name: Run offline standing-envelope regression tests
+        run: >-
+          python -m pytest -q -rs --basetemp="$RUNNER_TEMP/ejs-standing-pytest"
+          tests/test_standing_envelope.py
+          tests/test_standing_admission.py
+          tests/test_standing_guard.py
+          tests/test_standing_manifest_preparation.py
+          tests/test_standing_pilot_preparation.py
+          tests/test_standing_e2e.py
+          tests/test_standing_envelope_draft.py
+
   mvp01-render-regression:
     runs-on: ubuntu-latest
     steps:

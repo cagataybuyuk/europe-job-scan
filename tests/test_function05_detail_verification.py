@@ -21,6 +21,7 @@ from ejs.services.detail_verification import (AUTHORITY, DETAIL_HOST, DetailVeri
 from ejs.services.discovery import DiscoveryError
 from ejs.services.http_carrier import (REQUEST_HEADERS, HostNotAllowedError, HttpCarrier, ReplayCarrier,
                                        urllib_transport)
+from ejs.services.standing_pilot_pool import ERROR as PILOT_POOL_ERROR, RankedEligibleTarget, select_pilot_pool
 from ejs.services.suitability import canonical_sha256, evaluate_report
 from ejs.services.suitability_evidence import detail_from_smartrecruiters
 from tests.test_function04_suitability import criteria, criteria_text, report
@@ -51,6 +52,42 @@ def deny_network(monkeypatch):
 # ------------------------------------------------------------------------------------------ fixtures
 def pid(i: int) -> str:
     return str(100000000000000 + i)
+
+
+def pilot_candidate(rank: int, country: str, posting: int | None = None) -> RankedEligibleTarget:
+    number = rank if posting is None else posting
+    posting_id = pid(number)
+    return RankedEligibleTarget(rank, country, dict(
+        ats_family="smartrecruiters", company=TENANT, posting_id=posting_id,
+        requisition_id=f"REF{number}", opportunity_key=f"opp:synthetic-{number}",
+        apply_url=f"https://jobs.smartrecruiters.com/{TENANT}/{posting_id}",
+    ))
+
+
+def test_pilot_pool_pins_country_from_the_highest_ranked_eligible_vacancy():
+    first = pilot_candidate(1, "NL")
+    later = pilot_candidate(4, "NL")
+    pool = select_pilot_pool([later, pilot_candidate(2, "DE"), first, pilot_candidate(3, "DE")])
+    assert pool.country == "NL"
+    assert pool.targets == (first.target, later.target)
+
+
+def test_pilot_pool_limits_the_selected_country_to_five_targets_in_rank_order():
+    eligible = [pilot_candidate(rank, "NL") for rank in range(1, 8)]
+    pool = select_pilot_pool(tuple(reversed(eligible)))
+    assert pool.targets == tuple(candidate.target for candidate in eligible[:5])
+    assert select_pilot_pool([]) is None
+
+
+def test_pilot_pool_rejects_ambiguous_ranks_duplicate_vacancies_and_invalid_country_or_target():
+    first = pilot_candidate(1, "NL")
+    ambiguous = [pilot_candidate(1, "DE", posting=2), pilot_candidate(2, "DE", posting=1),
+                 RankedEligibleTarget(2, "NL", {**first.target, "company": first.target["company"].lower()}),
+                 RankedEligibleTarget(2, "NL", {**first.target, "apply_url": first.target["apply_url"] + "-role"}),
+                 pilot_candidate(2, "Unknown"), RankedEligibleTarget(2, "NL", {**first.target, "apply_url": "*"})]
+    for candidate in ambiguous:
+        with pytest.raises(PermissionError, match=f"^{PILOT_POOL_ERROR}$"):
+            select_pilot_pool([first, candidate])
 
 
 def row(i: int, role: str = "Senior Business Analyst", *, country: str | list[str] | None = "NL", url: str | None = None,

@@ -50,7 +50,7 @@ def manifest_document():
 def envelope_document():
     doc = dict(
         schema_version="EJS-STANDING-ENVELOPE-1", envelope_id="env-synthetic-1", generation=3,
-        status="active", issued_at=(NOW - timedelta(hours=1)).isoformat(),
+        status="active", issued_at=(NOW - timedelta(minutes=5)).isoformat(),
         expires_at=(NOW + timedelta(hours=23)).isoformat(), policy_version="SUBMIT-1.0",
         candidate_profile_version="profile-2026-11-16", ats_family="smartrecruiters",
         country="NL", targets=[deepcopy(manifest_document()["target"])],
@@ -267,11 +267,38 @@ def test_rejects_unconfigured_wildcard_or_non_matching_targets(targets):
     reject(*bundle(envelope=edited_envelope(targets=targets)))
 
 
+def test_rejects_duplicate_canonical_vacancy_targets_even_when_repinned():
+    base = _target()
+    variants = (
+        _target(company="exampleco"),
+        _target(company="EXAMPLECO", opportunity_key="opp:example:sr:744000000000001:case"),
+        _target(apply_url="https://jobs.smartrecruiters.com/ExampleCo/744000000000001-senior-analyst"),
+        _target(apply_url="https://jobs.smartrecruiters.com/ExampleCo/744000000000001/"),
+        _target(requisition_id="REF002", opportunity_key="opp:other"),
+    )
+    for variant in variants:
+        reject(*bundle(envelope=edited_envelope(targets=[base, variant])))
+
+
 def test_accepts_manifest_target_among_several_exact_targets():
     other = _target(posting_id="744000000000002", opportunity_key="opp:other",
                     apply_url="https://jobs.smartrecruiters.com/ExampleCo/744000000000002")
     sources, inputs = bundle(envelope=edited_envelope(targets=[other, _target()]))
     assert validate_standing_batch(sources, inputs, now=NOW).generation == 3
+
+
+@pytest.mark.parametrize("size", (1, 5, 6))
+def test_trusted_admission_enforces_pilot_target_ceiling_even_when_repinned(size):
+    targets = [_target()]
+    for number in range(2, size + 1):
+        posting = f"74400000000000{number}"
+        targets.append(_target(posting_id=posting, opportunity_key=f"opp:synthetic:{number}",
+                               apply_url=f"https://jobs.smartrecruiters.com/ExampleCo/{posting}"))
+    sources, inputs = bundle(envelope=edited_envelope(targets=targets))
+    if size == 6:
+        reject(sources, inputs)
+    else:
+        assert validate_standing_batch(sources, inputs, now=NOW).generation == 3
 
 
 # --- time -----------------------------------------------------------------------------
@@ -288,14 +315,15 @@ def test_rejects_clock_outside_fresh_window(now):
 
 
 def test_rejects_window_longer_than_24_hours_or_inverted():
-    reject(*bundle(envelope=edited_envelope(expires_at=(NOW + timedelta(hours=23, seconds=1)).isoformat())))
+    reject(*bundle(envelope=edited_envelope(expires_at=(NOW + timedelta(hours=23, minutes=55, seconds=1)).isoformat())))
     reject(*bundle(envelope=edited_envelope(expires_at=(NOW - timedelta(hours=2)).isoformat())))
     reject(*bundle(envelope=edited_envelope(issued_at="2026-11-17T04:30:00")))
+    reject(*bundle(envelope=edited_envelope(issued_at=(NOW - timedelta(minutes=45, seconds=1)).isoformat())))
 
 
 def test_rejects_manifest_that_outlives_envelope():
     reject(*bundle(envelope=edited_envelope(
-        issued_at=(NOW - timedelta(hours=10)).isoformat(),
+        issued_at=(NOW - timedelta(minutes=5)).isoformat(),
         expires_at=(NOW + timedelta(hours=10)).isoformat())))
 
 

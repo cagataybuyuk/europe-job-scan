@@ -10,9 +10,12 @@ from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import hmac
+import json
 
-from ejs.services.execution_manifest import MAX_MANIFEST_BYTES, load_execution_manifest
-from ejs.services.inventory_eligibility import evaluate_inventory_eligibility
+from ejs.services.execution_manifest import (
+    MAX_MANIFEST_BYTES, _TARGET_KEYS, _utc, load_execution_manifest,
+)
+from ejs.services.inventory_eligibility import bind_f05_vacancy, evaluate_inventory_eligibility
 from ejs.services.reviewed_manifest_compiler import compile_reviewed_manifest
 from ejs.services.standing_envelope import (
     _ENVELOPE_KEYS, _INDEX_KEYS, ENVELOPE_SCHEMA, INDEX_SCHEMA, BatchApprovalSources,
@@ -74,6 +77,17 @@ def _admit(sources: BatchApprovalSources, inputs: BatchInputs, evidence: Admissi
     )
     _require(type(compiled) is bytes and len(compiled) <= MAX_MANIFEST_BYTES
              and hmac.compare_digest(compiled, inputs.manifest))
+    # Enforce authorization chronology independently: envelope issuance cannot
+    # precede any evidence, attestation, snapshot or preparation timestamp it authorizes.
+    issued = _utc(envelope["issued_at"])
+    package = json.loads(inputs.eligibility.decode("utf-8"))
+    target = {key: getattr(manifest, key) for key in _TARGET_KEYS}
+    vacancy = bind_f05_vacancy(evidence.handoff, target,
+                               expected_handoff_sha256=package["handoff_sha256"], now=now)
+    attested_at = _utc(json.loads(evidence.country_attestation.decode("utf-8"))["attested_at"])
+    snapshot_issued_at = _utc(json.loads(evidence.snapshot.decode("utf-8"))["issued_at"])
+    _require(max(vacancy.observed_at, attested_at, snapshot_issued_at,
+                 manifest.observed_at, manifest.prepared_at) <= issued)
     return AdmissionDecision(binding, manifest.execution_id, manifest.sha256)
 
 

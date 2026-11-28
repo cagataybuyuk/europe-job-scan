@@ -23,7 +23,7 @@ before `mark_started` and immediately before the final dispatch. A missing, malf
 control state denies. A denial before `mark_started` releases the reservation (`BLOCKED`,
 `POLICY_APP_RUNTIME_AUTH`); after an owner handoff the key stays held for the owner; a denial after
 `mark_started` leaves `SUBMITTED_UNCONFIRMED` (no click, never retried). This is not the independent
-approval check (pending) and does not change who may write `control/`.
+approval check (the standing envelope, below) and does not change who may write `control/`.
 
 The runtime binds the same check (plus manifest expiry at the current UTC time) to the browser's network
 boundary (`bind_guard`). The SmartRecruiters boundary asks again when it decides a CV or application POST
@@ -31,10 +31,17 @@ and immediately before the route forwards any write; an unbound boundary denies 
 lookup that fails for any reason other than ENOENT counts as `STOP` present. Manifest expiry is rechecked
 before every guarded point, after an owner wait (the key stays held for the owner) and before every POST.
 
+Standing envelope (W36-02): a submission also needs a valid root-owned standing envelope, pointer and
+eligibility index under `/Library/Application Support/EJS/approval/`. Admission checks them before any
+browser exists, pins the envelope id, generation and record hashes for the item, and every later guard
+point re-admits; a missing, revoked, expired or newer-generation envelope denies. How the owner drafts,
+reviews, publishes, revokes and renews it (documentation only; no helper runs `sudo` or publishes) is in
+`docs/STANDING_ENVELOPE_RUNBOOK.md`. Publishing an envelope neither removes `STOP` nor writes `runtime.json`.
+
 ## Result file (EJS-ENGINE-RESULT-1)
 
 `schema_version`, `execution_id`, `manifest_sha256`, `status`, `code`,
-`submit_clicks` (1, 0, or -1 when the ledger row is started but the outcome is unverified), `evidence_ref`
+`submit_clicks` (1, 0, or -1 when the exact click count is unknown), `evidence_ref`
 (hash reference only), `observation` (observe pass: next page `step`, `final`,
 `fields` structure without answers), `finished_at`. No candidate values or CV bytes.
 
@@ -54,7 +61,8 @@ the owner's hands; check the employer before any retry).
 - Unsafe or oddly named inbox files are never read or moved (`SKIPPED_UNSAFE`).
 - A manifest left in `processing/` by a crash is never re-run: it is reported as
   `INTERRUPTED`, or `SUBMITTED_UNCONFIRMED`/`EMPLOYER_CONFIRMED` if the ledger shows a
-  dispatch, then archived. An unstarted reservation is released; one the owner handled
+  dispatch for the same execution and manifest digest, then archived. A recovered confirmation
+  includes the exact acknowledgement hash. An unstarted reservation is released; one the owner handled
   is reported as `OWNER_CHECK_REQUIRED`. Claude decides on any new attempt.
 - The live result never contradicts the ledger (W36-04). If `mark_started` raises, the
   runtime re-reads the row: only a row still `Reserved` is `BLOCKED` and released. A row
@@ -63,7 +71,7 @@ the owner's hands; check the employer before any retry).
   `SUBMITTED_UNCONFIRMED` (`POLICY_APP_START_STATE_UNKNOWN`) and is never released. No submit
   is dispatched after such an error. If `confirm` raises after this run verified the exact
   employer acknowledgement, the result follows the ledger: `EMPLOYER_CONFIRMED` only when the
-  row reads `Confirmed`, otherwise `SUBMITTED_UNCONFIRMED`.
+  exact row reads `Confirmed` with the same acknowledgement hash, otherwise `SUBMITTED_UNCONFIRMED`.
 - The browser is visible (`headless=False`) so the owner can solve a CAPTCHA/MFA
   challenge; the engine never solves one.
 - Only SmartRecruiters is supported; any other ATS family is `BLOCKED`.

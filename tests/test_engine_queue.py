@@ -160,7 +160,8 @@ def test_interrupted_after_dispatch_is_reported_as_unconfirmed(setup):
     root, cv_dir, ledger, doc = setup
     ids = dict(opportunity_key="opp:example:sr:744000000000001", requisition_id="REF001",
                profile_version="profile-2026-11-16")
-    assert ledger.reserve(**ids, execution_id="exec-20261117-example-1", manifest_sha256="a" * 64,
+    assert ledger.reserve(**ids, execution_id="exec-20261117-example-1",
+                          manifest_sha256=hashlib.sha256(encode(doc)).hexdigest(),
                           rollout_stage="R4", daily_cap=None, now=NOW) == "RESERVED"
     ledger.mark_started(**ids, execution_id="exec-20261117-example-1", now=NOW)
     queue, made = make_queue(root, cv_dir, ledger, doc)
@@ -253,7 +254,8 @@ def test_recovery_releases_an_unstarted_reservation(setup):
     root, cv_dir, ledger, doc = setup
     ids = dict(opportunity_key="opp:example:sr:744000000000001", requisition_id="REF001",
                profile_version="profile-2026-11-16")
-    assert ledger.reserve(**ids, execution_id="exec-20261117-example-1", manifest_sha256="a" * 64,
+    assert ledger.reserve(**ids, execution_id="exec-20261117-example-1",
+                          manifest_sha256=hashlib.sha256(encode(doc)).hexdigest(),
                           rollout_stage="R4", daily_cap=None, now=NOW) == "RESERVED"
     queue, _ = make_queue(root, cv_dir, ledger, doc)
     private_write(root / "processing" / "a.json", encode(doc))
@@ -265,7 +267,8 @@ def test_recovery_flags_an_owner_handoff(setup):
     root, cv_dir, ledger, doc = setup
     ids = dict(opportunity_key="opp:example:sr:744000000000001", requisition_id="REF001",
                profile_version="profile-2026-11-16")
-    ledger.reserve(**ids, execution_id="exec-20261117-example-1", manifest_sha256="a" * 64,
+    ledger.reserve(**ids, execution_id="exec-20261117-example-1",
+                   manifest_sha256=hashlib.sha256(encode(doc)).hexdigest(),
                    rollout_stage="R4", daily_cap=None, now=NOW)
     ledger.await_user(**ids, execution_id="exec-20261117-example-1", now=NOW)
     queue, _ = make_queue(root, cv_dir, ledger, doc)
