@@ -25,6 +25,8 @@ from ejs.persistence.submission_ledger import SubmissionLedgerError
 from ejs.services.policy_application_runtime import PolicyApplicationRuntime
 from tests.test_engine_queue import enable, make_queue, private_write, results
 from tests.test_engine_queue import setup  # noqa: F401 - pytest fixture
+# Queue outcome tests only; real standing admission is covered in test_standing_guard.py.
+from tests.test_engine_queue import legacy_standing_admission  # noqa: F401 - autouse fixture
 from tests.test_execution_manifest import encode
 from tests.test_policy_application_runtime import ALLOW, ON, Clock, FakeBrowser, run, status
 from tests.test_policy_application_runtime import env  # noqa: F401 - pytest fixture

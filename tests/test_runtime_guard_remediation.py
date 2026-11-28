@@ -23,6 +23,8 @@ from ejs.services.engine_queue import QueueError, prepare_root, read_switch, run
 from ejs.services.policy_application_runtime import PolicyApplicationRuntime
 from ejs.services.smartrecruiters_policy_browser import PolicyNetworkBoundary, SmartRecruitersPolicyBrowser
 from tests.test_engine_queue import enable
+# Queue/guard tests only; real standing admission is covered in test_standing_guard.py.
+from tests.test_engine_queue import legacy_standing_admission  # noqa: F401 - autouse fixture
 from tests.test_execution_manifest import encode
 from tests.test_policy_application_runtime import PDF
 from tests.test_runtime_guard import MUTATIONS, ON, TriggerBrowser, World, fresh
