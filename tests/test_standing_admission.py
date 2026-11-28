@@ -406,7 +406,7 @@ def test_rejects_semantic_near_match_without_inference():
 
 
 def test_whitespace_and_nfc_are_the_only_canonicalization():
-    assert canonical_text("  Á  b\tc ") == canonical_text("Á b c") == "Á b c"
+    assert canonical_text("  Á  b\tc ") == canonical_text("Á b c") == "Á b c"
     assert canonical_text("Synthetic") != canonical_text("synthetic")
     world = World()
     world.inventory["entries"][0]["requirement_texts"] = [" " + LINES[0]]
