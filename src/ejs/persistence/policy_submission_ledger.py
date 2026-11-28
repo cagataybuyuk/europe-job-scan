@@ -277,11 +277,26 @@ class PolicySubmissionLedger:
         return "RESERVED"
 
     @staticmethod
-    def _committed_today(connection, now: datetime) -> int:
+    def _latest_start(connection, now: datetime) -> datetime:
+        starts = [_parse_utc(row[0]) for row in connection.execute(
+            "SELECT started_at FROM policy_submissions WHERE started_at IS NOT NULL")]
+        return max([now, *starts])
+
+    @classmethod
+    def _cap_day(cls, connection, now: datetime) -> str:
+        """Istanbul cap day that never moves before the latest recorded start.
+
+        One count over every row, whatever envelope generation or manifest it
+        came from; a clock that steps back across midnight cannot reopen it.
+        """
+        return _local_day(cls._latest_start(connection, now))
+
+    @classmethod
+    def _committed_today(cls, connection, now: datetime) -> int:
         """Started today plus every claim that may still start (cap basis)."""
         return connection.execute(
             "SELECT COUNT(*) FROM policy_submissions WHERE started_day=? OR status IN (?,?)",
-            (_local_day(now), RESERVED, AWAITING)).fetchone()[0]
+            (cls._cap_day(connection, now), RESERVED, AWAITING)).fetchone()[0]
 
     def _row(self, connection, submit_key_hash: str, execution_id: str):
         row = connection.execute("SELECT * FROM policy_submissions WHERE submit_key_sha256=?",
@@ -367,6 +382,9 @@ class PolicySubmissionLedger:
             row = self._row(connection, key_hash, execution_id)
             reserved = _parse_utc(row["reserved_at"])
             _require(row["status"] == RESERVED and reserved <= now <= reserved + RESERVATION_TTL)
+            # A clock behind a recorded start would file this start under an
+            # earlier day than the cap counts: refuse before any click.
+            _require(self._latest_start(connection, now) == now)
             if row["daily_cap"] is not None:
                 started = connection.execute("SELECT COUNT(*) FROM policy_submissions WHERE started_day=?",
                                              (_local_day(now),)).fetchone()[0]
