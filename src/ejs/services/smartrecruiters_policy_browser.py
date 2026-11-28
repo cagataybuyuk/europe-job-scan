@@ -4,7 +4,9 @@ The browser owns a fresh context (no user cookies). Every request passes the
 ``PolicyNetworkBoundary``: reads only on reviewed SmartRecruiters hosts, one CV
 upload POST to the exact SmartRecruiters attachment path with the approved file
 name, and one application POST that is armed only after the runtime committed
-``mark_started``. Values, request bodies and CV bytes are never logged.
+``mark_started``. Every request it allows, reads included, is forwarded only after
+the runtime-bound guard passed immediately before (none is bound: nothing leaves).
+Values, request bodies and CV bytes are never logged.
 
 Control keys are derived from the visible label with ``control_key``. Claude's
 morning inspection uses the same rule, so the manifest and the live page agree
@@ -77,7 +79,7 @@ class PolicyNetworkBoundary:
         self.read_hosts = read_hosts
         self.publication_id: str | None = None
         self._lock = Lock()
-        self._guard = None  # bound by the runtime; while unbound every outbound POST is denied
+        self._guard = None  # bound by the runtime; while unbound no request is forwarded
         self._phase = "read"
         self.blocked_writes = 0
         self.uploads = 0
@@ -130,13 +132,13 @@ class PolicyNetworkBoundary:
             self.blocked_writes += 1
 
     def bind_guard(self, guard) -> None:
-        """Mandatory runtime authorization for outbound POSTs; bound once, never replaced."""
+        """Mandatory runtime authorization for every forwarded request; bound once, never replaced."""
         with self._lock:
             _require(callable(guard) and self._guard is None, "POLICY_APP_SR_BOUNDARY")
             self._guard = guard
 
     def authorize_forward(self, point: str) -> bool:
-        """Ask the runtime guard right before a write is forwarded. Any failure denies."""
+        """Ask the runtime guard right before a request is forwarded. Any failure denies."""
         guard = self._guard
         try:
             if guard is None:
@@ -249,7 +251,7 @@ class SmartRecruitersPolicyBrowser:
         self.context.close()
 
     def bind_guard(self, guard) -> None:
-        """The runtime hands over its authorization check; CV and application POSTs need it."""
+        """The runtime hands over its authorization check; every forwarded request needs it."""
         self.boundary.bind_guard(guard)
 
     # ---- fences ------------------------------------------------------------------------------
@@ -260,8 +262,11 @@ class SmartRecruitersPolicyBrowser:
                                     request.is_navigation_request()):
             route.abort("blockedbyclient")
             return
-        if request.method not in ("GET", "HEAD") and not self.boundary.authorize_forward("network:forward"):
-            self.boundary.note_blocked()  # second look, immediately before the request leaves
+        # Every forwarded request, reads included, asks the bound runtime guard immediately
+        # before it leaves; unbound or denying means nothing is forwarded.
+        point = "network:read" if request.method in ("GET", "HEAD") else "network:forward"
+        if not self.boundary.authorize_forward(point):
+            self.boundary.note_blocked()
             route.abort("blockedbyclient")
             return
         if self._transport == "fallback":
