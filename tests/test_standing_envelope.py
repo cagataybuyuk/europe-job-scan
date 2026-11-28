@@ -423,8 +423,28 @@ def read_root_owned(paths):
         tuple((path, MAX_APPROVAL_BYTES) for path in paths), root_owned=True)
 
 
-@pytest.fixture
-def root_tree(tmp_path, monkeypatch):
+def _unsuitable_ancestor(path: Path) -> bool:
+    """Whether a real directory from ``path`` up to / can never pass the root walk.
+
+    Under the test view the caller's uid stands in for root, so only a
+    symlink, a foreign owner, group/other write or an allow ACL disqualifies.
+    """
+    for directory in (path, *path.parents):
+        info = directory.lstat()
+        if (stat.S_ISLNK(info.st_mode) or info.st_uid not in (0, os.geteuid())
+                or info.st_mode & 0o022):
+            return True
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            private_source_files._check_access_acl(fd)
+        except PermissionError:
+            return True
+        finally:
+            os.close(fd)
+    return False
+
+
+def _establish_root_tree(tmp_path, monkeypatch):
     approval = tmp_path.resolve() / "synthetic-approval"
     approval.mkdir()
     approval.chmod(0o755)
@@ -432,13 +452,50 @@ def root_tree(tmp_path, monkeypatch):
     for path in paths:
         path.write_bytes(b'{"synthetic":true}')
         path.chmod(0o644)
-    monkeypatch.setattr(private_source_files, "os", _RootOwnedView())
-    try:
-        assert read_root_owned(paths) == (b'{"synthetic":true}',) * 3
-    except PermissionError:
+    # Skip only for the established ancestor condition; any other failure of
+    # the positive control must surface as an error.
+    if _unsuitable_ancestor(approval):
         pytest.skip("temporary root has shared/writable ancestors; run with --basetemp "
                     "under a non-shared directory to exercise root-policy negatives")
+    monkeypatch.setattr(private_source_files, "os", _RootOwnedView())
+    assert read_root_owned(paths) == (b'{"synthetic":true}',) * 3
     return paths
+
+
+@pytest.fixture
+def root_tree(tmp_path, monkeypatch):
+    return _establish_root_tree(tmp_path, monkeypatch)
+
+
+def test_unsuitable_ancestor_detects_only_real_disqualifiers(tmp_path):
+    base = tmp_path.resolve()
+    shared = base / "synthetic-shared"
+    child = shared / "synthetic-child"
+    child.mkdir(parents=True, mode=0o755)
+    shared.chmod(0o777)
+    try:
+        assert _unsuitable_ancestor(child)
+    finally:
+        shared.chmod(0o755)
+    # Restored, the child adds nothing beyond whatever its real ancestors have.
+    assert _unsuitable_ancestor(child) == _unsuitable_ancestor(base)
+    link = base / "synthetic-link"
+    link.symlink_to(shared)
+    assert _unsuitable_ancestor(link)
+
+
+def test_root_tree_surfaces_positive_control_errors_instead_of_skipping(tmp_path, monkeypatch):
+    if _unsuitable_ancestor(tmp_path.resolve()):
+        pytest.skip("needs --basetemp under a non-shared directory")
+
+    def broken(_source):
+        raise PermissionError("synthetic positive-control failure")
+    monkeypatch.setattr(private_source_files, "_read_exact", broken)
+    try:
+        with pytest.raises(PermissionError, match="synthetic positive-control failure"):
+            _establish_root_tree(tmp_path, monkeypatch)
+    except pytest.skip.Exception:
+        pytest.fail("a positive-control error was skipped instead of surfacing")
 
 
 def reject_read(paths):
