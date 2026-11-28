@@ -16,6 +16,7 @@ Contract checked here:
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 
@@ -204,13 +205,27 @@ def test_confirm_error_without_commit_is_never_upgraded(env):
     assert result.status == "SUBMITTED_UNCONFIRMED" and not result.applied and browser.clicks == 1
 
 
+def test_confirm_error_with_different_durable_evidence_is_never_upgraded(env):
+    _, _, ledger = env
+    real = ledger.confirm
+
+    def different(**kwargs):
+        kwargs["evidence"] = replace(kwargs["evidence"], evidence_ref="evidence:sha256:" + "d" * 64)
+        assert real(**kwargs) is True
+        raise OSError("lost")
+
+    ledger.confirm = different
+    result, browser = runtime_run(env)
+    assert result.status == "SUBMITTED_UNCONFIRMED" and not result.applied and browser.clicks == 1
+
+
 def test_confirm_error_with_unreadable_state_is_never_upgraded(env):
     _, _, ledger = env
     real = ledger.confirm
 
     def broken(**kwargs):
         real(**kwargs)
-        ledger.status = lambda *a, **k: (_ for _ in ()).throw(OSError("unreadable"))
+        ledger.attempt_outcome = lambda *a, **k: (_ for _ in ()).throw(OSError("unreadable"))
         raise OSError("lost")
 
     ledger.confirm = broken
@@ -267,7 +282,8 @@ def test_interrupted_after_start_commit_is_recovered_as_unconfirmed(setup):
     ids = dict(opportunity_key="opp:example:sr:744000000000001", requisition_id="REF001",
                profile_version="profile-2026-11-16")
     from tests.test_execution_manifest import NOW
-    assert ledger.reserve(**ids, execution_id="exec-20261117-example-1", manifest_sha256="a" * 64,
+    assert ledger.reserve(**ids, execution_id="exec-20261117-example-1",
+                          manifest_sha256=hashlib.sha256(encode(doc)).hexdigest(),
                           rollout_stage="R4", daily_cap=None, now=NOW) == "RESERVED"
     commit_then_raise(ledger, "mark_started")
     with pytest.raises(SubmissionLedgerError):
@@ -277,3 +293,40 @@ def test_interrupted_after_start_commit_is_recovered_as_unconfirmed(setup):
     private_write(root / "processing" / "a.json", encode(doc))
     assert [r.status for r in queue.run_once()] == ["SUBMITTED_UNCONFIRMED"]
     assert made == []
+
+
+@pytest.mark.parametrize("changed_execution", (False, True))
+def test_recovery_never_projects_a_confirmation_to_a_different_manifest(setup, changed_execution):
+    root, cv_dir, ledger, doc = setup
+    queue, made = make_queue(root, cv_dir, ledger, doc)
+    enable(root)
+    private_write(root / "inbox" / "a.json", encode(doc))
+    assert queue.run_once()[0].status == "EMPLOYER_CONFIRMED"
+
+    if changed_execution:
+        doc["execution_id"] = "another-synthetic-execution"
+    raw = encode(doc) + b"\n"
+    private_write(root / "processing" / "b.json", raw)
+    assert queue.run_once()[0].status == "INTERRUPTED"
+    latest = next(row for row in results(root).values()
+                  if row["manifest_sha256"] == hashlib.sha256(raw).hexdigest())
+    assert latest["status"] == "INTERRUPTED" and latest["evidence_ref"] is None
+    assert sum(browser.clicks for browser in made) == 1
+
+
+def test_pending_recovery_cannot_be_overwritten_by_same_named_inbox_item(setup, monkeypatch):
+    root, cv_dir, ledger, doc = setup
+    queue, made = make_queue(root, cv_dir, ledger, doc)
+    enable(root)
+    claimed = root / "processing" / "a.json"
+    incoming = root / "inbox" / "a.json"
+    raw = encode(doc)
+    private_write(claimed, raw)
+    private_write(incoming, raw + b"\n")
+
+    def write_failure(*args, **kwargs):
+        raise OSError("synthetic outbox failure")
+
+    monkeypatch.setattr(queue, "_emit", write_failure)
+    assert [r.code for r in queue.run_once()] == ["ENGINE_RECOVERY_FAILED", "ENGINE_PROCESSING_NAME_OCCUPIED"]
+    assert claimed.read_bytes() == raw and incoming.read_bytes() == raw + b"\n" and made == []

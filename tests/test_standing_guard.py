@@ -43,7 +43,7 @@ def digest(raw: bytes) -> str:
 
 
 URL_B = URL.replace("744000000000001", "744000000000002")
-ISSUED = NOW - timedelta(hours=1)
+ISSUED = NOW - timedelta(minutes=5)
 EXPIRES = NOW + timedelta(hours=23)
 
 

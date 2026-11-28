@@ -19,12 +19,13 @@ import hashlib
 import hmac
 import json
 import unicodedata
+from urllib.parse import urlsplit
 
-from ejs.services.current_fact_approval import MAX_REGISTRY_BYTES
+from ejs.services.current_fact_approval import MAX_REGISTRY_BYTES, MAX_SNAPSHOT_BYTES
 from ejs.services.detail_verification import LIVE_ORIGIN, MAX_LINE, SCHEMA_HANDOFF
 from ejs.services.execution_manifest import (
     _EVIDENCE_REF, _HEX_64, _OPAQUE, _TARGET_KEYS, _exact_object, _reject_constant,
-    _strict_int, _unique_pairs, _utc, load_execution_manifest,
+    _opaque, _strict_int, _unique_pairs, _utc, _validate_target, load_execution_manifest,
 )
 from ejs.services.single_application_inputs import _EXPLICIT_SOURCE
 from ejs.services.suitability import _COUNTRY_NAMES
@@ -61,6 +62,15 @@ class EligibilityResult:
     """Pins for the caller's manifest recompilation; not an execution capability."""
     execution_id: str
     snapshot_sha256: str
+
+
+@dataclass(frozen=True, repr=False)
+class BoundVacancy:
+    employer_display_name: str
+    handoff_rank: int
+    detail_sha256: str
+    observed_at: datetime
+    mandatory_lines: tuple[str, ...]
 
 
 def _require(condition: object) -> None:
@@ -135,7 +145,12 @@ def _inventory(raw: bytes, profile: str, now: datetime) -> tuple[dict, dict]:
     return by_text, refs
 
 
-def _employer_lines(raw: bytes, manifest, now: datetime) -> tuple[list[str], datetime]:
+def _employer_vacancy(raw: bytes, target: dict, now: datetime) -> BoundVacancy:
+    _require(isinstance(now, datetime) and now.utcoffset() == timedelta(0))
+    target = _validate_target(target)
+    tenant = target["company"]
+    _require(target["ats_family"] == _ATS
+             and urlsplit(target["apply_url"]).path.split("/")[1] == tenant)
     handoff = _load(raw)
     _require(type(handoff) is dict and handoff.get("schema") == SCHEMA_HANDOFF
              and handoff.get("evidence_origin") == LIVE_ORIGIN
@@ -145,14 +160,17 @@ def _employer_lines(raw: bytes, manifest, now: datetime) -> tuple[list[str], dat
              and handoff.get("submit_authorized") is False)
     candidates = handoff.get("candidates")
     _require(type(candidates) is list)
-    identity = (_ATS, manifest.company, manifest.posting_id, manifest.requisition_id,
-                manifest.apply_url)
-    matches = [c for c in candidates if type(c) is dict and (
-        c.get("ats"), c.get("company"), c.get("posting_id"), c.get("requisition_id"),
-        c.get("canonical_url")) == identity]
+    matches = [c for c in candidates if type(c) is dict and c.get("ats") == _ATS
+               and c.get("posting_id") == target["posting_id"]
+               and (c.get("tenant") == tenant or c.get("canonical_url") == target["apply_url"])]
     _require(len(matches) == 1)
     candidate = matches[0]
-    _require(candidate.get("status") == "candidate_for_review"
+    display_name, rank = candidate.get("company"), candidate.get("handoff_rank")
+    _require(candidate.get("region") == "global" and candidate.get("tenant") == tenant
+             and candidate.get("requisition_id") == target["requisition_id"]
+             and candidate.get("canonical_url") == target["apply_url"]
+             and _line(display_name) and type(rank) is int and rank > 0
+             and candidate.get("status") == "candidate_for_review"
              and candidate.get("status_reasons") == []
              and candidate.get("evidence_origin") == LIVE_ORIGIN
              and _digest(candidate.get("detail_sha256")))
@@ -162,7 +180,30 @@ def _employer_lines(raw: bytes, manifest, now: datetime) -> tuple[list[str], dat
     # An empty list is not "no requirements": F05 may simply have found none.
     _require(type(lines) is list and 0 < len(lines) <= MAX_LINES
              and all(map(_line, lines)) and len(set(lines)) == len(lines))
-    return lines, observed
+    return BoundVacancy(display_name, rank, candidate["detail_sha256"], observed, tuple(lines))
+
+
+def bind_f05_vacancy(handoff_raw: bytes, target: dict, *, expected_handoff_sha256: str,
+                    now: datetime) -> BoundVacancy:
+    """Bind the exact manifest target to one row of an independently pinned F05 handoff.
+
+    SmartRecruiters manifest ``company`` is the ATS tenant. The employer's display
+    name comes from the pinned row. The manifest's opportunity key remains bound by
+    the separately reviewed template and snapshot. This check does no I/O.
+    """
+    try:
+        _pinned(handoff_raw, expected_handoff_sha256)
+        return _employer_vacancy(handoff_raw, target, now)
+    except (PermissionError, ValueError, TypeError, KeyError, AttributeError,
+            OverflowError, RecursionError):
+        pass
+    del handoff_raw, target, expected_handoff_sha256, now
+    raise PermissionError(ERROR) from None
+
+
+def _employer_lines(raw: bytes, manifest, now: datetime) -> tuple[tuple[str, ...], datetime]:
+    vacancy = _employer_vacancy(raw, {key: getattr(manifest, key) for key in _TARGET_KEYS}, now)
+    return vacancy.mandatory_lines, vacancy.observed_at
 
 
 def _attested_country(raw: bytes, manifest, handoff_sha256: str, observed: datetime,
@@ -189,6 +230,74 @@ def recompute(text: str, by_text: dict) -> tuple[str, str | None]:
     if entry is None:
         return "unknown", None
     return ("met" if entry["held"] else "unmet"), entry["key"]
+
+
+def _check_evidence_texts(manifest, refs: dict) -> None:
+    for field in manifest.fields:
+        if field.answer.mode == "Evidence Text":
+            pin = refs.get(field.answer.source_ref)
+            _require(pin is not None and hmac.compare_digest(
+                pin, hashlib.sha256(field.answer.value.encode("utf-8")).hexdigest()))
+
+
+def _draft_package(inventory_raw, handoff_raw, attestation_raw, manifest_raw, snapshot_raw, *,
+                   expected_inventory_sha256, envelope_id, generation, now) -> bytes:
+    _require(isinstance(now, datetime) and now.utcoffset() == timedelta(0))
+    _require(_opaque(envelope_id))
+    _strict_int(generation, 1, 2**63 - 1)
+    _pinned(inventory_raw, expected_inventory_sha256)
+    _require(all(type(raw) is bytes and 0 < len(raw) <= MAX_REGISTRY_BYTES
+                 for raw in (handoff_raw, attestation_raw)))
+    _require(type(snapshot_raw) is bytes and 0 < len(snapshot_raw) <= MAX_SNAPSHOT_BYTES)
+    manifest = load_execution_manifest(manifest_raw, now=now)
+    _require(manifest.ats_family == _ATS and manifest.pass_kind == "submit")
+    by_text, refs = _inventory(inventory_raw, manifest.candidate_profile_version, now)
+    lines, observed = _employer_lines(handoff_raw, manifest, now)
+    handoff_sha256 = hashlib.sha256(handoff_raw).hexdigest()
+    country = _attested_country(attestation_raw, manifest, handoff_sha256, observed, now)
+    _check_evidence_texts(manifest, refs)
+
+    rows = []
+    for line in lines:
+        result, key = recompute(line, by_text)
+        _require(result == "met")
+        rows.append(dict(text=line, result=result, inventory_key=key))
+    package = dict(schema_version=PACKAGE_SCHEMA, envelope_id=envelope_id, generation=generation,
+                   execution_id=manifest.execution_id,
+                   candidate_profile_version=manifest.candidate_profile_version, country=country,
+                   target={key: getattr(manifest, key) for key in _TARGET_KEYS},
+                   matching_rule_version=MATCHING_RULE, inventory_sha256=expected_inventory_sha256,
+                   handoff_sha256=handoff_sha256,
+                   snapshot_sha256=hashlib.sha256(snapshot_raw).hexdigest(),
+                   country_attestation_sha256=hashlib.sha256(attestation_raw).hexdigest(),
+                   requirements=rows)
+    raw = json.dumps(package, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    _require(len(raw) <= MAX_REGISTRY_BYTES)
+    return raw
+
+
+def draft_eligibility_package(
+    inventory_raw: bytes, handoff_raw: bytes, attestation_raw: bytes, manifest_raw: bytes,
+    snapshot_raw: bytes, *, expected_inventory_sha256: str, envelope_id: str,
+    generation: int, now: datetime,
+) -> bytes:
+    """Prepare reviewable package bytes from supplied inputs, without I/O.
+
+    The caller supplies the owner-reviewed inventory pin and a vacancy-country
+    attestation. Review must establish genuine employer provenance and attestation
+    authorship. The returned bytes do not publish an index or authorize admission.
+    Only standing admission verifies the root pins and exact recompilation.
+    """
+    try:
+        return _draft_package(inventory_raw, handoff_raw, attestation_raw, manifest_raw, snapshot_raw,
+                              expected_inventory_sha256=expected_inventory_sha256,
+                              envelope_id=envelope_id, generation=generation, now=now)
+    except (PermissionError, ValueError, TypeError, KeyError, AttributeError,
+            OverflowError, RecursionError):
+        pass
+    del inventory_raw, handoff_raw, attestation_raw, manifest_raw, snapshot_raw
+    del expected_inventory_sha256, envelope_id, generation, now
+    raise PermissionError(ERROR) from None
 
 
 def _evaluate(package_raw, inventory_raw, handoff_raw, attestation_raw, manifest_raw, *,
@@ -231,11 +340,7 @@ def _evaluate(package_raw, inventory_raw, handoff_raw, attestation_raw, manifest
         # The file's claim never decides; it must equal the recomputation.
         _require(row["result"] == result and row["inventory_key"] == key and result == "met")
 
-    for field in manifest.fields:
-        if field.answer.mode == "Evidence Text":
-            pin = refs.get(field.answer.source_ref)
-            _require(pin is not None and hmac.compare_digest(
-                pin, hashlib.sha256(field.answer.value.encode("utf-8")).hexdigest()))
+    _check_evidence_texts(manifest, refs)
     return EligibilityResult(manifest.execution_id, package["snapshot_sha256"])
 
 

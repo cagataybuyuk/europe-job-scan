@@ -21,6 +21,7 @@ ERROR = "STANDING_ENVELOPE_REVIEW_REQUIRED"
 ENVELOPE_SCHEMA = "EJS-STANDING-ENVELOPE-1"
 POINTER_SCHEMA = "EJS-STANDING-ENVELOPE-POINTER-1"
 INDEX_SCHEMA = "EJS-BATCH-ELIGIBILITY-INDEX-1"
+MAX_STANDING_TARGETS = 5
 
 _APPROVAL_ROOT = Path("/Library/Application Support/EJS/approval")
 _SOURCES = (
@@ -114,6 +115,11 @@ def _record(raw: bytes, schema: str, keys: frozenset[str]) -> dict:
     return doc
 
 
+def canonical_posting_identity(target: dict[str, str]) -> tuple[str, str, str]:
+    """Return the canonical ATS tenant and posting identity for duplicate checks."""
+    return target["ats_family"], target["company"].casefold(), target["posting_id"]
+
+
 def _check_scope(envelope: dict, inputs: BatchInputs, now: datetime) -> str:
     _require(envelope["status"] == "active" and envelope["policy_version"] == POLICY_VERSION
              and envelope["ats_family"] == _ATS and envelope["daily_timezone"] == _DAY_TIMEZONE)
@@ -132,14 +138,18 @@ def _check_scope(envelope: dict, inputs: BatchInputs, now: datetime) -> str:
     _require(issued <= now < expires and expires - issued <= timedelta(hours=24))
 
     locations = envelope["targets"]
-    _require(type(locations) is list and locations)
+    _require(type(locations) is list and 0 < len(locations) <= MAX_STANDING_TARGETS)
     targets = set()
+    postings = set()
     for row in locations:
         target = _validate_target(row)
         identity = tuple(sorted(target.items()))
-        _require(target["ats_family"] == _ATS and identity not in targets)
+        posting = canonical_posting_identity(target)
+        _require(target["ats_family"] == _ATS and identity not in targets and posting not in postings)
         targets.add(identity)
+        postings.add(posting)
     manifest = load_execution_manifest(inputs.manifest, now=now)
+    _require(manifest.observed_at <= issued and manifest.prepared_at <= issued)
     _require(manifest.pass_kind == "submit" and manifest.ats_family == _ATS
              and manifest.rollout_stage in stages and manifest.daily_cap is not None
              and manifest.daily_cap <= cap and manifest.expires_at <= expires

@@ -411,8 +411,13 @@ class PolicyApplicationRuntime:
                 confirmed = self.ledger.confirm(**self._ids(m), evidence=evidence, now=self.clock())
             except Exception:
                 # The row may have committed before the error: follow the ledger. Evidence above
-                # is already exact and verified; an unreadable or other state stays unconfirmed.
-                confirmed = self._ledger_state(m) == CONFIRMED
+                # must match the exact manifest and the acknowledgement verified by this run.
+                try:
+                    outcome = self.ledger.attempt_outcome(**self._ids(m), manifest_sha256=m.sha256)
+                    confirmed = (outcome is not None and outcome.status == CONFIRMED
+                                 and outcome.evidence_ref == evidence.evidence_ref)
+                except Exception:
+                    confirmed = False
             _require(confirmed is True, "POLICY_APP_CONFIRMATION_UNVERIFIED")
             return RunResult("EMPLOYER_CONFIRMED", submit_clicks=1, evidence_ref=evidence.evidence_ref)
         except BaseException as error:  # noqa: BLE001 - every exit must leave a consistent ledger

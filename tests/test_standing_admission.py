@@ -149,7 +149,7 @@ class World:
             manifest = self.manifest
         envelope = dict(
             schema_version="EJS-STANDING-ENVELOPE-1", envelope_id="env-synthetic-1",
-            generation=3, status="active", issued_at=(NOW - timedelta(hours=1)).isoformat(),
+            generation=3, status="active", issued_at=(NOW - timedelta(minutes=5)).isoformat(),
             expires_at=(NOW + timedelta(hours=23)).isoformat(), policy_version="SUBMIT-1.0",
             candidate_profile_version="profile-2026-11-16", ats_family="smartrecruiters",
             country=COUNTRY, targets=[deepcopy(self.template["target"])], rollout_stages=["R2"],
@@ -209,6 +209,89 @@ def test_admission_is_pure_and_does_not_touch_the_filesystem(monkeypatch):
     for name in ("open", "stat", "lstat", "listdir", "scandir"):
         monkeypatch.setattr(os, name, forbidden)
     assert admit_standing_batch(*built, now=NOW)
+
+
+def test_matches_employer_display_name_to_exact_ats_tenant_vacancy():
+    world = World()
+    name = "Example Research & Consulting GmbH"
+    world.handoff["candidates"][0]["company"] = name
+    handoff = encode(world.handoff)
+    bound = inventory_eligibility.bind_f05_vacancy(
+        handoff, world.template["target"], expected_handoff_sha256=digest(handoff), now=NOW)
+    assert bound.employer_display_name == name
+    assert bound.mandatory_lines == tuple(LINES)
+    args = _draft_inputs(world)
+    world.package = inventory_eligibility.draft_eligibility_package(**args)
+    assert admit(world).execution_id == world.template["execution_id"]
+
+
+@pytest.mark.parametrize("changes", (
+    {"tenant": "WrongTenant"}, {"posting_id": "744000000000009"},
+    {"requisition_id": "wrong-requisition"}, {"region": "eu"}, {"company": ""},
+))
+def test_f05_binding_requires_exact_vacancy_identity(changes):
+    world = World()
+    world.handoff["candidates"][0].update(changes)
+    raw = encode(world.handoff)
+    with pytest.raises(PermissionError, match=inventory_eligibility.ERROR):
+        inventory_eligibility.bind_f05_vacancy(
+            raw, world.template["target"], expected_handoff_sha256=digest(raw), now=NOW)
+    reject(world)
+
+
+def test_f05_binding_rejects_stale_pin_and_company_slug_conflict():
+    world = World()
+    original = encode(world.handoff)
+    world.handoff["candidates"][0]["company"] = "Different Display Name"
+    raw = encode(world.handoff)
+    target = world.template["target"]
+    for supplied, pin in ((target, digest(original)), (dict(target, company="OtherTenant"), digest(raw))):
+        with pytest.raises(PermissionError, match=inventory_eligibility.ERROR):
+            inventory_eligibility.bind_f05_vacancy(raw, supplied, expected_handoff_sha256=pin, now=NOW)
+
+
+def _draft_inputs(world):
+    _, _, snapshot, inventory, handoff, _ = world.raw()
+    _, inputs, evidence = world.build()
+    return dict(inventory_raw=inventory, handoff_raw=handoff,
+                attestation_raw=evidence.country_attestation, manifest_raw=inputs.manifest,
+                snapshot_raw=snapshot, expected_inventory_sha256=digest(inventory),
+                envelope_id="env-synthetic-1", generation=3, now=NOW)
+
+
+def test_eligibility_draft_is_deterministic_and_round_trips_through_standing_admission():
+    world = World()
+    args = _draft_inputs(world)
+    draft = inventory_eligibility.draft_eligibility_package
+    world.package = raw = draft(**args)
+    assert raw == draft(**args)
+    assert json.loads(raw)["requirements"] == json.loads(World().raw()[-1])["requirements"]
+    assert admit_standing_batch(*world.build(), now=NOW).execution_id == world.template["execution_id"]
+
+
+@pytest.mark.parametrize("problem", ("unknown", "unmet", "synthetic", "stale", "wrong-attestation",
+                                     "unresolved-text", "inventory-pin", "oversize-snapshot"))
+def test_eligibility_draft_rejects_unreviewable_inputs(problem):
+    world = World()
+    if problem == "unknown":
+        world.inventory["entries"][1]["requirement_texts"] = ["Unrelated synthetic text"]
+    elif problem == "unmet":
+        world.inventory["entries"][1]["held"] = False
+    elif problem == "synthetic":
+        world.handoff["evidence_origin"] = "offline_replay_synthetic"
+    elif problem == "stale":
+        world.handoff["candidates"][0]["observed_at"] = (NOW - timedelta(days=3)).isoformat()
+    elif problem == "unresolved-text":
+        world.inventory["evidence_texts"] = []
+    args = _draft_inputs(world)
+    if problem == "wrong-attestation":
+        args["attestation_raw"] = encode(dict(json.loads(args["attestation_raw"]), source_ref="sha256:" + "0" * 64))
+    elif problem == "inventory-pin":
+        args["expected_inventory_sha256"] = "0" * 64
+    elif problem == "oversize-snapshot":
+        args["snapshot_raw"] = b"x" * (inventory_eligibility.MAX_SNAPSHOT_BYTES + 1)
+    with pytest.raises(PermissionError, match=f"^{inventory_eligibility.ERROR}$"):
+        inventory_eligibility.draft_eligibility_package(**args)
 
 
 def test_does_not_use_the_24_hour_current_fact_approval_verifier():
@@ -758,3 +841,42 @@ def test_validator_rejects_unconfigured_or_mismatched_caller_values(override):
     with pytest.raises(PermissionError, match="^ELIGIBILITY_REVIEW_REQUIRED$") as error:
         direct(World(), **override)
     assert error.value.__cause__ is error.value.__context__ is None
+
+
+# --- R1 & R2 remediation regressions --------------------------------------------------------
+
+def test_admission_independently_rejects_envelope_issued_before_authorized_timestamps():
+    # Before attestation (ATTESTED = OBSERVED + 10m = 04:50, PREPARED = 04:45).
+    world = World()
+    world.envelope["issued_at"] = (ATTESTED - timedelta(seconds=1)).isoformat()
+    reject(world)
+
+    # Before snapshot issuance.
+    world = World()
+    world.snapshot["issued_at"] = (NOW - timedelta(minutes=10)).isoformat()
+    world.envelope["issued_at"] = (NOW - timedelta(minutes=10, seconds=1)).isoformat()
+    reject(world)
+
+    # Before manifest preparation.
+    world = World()
+    world.envelope["issued_at"] = (PREPARED - timedelta(seconds=1)).isoformat()
+    reject(world)
+
+    # Before F05 evidence observation.
+    world = World()
+    world.envelope["issued_at"] = (OBSERVED - timedelta(seconds=1)).isoformat()
+    reject(world)
+
+
+@pytest.mark.parametrize("duplicate", (
+    dict(company="exampleco"),
+    dict(apply_url="https://jobs.smartrecruiters.com/ExampleCo/744000000000001-senior-analyst"),
+    dict(apply_url="https://jobs.smartrecruiters.com/ExampleCo/744000000000001/"),
+))
+def test_admission_independently_rejects_duplicate_canonical_vacancy_targets(duplicate):
+    world = World()
+    base = deepcopy(world.template["target"])
+    extra = deepcopy(base)
+    extra.update(duplicate)
+    world.envelope["targets"] = [base, extra]
+    reject(world)

@@ -39,7 +39,7 @@ import secrets
 import stat
 from typing import Callable
 
-from ejs.persistence.policy_submission_ledger import PolicySubmissionLedger
+from ejs.persistence.policy_submission_ledger import AWAITING, CONFIRMED, RESERVED, STARTED, PolicySubmissionLedger
 from ejs.services.policy_application_runtime import PolicyApplicationRuntime, RunResult
 from ejs.services.policy_submission import RuntimeSwitch
 from ejs.services.standing_guard import PACKAGES, StandingRun
@@ -296,27 +296,31 @@ class EngineQueue:
                 continue
             raw = b""
             status = "INTERRUPTED"
+            evidence_ref = ""
             try:
                 raw = _read_private(path, MAX_MANIFEST_BYTES)
                 document = json.loads(raw)  # ids only; an expired manifest must still be reported
-                state = self.ledger.status(document["target"]["opportunity_key"],
-                                           document["target"]["requisition_id"],
-                                           document["candidate_profile_version"])
-                if state in ("Submitted / Unconfirmed", "Confirmed"):
-                    status = "SUBMITTED_UNCONFIRMED" if state != "Confirmed" else "EMPLOYER_CONFIRMED"
-                elif state == "Awaiting User":
+                identity = dict(opportunity_key=document["target"]["opportunity_key"],
+                                requisition_id=document["target"]["requisition_id"],
+                                profile_version=document["candidate_profile_version"],
+                                execution_id=document["execution_id"])
+                outcome = self.ledger.attempt_outcome(**identity, manifest_sha256=hashlib.sha256(raw).hexdigest())
+                state = None if outcome is None else outcome.status
+                if state == CONFIRMED and outcome.evidence_ref:
+                    status, evidence_ref = "EMPLOYER_CONFIRMED", outcome.evidence_ref
+                elif state == STARTED:
+                    status = "SUBMITTED_UNCONFIRMED"
+                elif state == AWAITING:
                     status = "OWNER_CHECK_REQUIRED"  # the owner may have submitted by hand
-                elif state == "Reserved":
+                elif state == RESERVED:
                     try:  # no click happened; refused for rows the owner handled
-                        self.ledger.release(opportunity_key=document["target"]["opportunity_key"],
-                                            requisition_id=document["target"]["requisition_id"],
-                                            profile_version=document["candidate_profile_version"],
-                                            execution_id=document["execution_id"], now=self.clock())
+                        self.ledger.release(**identity, now=self.clock())
                     except Exception:
                         status = "OWNER_CHECK_REQUIRED"
             except Exception:
                 pass  # expired or unreadable: still reported as INTERRUPTED
-            result = RunResult(status, "ENGINE_INTERRUPTED", submit_clicks=0 if status == "INTERRUPTED" else -1)
+            result = RunResult(status, "ENGINE_INTERRUPTED", submit_clicks=0 if status == "INTERRUPTED" else -1,
+                               evidence_ref=evidence_ref)
             try:
                 self._emit(raw or path.name.encode(), result)
                 self._archive(path)
@@ -333,6 +337,9 @@ class EngineQueue:
             inbox = sorted(p for p in (self.root / "inbox").iterdir() if _NAME.fullmatch(p.name))
             for path in inbox[:MAX_ITEMS_PER_RUN]:
                 claimed = self.root / "processing" / path.name
+                if os.path.lexists(claimed):
+                    reports.append(ItemReport(path.name, "STUCK", "ENGINE_PROCESSING_NAME_OCCUPIED"))
+                    continue
                 try:
                     _owner_only(path, directory=False)
                     os.rename(path, claimed)  # atomic claim

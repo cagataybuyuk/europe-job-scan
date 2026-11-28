@@ -22,6 +22,7 @@ released automatically. This module performs no browser or network I/O.
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import hashlib
 import re
@@ -63,6 +64,12 @@ TABLE_SQL = ("CREATE TABLE policy_submissions ("
                "owner_handoff INTEGER NOT NULL DEFAULT 0 CHECK(owner_handoff IN (0,1)),"
              + ",".join(name + " TEXT" for name in _TIMES)
              + ",started_day TEXT,evidence_type TEXT,evidence_ref TEXT)")
+
+
+@dataclass(frozen=True)
+class AttemptOutcome:
+    status: str
+    evidence_ref: str | None
 
 
 def _require(condition: object) -> None:
@@ -224,6 +231,19 @@ class PolicySubmissionLedger:
             row = connection.execute("SELECT status FROM policy_submissions WHERE submit_key_sha256=?",
                                      (key_hash,)).fetchone()
             return None if row is None else row["status"]
+
+    def attempt_outcome(self, *, opportunity_key: str, requisition_id: str, profile_version: str,
+                        execution_id: str, manifest_sha256: str) -> AttemptOutcome | None:
+        """Read the durable status and evidence of one exact execution and manifest."""
+        key_hash, _ = _identity(opportunity_key, requisition_id, profile_version)
+        _require(type(execution_id) is str and _EXECUTION.fullmatch(execution_id)
+                 and type(manifest_sha256) is str and _HEX.fullmatch(manifest_sha256))
+        with self._legacy._transaction() as connection:
+            row = connection.execute(
+                "SELECT status,evidence_ref FROM policy_submissions "
+                "WHERE submit_key_sha256=? AND execution_id_sha256=? AND manifest_sha256=?",
+                (key_hash, _hash(execution_id), manifest_sha256)).fetchone()
+            return None if row is None else AttemptOutcome(row["status"], row["evidence_ref"])
 
     # ---- transitions -------------------------------------------------------------
 
